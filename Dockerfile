@@ -46,12 +46,14 @@ RUN apt remove -y \
     2>/dev/null || true \
     && apt-get autoremove -y
 
-COPY ./src/postinstall /
 RUN apt install -y \
         systemd-zram-generator \
         dnsmasq \
-        resolvconf \
-    && echo "vm.swappiness = 1" >> /etc/sysctl.conf \
+        resolvconf
+
+COPY ./src/postinstall /
+
+RUN echo "vm.swappiness = 1" >> /etc/sysctl.conf \
     && chmod +x /usr/local/bin/* \
     && removepvepopup \
     && rm -f /etc/apt/sources.list.d/pve-install-repo.sources
