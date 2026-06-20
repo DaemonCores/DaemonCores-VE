@@ -126,7 +126,7 @@ RUN echo "vm.swappiness = 1" >> /etc/sysctl.conf \
     && rm -f /etc/apt/sources.list.d/pve-install-repo.sources
 
 # Clean and purge image
-RUN && apt autoremove -y \
+RUN apt autoremove -y \
     && apt clean \
     && rm -rf \
         /var/lib/apt/lists/* \
