@@ -55,6 +55,7 @@ RUN --mount=type=tmpfs,dst=/tmp \
     && git clone --depth=1 --branch v1.8.0 \
         https://github.com/bootc-dev/bootc.git /tmp/bootc \
     && . ${RUSTUP_HOME}/env \
+    && cargo build --release --manifest-path /tmp/bootc/Cargo.toml \
     && mkdir -p /pkg \
     && checkinstall \
         --pkgname=bootc \
