@@ -1,16 +1,51 @@
 FROM debian:trixie
 
+# Environement Setup
 LABEL org.opencontainers.image.title="Proxmox VE"
 LABEL org.opencontainers.image.description="Proxmox VE 9 bootc — Debian 13 Trixie"
 LABEL org.opencontainers.image.base.name="docker.io/library/debian:trixie"
 
-ENV DEBIAN_FRONTEND=noninteractive
+ENV DEBIAN_FRONTEND=noninteractive \
+    CARGO_HOME=/tmp/rust \
+    RUSTUP_HOME=/tmp/rust
 
-RUN apt update \
+SHELL ["/bin/bash", "-c"]
+
+# Bootc filesystem migrations
+RUN cp /{home,mnt,srv,opt} /var/ \
+    && cp /root /var/roothome \
+    && rm -rf /{home,root,mnt,srv,opt}  \
+    && ln -s /var/{home,mnt,srv,opt} / \
+    && ln -s  /var/roothome /root \
+
+# Bootc build and install
+RUN --mount=type=tmpfs,dst=/tmp \
+    apt update \
     && apt install -y \
-        wget \
-        curl
+        git \
+        curl \
+        wget
+        make \
+        build-essential \
+        go-md2man \
+        libzstd-dev \
+        pkgconf \
+        libostree-dev \
+        ostree \
+        dracut
 
+
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- --profile minimal -y \
+    && git clone https://github.com/bootc-dev/bootc.git /tmp/bootc \
+    && . ${RUSTUP_HOME}/env && make -C /tmp/bootc bin install-all
+
+COPY ./src/bootcinstall /
+RUN dracut --force \
+        "$(find /usr/lib/modules -maxdepth 1 -type d | tail -n 1)/initramfs.img"
+
+# Proxmox kernel setup
 COPY ./src/preinstall /
 
 RUN rm -f /etc/apt/sources.list \
@@ -29,6 +64,7 @@ RUN apt update \
     && apt full-upgrade -y \
     && apt install -y proxmox-default-kernel
 
+# Proxmox VE setup
 RUN echo "postfix postfix/main_mailer_type string Local only" | debconf-set-selections \
     && echo "postfix postfix/mailname string proxmox.local" | debconf-set-selections \
     && echo "grub-pc grub-pc/install_devices string /dev/sda" | debconf-set-selections \
@@ -50,6 +86,7 @@ RUN apt install -y \
         systemd-zram-generator \
         dnsmasq
 
+# Optimisations setup
 COPY ./src/postinstall /
 
 RUN echo "vm.swappiness = 1" >> /etc/sysctl.conf \
@@ -57,11 +94,19 @@ RUN echo "vm.swappiness = 1" >> /etc/sysctl.conf \
     && removepvepopup \
     && rm -f /etc/apt/sources.list.d/pve-install-repo.sources
 
-RUN apt install -y \
-        bootc \
+# Clean and purge image
+RUN apt purge -y \
+        make \
+        build-essential \
+        go-md2man \
+        libzstd-dev \
+        pkgconf \
+        libostree-dev \
+    && apt autoremove -y \
     && apt clean \
     && rm -rf \
         /var/lib/apt/lists/* \
         /tmp/* \
         /var/tmp/* \
+        /tmp/bootc \
         /usr/sbin/policy-rc.d
