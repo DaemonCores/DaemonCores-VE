@@ -97,7 +97,7 @@ RUN --mount=type=tmpfs,dst=/tmp \
         --pakdir=/pkg \
         --install=no \
         --default \
-        make -C /tmp/bootc install-all
+        make -j$(nproc) -C /tmp/bootc install-all
 
 #####################################################################################
 # Final image
