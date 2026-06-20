@@ -70,7 +70,7 @@ RUN --mount=type=tmpfs,dst=/tmp \
 #####################################################################################
 FROM base AS final
 
-COPY --from=bootc-builder /tmp/pkg/bootc_*.deb /tmp/
+COPY --from=bootc-builder /pkg/bootc_*.deb /tmp/
 RUN dpkg -i /tmp/bootc_*.deb && rm /tmp/bootc_*.deb
 
 # Proxmox kernel setup
