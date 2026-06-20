@@ -33,7 +33,7 @@ iface vmbr1 inet static
 
 # VMBR10 : Default LAN / Test Internet
 auto vmbr10
-iface vmbr00 inet static
+iface vmbr10 inet static
         address         10.100.100.10/24
         bridge-ports    none
         bridge-stp      off
