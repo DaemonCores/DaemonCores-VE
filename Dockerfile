@@ -91,7 +91,7 @@ RUN --mount=type=tmpfs,dst=/tmp \
     && . ${RUSTUP_HOME}/env \
     && checkinstall \
         --pkgname=bootc \
-        --pkgversion="$(grep '^version' /tmp/bootc/Cargo.toml | head -1 | cut -d'"' -f2)" \
+        --pkgversion="${BOOTC_VER}" \
         --pkglicense=LGPL \
         --pakdir=/tmp/pkg \
         --install=no \
