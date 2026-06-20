@@ -11,11 +11,9 @@ RUN rm -f /etc/apt/sources.list \
     && chmod +x \
         /usr/sbin/policy-rc.d \
         /usr/local/bin/pve-domain-set \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends wget ca-certificates \
-    && wget \
+    && curl \
+        -o /usr/share/keyrings/proxmox-archive-keyring.gpg \
         https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg \
-        -O /usr/share/keyrings/proxmox-archive-keyring.gpg \
     && mkdir -p /etc/systemd/system/multi-user.target.wants \
     && ln -sf /etc/systemd/system/pve-domain-set.service \
         /etc/systemd/system/multi-user.target.wants/pve-domain-set.service \
