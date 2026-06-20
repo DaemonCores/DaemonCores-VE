@@ -30,9 +30,7 @@ RUN rm -f /etc/apt/sources.list \
         git \
         curl \
         wget \
-        dracut \
-        libostree-dev \
-        ostree
+        dracut
 
 #####################################################################################
 # Bootc build image
