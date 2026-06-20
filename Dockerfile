@@ -23,7 +23,7 @@ RUN apt update \
     && apt full-upgrade -y \
     && apt install -y proxmox-default-kernel
 
-RUN && echo "postfix postfix/main_mailer_type string Local only" | debconf-set-selections \
+RUN echo "postfix postfix/main_mailer_type string Local only" | debconf-set-selections \
     && echo "postfix postfix/mailname string proxmox.local" | debconf-set-selections \
     && echo "grub-pc grub-pc/install_devices string /dev/sda" | debconf-set-selections \
     && echo "grub-pc grub-pc/install_devices_empty boolean true" | debconf-set-selections \
