@@ -1,0 +1,12 @@
+[Unit]
+Description=Proxmox VE - First boot config
+After=network.target\n\
+ConditionPathExists=!/var/lib/proxmox-firstboot-done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/proxmox-firstboot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

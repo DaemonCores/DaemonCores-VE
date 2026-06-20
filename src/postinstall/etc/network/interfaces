@@ -1,0 +1,51 @@
+source-directory /etc/network/interfaces.d
+
+
+# Loopback
+auto lo
+iface lo inet loopback
+
+# WAN
+auto {{ WAN_DEVICE }}
+iface {{ WAN_DEVICE }} inet dhcp
+    dns-nameservers 194.242.2.2 1.1.1.1
+iface {{ WAN_DEVICE }} inet6 dhcp
+    dns-nameservers 2a07:e340::2 2606:4700:4700::1111
+
+# VMBR0 : Default LAN / Prod Internet
+auto vmbr0
+iface vmbr0 inet static
+        address         10.10.10.10/24
+        bridge-ports    none
+        bridge-stp      off
+        bridge-fd       0
+        post-up         echo 1 > /proc/sys/net/ipv4/ip_forward
+        post-up         iptables -t nat -A POSTROUTING -s "10.10.10.0/24" -o {{ WAN_DEVICE }} -j MASQUERADE
+        post-down       iptables -t nat -D POSTROUTING -s "10.10.10.0/24" -o {{ WAN_DEVICE }} -j MASQUERADE
+
+# VMBR1 : Default LAN / Prod Offline
+auto vmbr1
+iface vmbr1 inet static
+        address         10.11.11.10/24
+        bridge-ports    none
+        bridge-stp      off
+        bridge-fd       0
+
+# VMBR10 : Default LAN / Test Internet
+auto vmbr10
+iface vmbr00 inet static
+        address         10.100.100.10/24
+        bridge-ports    none
+        bridge-stp      off
+        bridge-fd       0
+        post-up         echo 1 > /proc/sys/net/ipv4/ip_forward
+        post-up         iptables -t nat -A POSTROUTING -s "10.100.100.0/24" -o {{ WAN_DEVICE }} -j MASQUERADE
+        post-down       iptables -t nat -D POSTROUTING -s "10.100.100.0/24" -o {{ WAN_DEVICE }} -j MASQUERADE
+
+# VMBR11 : Default LAN / Test Offline
+auto vmbr11
+iface vmbr11 inet static
+        address         10.101.101.10/24
+        bridge-ports    none
+        bridge-stp      off
+        bridge-fd       0
