@@ -33,8 +33,6 @@ RUN --mount=type=tmpfs,dst=/tmp \
         ostree \
         dracut
 
-
-
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- --profile minimal -y \
     && git clone https://github.com/bootc-dev/bootc.git /tmp/bootc \
