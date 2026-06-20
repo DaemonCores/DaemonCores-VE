@@ -5,15 +5,21 @@ LABEL org.opencontainers.image.description="Proxmox VE 9 bootc — Debian 13 Tri
 LABEL org.opencontainers.image.base.name="docker.io/library/debian:trixie"
 
 ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt update \
+    && apt install -y \
+        wget \
+        curl
+
 COPY ./src/preinstall /
 
 RUN rm -f /etc/apt/sources.list \
     && chmod +x \
         /usr/sbin/policy-rc.d \
         /usr/local/bin/pve-domain-set \
-    && curl \
-        -o /usr/share/keyrings/proxmox-archive-keyring.gpg \
+    && wget \
         https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg \
+        -O /usr/share/keyrings/proxmox-archive-keyring.gpg \
     && mkdir -p /etc/systemd/system/multi-user.target.wants \
     && ln -sf /etc/systemd/system/pve-domain-set.service \
         /etc/systemd/system/multi-user.target.wants/pve-domain-set.service \
