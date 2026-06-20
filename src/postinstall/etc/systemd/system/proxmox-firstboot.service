@@ -1,6 +1,6 @@
 [Unit]
 Description=Proxmox VE - First boot config
-After=network.target\n\
+After=network.target
 ConditionPathExists=!/var/lib/proxmox-firstboot-done
 
 [Service]
