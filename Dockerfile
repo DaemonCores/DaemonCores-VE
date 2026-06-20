@@ -41,7 +41,6 @@ RUN rm -f /etc/apt/sources.list \
 FROM base AS bootc-builder
 
 # Prepare package
-COPY ./src/bootcpreinstall /
 RUN rm -f /etc/apt/sources.list \
     && apt update \
     && apt install -y \
@@ -58,11 +57,12 @@ RUN --mount=type=tmpfs,dst=/tmp \
         | sh -s -- --profile minimal -y \
     && git clone https://github.com/bootc-dev/bootc.git /tmp/bootc \
     && . ${RUSTUP_HOME}/env \
+    && mkdir -p /tmp/pkg \
     && checkinstall \
         --pkgname=bootc \
         --pkgversion="$(grep '^version' /tmp/bootc/Cargo.toml | head -1 | cut -d'"' -f2)" \
         --pkglicense=LGPL \
-        --pakdir=/pkg \
+        --pakdir=/tmp/pkg \
         --install=no \
         --default \
         make -C /tmp/bootc bin install-all
@@ -72,7 +72,7 @@ RUN --mount=type=tmpfs,dst=/tmp \
 #####################################################################################
 FROM base AS final
 
-COPY --from=bootc-builder /pkg/bootc_*.deb /tmp/
+COPY --from=bootc-builder /tmp/pkg/bootc_*.deb /tmp/
 RUN dpkg -i /tmp/bootc_*.deb && rm /tmp/bootc_*.deb
 
 # Proxmox kernel setup
