@@ -29,12 +29,8 @@ RUN rm -f /etc/apt/sources.list \
         curl \
         wget \
         dracut \
-    && sed -i "s|Suites: |Suites: testing |g" /etc/apt/sources.list.d/debian.sources \
-    && apt update \
-    && apt install -y -t testing \
         libostree-dev \
-        ostree \
-    && sed -i "s|Suites: testing |Suites: |g" /etc/apt/sources.list.d/debian.sources
+        ostree
 
 #####################################################################################
 # Bootc build image
@@ -56,7 +52,8 @@ RUN rm -f /etc/apt/sources.list \
 RUN --mount=type=tmpfs,dst=/tmp \
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- --profile minimal -y \
-    && git clone https://github.com/bootc-dev/bootc.git /tmp/bootc \
+    && git clone --depth=1 --branch v1.8.0 \
+        https://github.com/bootc-dev/bootc.git /tmp/bootc \
     && . ${RUSTUP_HOME}/env \
     && mkdir -p /tmp/pkg \
     && checkinstall \
