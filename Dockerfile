@@ -1,4 +1,7 @@
-FROM debian:trixie
+#####################################################################################
+# Base image
+#####################################################################################
+FROM debian:trixie AS base
 
 # Environement Setup
 LABEL org.opencontainers.image.title="Proxmox VE"
@@ -25,15 +28,43 @@ RUN rm -f /etc/apt/sources.list \
         git \
         curl \
         wget \
+        dracut
+
+#####################################################################################
+# Bootc build image
+#####################################################################################
+FROM base AS bootc-builder
+
+# Prepare package
+COPY ./src/bootcpreinstall /
+RUN rm -f /etc/apt/sources.list \
+    && apt update \
+    && apt install -y \
         make \
         build-essential \
         go-md2man \
         libzstd-dev \
         pkgconf \
-        dracut \
-    && apt install -y -t trixie-backports \
+    && sed -i "s|Suites: |Suites: testing |g" /etc/apt/sources.list.d/debian.sources \
+    && apt install -y -t testing \
         libostree-dev \
-        ostree
+        ostree \
+    && sed -i "s|Suites: testing |Suites: |g" /etc/apt/sources.list.d/debian.sources \
+
+# Bootc build and install
+RUN --mount=type=tmpfs,dst=/tmp \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- --profile minimal -y \
+    && git clone https://github.com/bootc-dev/bootc.git /tmp/bootc \
+    && . ${RUSTUP_HOME}/env && make -C /tmp/bootc bin install-all
+
+#####################################################################################
+# Bootc build image
+#####################################################################################
+FROM base AS final
+
+COPY --from=bootc-builder /usr/local/bin/bootc /usr/local/bin/
+COPY --from=bootc-builder /usr/lib/dracut/modules.d/60-bootc /usr/lib/dracut/modules.d/60-bootc
 
 # Proxmox kernel setup
 COPY ./src/pvepreinstall /
@@ -68,31 +99,22 @@ RUN apt remove -y \
         linux-image-amd64 \
         'linux-image-6.12*' \
         os-prober \
-    2>/dev/null || true \
-    && apt-get autoremove -y
-
-RUN apt install -y \
-        systemd-zram-generator \
-        dnsmasq
-
-# Optimisations setup
-COPY ./src/pvepostinstall /
-
-RUN echo "vm.swappiness = 1" >> /etc/sysctl.conf \
-    && chmod +x /usr/local/bin/* \
-    && removepvepopup \
-    && rm -f /etc/apt/sources.list.d/pve-install-repo.sources
-
-# Bootc build and install
-RUN --mount=type=tmpfs,dst=/tmp \
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- --profile minimal -y \
-    && git clone https://github.com/bootc-dev/bootc.git /tmp/bootc \
-    && . ${RUSTUP_HOME}/env && make -C /tmp/bootc bin install-all
+    2>/dev/null || true
 
 COPY ./src/bootcpostinstall /
 RUN dracut --force \
         "$(find /usr/lib/modules -maxdepth 1 -type d | tail -n 1)/initramfs.img"
+
+# Optimisations setup
+RUN apt install -y \
+        systemd-zram-generator \
+        dnsmasq
+
+COPY ./src/pvepostinstall /
+RUN echo "vm.swappiness = 1" >> /etc/sysctl.conf \
+    && chmod +x /usr/local/bin/* \
+    && removepvepopup \
+    && rm -f /etc/apt/sources.list.d/pve-install-repo.sources
 
 # Clean and purge image
 RUN apt purge -y \
