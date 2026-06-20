@@ -55,15 +55,15 @@ RUN --mount=type=tmpfs,dst=/tmp \
     && git clone --depth=1 --branch v1.8.0 \
         https://github.com/bootc-dev/bootc.git /tmp/bootc \
     && . ${RUSTUP_HOME}/env \
-    && mkdir -p /tmp/pkg \
+    && mkdir -p /pkg \
     && checkinstall \
         --pkgname=bootc \
-        --pkgversion="$(grep '^version' /tmp/bootc/Cargo.toml | head -1 | cut -d'"' -f2)" \
+        --pkgversion=1.8.0 \
         --pkglicense=LGPL \
-        --pakdir=/tmp/pkg \
+        --pakdir=/pkg \
         --install=no \
         --default \
-        make -C /tmp/bootc bin install-all
+        make -C /tmp/bootc install-all
 
 #####################################################################################
 # Final image
