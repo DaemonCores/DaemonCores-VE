@@ -48,7 +48,7 @@ RUN apt remove -y \
 
 COPY ./src/postinstall /
 RUN apt install -y \
-        zram-generator \
+        systemd-zram-generator \
         dnsmasq \
         resolvconf \
     && echo "vm.swappiness = 1" >> /etc/sysctl.conf \
