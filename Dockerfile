@@ -24,7 +24,7 @@ RUN --mount=type=tmpfs,dst=/tmp \
     && apt install -y \
         git \
         curl \
-        wget
+        wget \
         make \
         build-essential \
         go-md2man \
