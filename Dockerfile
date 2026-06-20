@@ -12,11 +12,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
 SHELL ["/bin/bash", "-c"]
 
 # Bootc filesystem migrations
-RUN cp /{home,mnt,srv,opt} /var/ \
-    && cp /root /var/roothome \
-    && rm -rf /{home,root,mnt,srv,opt}  \
+RUN && rm -rf /{home,root,mnt,srv,opt}  \
+    && mkdir -p /var/{home,roothome,mnt,srv,opt} \
     && ln -s /var/{home,mnt,srv,opt} / \
-    && ln -s  /var/roothome /root \
+    && ln -s  /var/roothome /root
 
 # Bootc build and install
 RUN --mount=type=tmpfs,dst=/tmp \
