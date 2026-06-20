@@ -1,0 +1,4 @@
+#!/bin/bash
+
+sed -i 's/status => "notfound",/status => "active",/g' /usr/share/perl5/PVE/API2/Subscription.pm
+systemctl restart pveproxy.service

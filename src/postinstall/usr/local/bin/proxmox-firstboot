@@ -1,0 +1,15 @@
+#!/bin/bash
+set -euo pipefail
+
+WAN_IP="$(ip route get 8.8.8.8 \
+    | awk -F"src " 'NR==1{split($2,a," ");print a[1]}'
+)"
+WAN_DEVICE="$(ip -br a \
+    | grep "${WAN_IP}" \
+    | cut -d " " -f 1
+)"
+
+sed -i "s|{{ WAN_DEVICE }}|${WAN_DEVICE}|g"
+
+touch /var/lib/proxmox-firstboot-done
+rm -f /usr/local/bin/proxmox-firstboot

@@ -1,0 +1,11 @@
+[Unit]
+Description=Proxmox VE - Hostname configuration 
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/pve-domain-set
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
