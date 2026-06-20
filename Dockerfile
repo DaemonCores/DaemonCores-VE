@@ -44,22 +44,54 @@ RUN rm -f /etc/apt/sources.list \
         make \
         build-essential \
         go-md2man \
+        checkinstall \
         libzstd-dev \
         pkgconf \
-        checkinstall
+        autoconf \
+        automake \
+        libtool \
+        libglib2.0-dev \
+        libcurl4-openssl-dev \
+        libgpgme-dev \
+        libarchive-dev \
+        libmount-dev \
+        libfuse3-dev \
+        libssl-dev \
+        libsystemd-dev \
+        gobject-introspection \
+        libgirepository1.0-dev \
+        libsoup-3.0-dev
+
+# Ostree build and install
+RUN OSTREE_VER=2025.7 \
+    && curl -fsSL \
+        https://github.com/ostreedev/ostree/releases/download/v${OSTREE_VER}/libostree-${OSTREE_VER}.tar.xz \
+        | tar -xJ -C /tmp \
+    && cd /tmp/libostree-${OSTREE_VER} \
+    && ./configure --prefix=/usr --sysconfdir=/etc \
+        --disable-gtk-doc --disable-man \
+    && make -j$(nproc) \
+    && mkdir -p /pkg \
+    && checkinstall \
+        --pkgname=libostree \
+        --pkgversion=${OSTREE_VER} \
+        --pkglicense=LGPL \
+        --pakdir=/pkg \
+        --install=yes \
+        --default \
+        make install
 
 # Bootc build and install
 RUN --mount=type=tmpfs,dst=/tmp \
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- --profile minimal -y \
-    && git clone --depth=1 --branch v1.8.0 \
+    && git clone --depth=1 --branch v1.14.0 \
         https://github.com/bootc-dev/bootc.git /tmp/bootc \
     && . ${RUSTUP_HOME}/env \
     && cargo build --release --manifest-path /tmp/bootc/Cargo.toml \
-    && mkdir -p /pkg \
     && checkinstall \
         --pkgname=bootc \
-        --pkgversion=1.8.0 \
+        --pkgversion=1.14.0 \
         --pkglicense=LGPL \
         --pakdir=/pkg \
         --install=no \
@@ -71,8 +103,9 @@ RUN --mount=type=tmpfs,dst=/tmp \
 #####################################################################################
 FROM base AS final
 
-COPY --from=bootc-builder /pkg/bootc_*.deb /tmp/
-RUN dpkg -i /tmp/bootc_*.deb && rm /tmp/bootc_*.deb
+COPY --from=bootc-builder /pkg/*.deb /tmp/
+RUN dpkg -i /tmp/libostree_*.deb /tmp/bootc_*.deb \
+    && rm /tmp/*.deb
 
 # Proxmox kernel setup
 COPY ./src/pvepreinstall /
