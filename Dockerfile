@@ -19,8 +19,7 @@ RUN rm -rf /{home,root,mnt,srv,opt}  \
 
 # Bootc build and install
 COPY ./src/bootcpreinstall /
-RUN --mount=type=tmpfs,dst=/tmp \
-    rm -f /etc/apt/sources.list \
+RUN rm -f /etc/apt/sources.list \
     && apt update \
     && apt install -y \
         git \
@@ -36,7 +35,8 @@ RUN --mount=type=tmpfs,dst=/tmp \
         libostree-dev \
         ostree
 
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+RUN --mount=type=tmpfs,dst=/tmp \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- --profile minimal -y \
     && git clone https://github.com/bootc-dev/bootc.git /tmp/bootc \
     && . ${RUSTUP_HOME}/env && make -C /tmp/bootc bin install-all
