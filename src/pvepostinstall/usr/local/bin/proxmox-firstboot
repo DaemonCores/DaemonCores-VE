@@ -12,4 +12,3 @@ WAN_DEVICE="$(ip -br a \
 sed -i "s|{{ WAN_DEVICE }}|${WAN_DEVICE}|g" /etc/network/interfaces
 
 touch /var/lib/proxmox-firstboot-done
-rm -f /usr/local/bin/proxmox-firstboot
