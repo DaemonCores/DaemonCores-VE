@@ -59,7 +59,7 @@ RUN --mount=type=tmpfs,dst=/tmp \
     && . ${RUSTUP_HOME}/env && make -C /tmp/bootc bin install-all
 
 #####################################################################################
-# Bootc build image
+# Final image
 #####################################################################################
 FROM base AS final
 
