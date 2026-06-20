@@ -30,6 +30,7 @@ RUN rm -f /etc/apt/sources.list \
         wget \
         dracut \
     && sed -i "s|Suites: |Suites: testing |g" /etc/apt/sources.list.d/debian.sources \
+    && apt update \
     && apt install -y -t testing \
         libostree-dev \
         ostree \
