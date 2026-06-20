@@ -48,8 +48,7 @@ RUN apt remove -y \
 
 RUN apt install -y \
         systemd-zram-generator \
-        dnsmasq \
-        resolvconf
+        dnsmasq
 
 COPY ./src/postinstall /
 
