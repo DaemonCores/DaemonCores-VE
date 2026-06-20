@@ -11,7 +11,8 @@ LABEL org.opencontainers.image.base.name="docker.io/library/debian:trixie"
 ENV DEBIAN_FRONTEND=noninteractive \
     CARGO_HOME=/tmp/rust \
     RUSTUP_HOME=/tmp/rust \
-    OSTREE_VER=2025.7
+    OSTREE_VER=2025.7 \
+    BOOTC_VER=v1.14.0
 
 SHELL ["/bin/bash", "-c"]
 
@@ -87,7 +88,7 @@ RUN --mount=type=tmpfs,dst=/tmp \
 RUN --mount=type=tmpfs,dst=/tmp \
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- --profile minimal -y \
-    && git clone --depth=1 --branch v1.14.0 \
+    && git clone --depth=1 --branch "${BOOTC_VER}" \
         https://github.com/bootc-dev/bootc.git /tmp/bootc \
     && . ${RUSTUP_HOME}/env \
     && cargo build --release --manifest-path /tmp/bootc/Cargo.toml \
