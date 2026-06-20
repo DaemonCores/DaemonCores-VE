@@ -12,7 +12,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 SHELL ["/bin/bash", "-c"]
 
 # Bootc filesystem migrations
-RUN && rm -rf /{home,root,mnt,srv,opt}  \
+RUN rm -rf /{home,root,mnt,srv,opt}  \
     && mkdir -p /var/{home,roothome,mnt,srv,opt} \
     && ln -s /var/{home,mnt,srv,opt} / \
     && ln -s  /var/roothome /root
