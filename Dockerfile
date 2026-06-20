@@ -89,15 +89,14 @@ RUN --mount=type=tmpfs,dst=/tmp \
     && git clone --depth=1 --branch "${BOOTC_VER}" \
         https://github.com/bootc-dev/bootc.git /tmp/bootc \
     && . ${RUSTUP_HOME}/env \
-    && cargo build --release --manifest-path /tmp/bootc/Cargo.toml \
     && checkinstall \
         --pkgname=bootc \
-        --pkgversion=1.14.0 \
+        --pkgversion="$(grep '^version' /tmp/bootc/Cargo.toml | head -1 | cut -d'"' -f2)" \
         --pkglicense=LGPL \
-        --pakdir=/pkg \
+        --pakdir=/tmp/pkg \
         --install=no \
         --default \
-        make -j$(nproc) -C /tmp/bootc install-all
+        make -j$(nproc) -C /tmp/bootc bin install-all
 
 #####################################################################################
 # Final image
