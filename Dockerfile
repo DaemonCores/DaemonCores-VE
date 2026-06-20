@@ -61,7 +61,8 @@ RUN rm -f /etc/apt/sources.list \
         libsystemd-dev \
         gobject-introspection \
         libgirepository1.0-dev \
-        libsoup-3.0-dev
+        libsoup-3.0-dev \
+        bison
 
 # Ostree build and install
 RUN --mount=type=tmpfs,dst=/tmp \
