@@ -18,8 +18,10 @@ RUN rm -rf /{home,root,mnt,srv,opt}  \
     && ln -s  /var/roothome /root
 
 # Bootc build and install
+COPY ./src/bootcpreinstall /
 RUN --mount=type=tmpfs,dst=/tmp \
-    apt update \
+    rm -f /etc/apt/sources.list \
+    && apt update \
     && apt install -y \
         git \
         curl \
@@ -29,24 +31,24 @@ RUN --mount=type=tmpfs,dst=/tmp \
         go-md2man \
         libzstd-dev \
         pkgconf \
+        dracut \
+    && apt install -y -t trixie-backports \
         libostree-dev \
-        ostree \
-        dracut
+        ostree
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- --profile minimal -y \
     && git clone https://github.com/bootc-dev/bootc.git /tmp/bootc \
     && . ${RUSTUP_HOME}/env && make -C /tmp/bootc bin install-all
 
-COPY ./src/bootcinstall /
+COPY ./src/bootcpostinstall /
 RUN dracut --force \
         "$(find /usr/lib/modules -maxdepth 1 -type d | tail -n 1)/initramfs.img"
 
 # Proxmox kernel setup
-COPY ./src/preinstall /
+COPY ./src/pvepreinstall /
 
-RUN rm -f /etc/apt/sources.list \
-    && chmod +x \
+RUN chmod +x \
         /usr/sbin/policy-rc.d \
         /usr/local/bin/pve-domain-set \
     && wget \
@@ -84,7 +86,7 @@ RUN apt install -y \
         dnsmasq
 
 # Optimisations setup
-COPY ./src/postinstall /
+COPY ./src/pvepostinstall /
 
 RUN echo "vm.swappiness = 1" >> /etc/sysctl.conf \
     && chmod +x /usr/local/bin/* \
