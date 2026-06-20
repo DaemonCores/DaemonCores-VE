@@ -28,7 +28,12 @@ RUN rm -f /etc/apt/sources.list \
         git \
         curl \
         wget \
-        dracut
+        dracut \
+    && sed -i "s|Suites: |Suites: testing |g" /etc/apt/sources.list.d/debian.sources \
+    && apt install -y -t testing \
+        libostree-dev \
+        ostree \
+    && sed -i "s|Suites: testing |Suites: |g" /etc/apt/sources.list.d/debian.sources
 
 #####################################################################################
 # Bootc build image
@@ -45,26 +50,30 @@ RUN rm -f /etc/apt/sources.list \
         go-md2man \
         libzstd-dev \
         pkgconf \
-    && sed -i "s|Suites: |Suites: testing |g" /etc/apt/sources.list.d/debian.sources \
-    && apt install -y -t testing \
-        libostree-dev \
-        ostree \
-    && sed -i "s|Suites: testing |Suites: |g" /etc/apt/sources.list.d/debian.sources \
+        checkinstall
 
 # Bootc build and install
 RUN --mount=type=tmpfs,dst=/tmp \
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- --profile minimal -y \
     && git clone https://github.com/bootc-dev/bootc.git /tmp/bootc \
-    && . ${RUSTUP_HOME}/env && make -C /tmp/bootc bin install-all
+    && . ${RUSTUP_HOME}/env \
+    && checkinstall \
+        --pkgname=bootc \
+        --pkgversion="$(grep '^version' /tmp/bootc/Cargo.toml | head -1 | cut -d'"' -f2)" \
+        --pkglicense=LGPL \
+        --pakdir=/pkg \
+        --install=no \
+        --default \
+        make -C /tmp/bootc bin install-all
 
 #####################################################################################
 # Final image
 #####################################################################################
 FROM base AS final
 
-COPY --from=bootc-builder /usr/local/bin/bootc /usr/local/bin/
-COPY --from=bootc-builder /usr/lib/dracut/modules.d/60-bootc /usr/lib/dracut/modules.d/60-bootc
+COPY --from=bootc-builder /pkg/bootc_*.deb /tmp/
+RUN dpkg -i /tmp/bootc_*.deb && rm /tmp/bootc_*.deb
 
 # Proxmox kernel setup
 COPY ./src/pvepreinstall /
@@ -117,14 +126,7 @@ RUN echo "vm.swappiness = 1" >> /etc/sysctl.conf \
     && rm -f /etc/apt/sources.list.d/pve-install-repo.sources
 
 # Clean and purge image
-RUN apt purge -y \
-        make \
-        build-essential \
-        go-md2man \
-        libzstd-dev \
-        pkgconf \
-        libostree-dev \
-    && apt autoremove -y \
+RUN && apt autoremove -y \
     && apt clean \
     && rm -rf \
         /var/lib/apt/lists/* \
