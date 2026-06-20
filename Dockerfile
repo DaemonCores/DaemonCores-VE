@@ -10,7 +10,8 @@ LABEL org.opencontainers.image.base.name="docker.io/library/debian:trixie"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     CARGO_HOME=/tmp/rust \
-    RUSTUP_HOME=/tmp/rust
+    RUSTUP_HOME=/tmp/rust \
+    OSTREE_VER=2025.7
 
 SHELL ["/bin/bash", "-c"]
 
@@ -63,8 +64,8 @@ RUN rm -f /etc/apt/sources.list \
         libsoup-3.0-dev
 
 # Ostree build and install
-RUN OSTREE_VER=2025.7 \
-    && curl -fsSL \
+RUN --mount=type=tmpfs,dst=/tmp \
+    curl -fsSL \
         https://github.com/ostreedev/ostree/releases/download/v${OSTREE_VER}/libostree-${OSTREE_VER}.tar.xz \
         | tar -xJ -C /tmp \
     && cd /tmp/libostree-${OSTREE_VER} \
