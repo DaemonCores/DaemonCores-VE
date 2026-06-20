@@ -11,6 +11,8 @@ RUN rm -f /etc/apt/sources.list \
     && chmod +x \
         /usr/sbin/policy-rc.d \
         /usr/local/bin/pve-domain-set \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends wget ca-certificates \
     && wget \
         https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg \
         -O /usr/share/keyrings/proxmox-archive-keyring.gpg \
