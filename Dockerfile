@@ -17,7 +17,7 @@ RUN rm -rf /{home,root,mnt,srv,opt}  \
     && ln -s /var/{home,mnt,srv,opt} / \
     && ln -s  /var/roothome /root
 
-# Bootc build and install
+# Prepare package
 COPY ./src/bootcpreinstall /
 RUN rm -f /etc/apt/sources.list \
     && apt update \
@@ -34,16 +34,6 @@ RUN rm -f /etc/apt/sources.list \
     && apt install -y -t trixie-backports \
         libostree-dev \
         ostree
-
-RUN --mount=type=tmpfs,dst=/tmp \
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- --profile minimal -y \
-    && git clone https://github.com/bootc-dev/bootc.git /tmp/bootc \
-    && . ${RUSTUP_HOME}/env && make -C /tmp/bootc bin install-all
-
-COPY ./src/bootcpostinstall /
-RUN dracut --force \
-        "$(find /usr/lib/modules -maxdepth 1 -type d | tail -n 1)/initramfs.img"
 
 # Proxmox kernel setup
 COPY ./src/pvepreinstall /
@@ -92,6 +82,17 @@ RUN echo "vm.swappiness = 1" >> /etc/sysctl.conf \
     && chmod +x /usr/local/bin/* \
     && removepvepopup \
     && rm -f /etc/apt/sources.list.d/pve-install-repo.sources
+
+# Bootc build and install
+RUN --mount=type=tmpfs,dst=/tmp \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- --profile minimal -y \
+    && git clone https://github.com/bootc-dev/bootc.git /tmp/bootc \
+    && . ${RUSTUP_HOME}/env && make -C /tmp/bootc bin install-all
+
+COPY ./src/bootcpostinstall /
+RUN dracut --force \
+        "$(find /usr/lib/modules -maxdepth 1 -type d | tail -n 1)/initramfs.img"
 
 # Clean and purge image
 RUN apt purge -y \
