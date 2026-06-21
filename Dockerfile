@@ -43,11 +43,11 @@ RUN echo "postfix postfix/main_mailer_type string Local only" | debconf-set-sele
 
 RUN apt remove -y \
         linux-image-amd64 \
-        'linux-image-6.12*' \
         os-prober \
+        $(dpkg -l 'linux-image-[0-9]*' | awk '/^ii/{print $2}' | grep -v proxmox) \
     2>/dev/null || true
 
-RUN KVER=$(ls /usr/lib/modules | head -1) \
+RUN KVER=$(ls -1v /usr/lib/modules | tail -1) \
     && dracut \
         --kver "${KVER}" \
         --force /usr/lib/modules/${KVER}/initramfs.img
