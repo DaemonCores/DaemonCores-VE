@@ -87,6 +87,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     && git clone --depth=1 --branch "${BOOTC_VER}" \
         https://github.com/bootc-dev/bootc.git /tmp/bootc \
     && . ${RUSTUP_HOME}/env \
+    && cargo build --release --manifest-path /tmp/bootc/Cargo.toml \
     && checkinstall \
         --pkgname=bootc \
         --pkgversion="${BOOTC_VER#v}" \
@@ -94,7 +95,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         --pakdir=/pkg \
         --install=no \
         --default \
-        make -j$(nproc) -C /tmp/bootc bin install-all
+        make -j$(nproc) -C /tmp/bootc install-all
 
 #####################################################################################
 # Final image
