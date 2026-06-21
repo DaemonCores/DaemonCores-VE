@@ -129,8 +129,10 @@ RUN apt remove -y \
     2>/dev/null || true
 
 COPY ./src/bootcpostinstall /
-RUN dracut --force \
-        "$(find /usr/lib/modules -maxdepth 1 -type d | tail -n 1)/initramfs.img"
+RUN KVER=$(ls /usr/lib/modules | head -1) \
+    && dracut \
+        --kver "${KVER}" \
+        --force /usr/lib/modules/${KVER}/initramfs.img
 
 # Optimisations setup
 RUN apt install -y \
