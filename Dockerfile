@@ -11,8 +11,8 @@ LABEL org.opencontainers.image.base.name="docker.io/library/debian:trixie"
 ENV DEBIAN_FRONTEND=noninteractive \
     CARGO_HOME=/build/rust \
     RUSTUP_HOME=/build/rust \
-    OSTREE_VER=2025.7 \
-    BOOTC_VER=v1.14.1
+    OSTREE_VER=2026.1 \
+    BOOTC_VER=v1.16.1
 
 SHELL ["/bin/bash", "-c"]
 
@@ -87,7 +87,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         https://github.com/bootc-dev/bootc/releases/download/${BOOTC_VER}/bootc-${BOOTC_VER#v}-vendor.tar.zstd \
         | tar --zstd -x -C /build/bootc \
     && . ${RUSTUP_HOME}/env \
-    && cargo build --release --offline --manifest-path /build/bootc/Cargo.toml \
+    && cargo build --release --manifest-path /build/bootc/Cargo.toml \
     && checkinstall \
         --pkgname=bootc \
         --pkgversion="${BOOTC_VER#v}" \
