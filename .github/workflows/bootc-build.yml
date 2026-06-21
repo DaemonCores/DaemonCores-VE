@@ -3,7 +3,7 @@ name: Docker Image CI
 on:
   schedule:
     # 1st of every month at 04:00 UTC
-    - cron: '0 4 1 * *'
+    - cron: '0 6 1 * *'
   push:
     paths:
       - Dockerfile
@@ -15,6 +15,10 @@ jobs:
   build:
     name: Build & Push Container
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
     steps:
       - name: Free disk space
         run: |
