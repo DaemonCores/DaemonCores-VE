@@ -11,8 +11,8 @@ LABEL org.opencontainers.image.base.name="docker.io/library/debian:trixie"
 ENV DEBIAN_FRONTEND=noninteractive \
     CARGO_HOME=/build/rust \
     RUSTUP_HOME=/build/rust \
-    OSTREE_VER=2025.7 \
-    BOOTC_VER=v1.14.0
+    OSTREE_VER=2026.1 \
+    BOOTC_VER=v1.16.1
 
 SHELL ["/bin/bash", "-c"]
 
@@ -23,9 +23,7 @@ RUN rm -rf /{home,root,mnt,srv,opt}  \
     && ln -s  /var/roothome /root
 
 # Prepare package
-COPY ./src/bootcpreinstall /
-RUN rm -f /etc/apt/sources.list \
-    && apt update \
+RUN apt update \
     && apt install -y \
         git \
         curl \
@@ -38,9 +36,8 @@ RUN rm -f /etc/apt/sources.list \
 FROM base AS bootc-builder
 
 # Prepare package
-RUN rm -f /etc/apt/sources.list \
-    && apt update \
-    && apt install -y \
+COPY ./src/bootcpreinstall /
+RUN apt install -y \
         make \
         build-essential \
         go-md2man \
@@ -86,8 +83,11 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- --profile minimal -y \
     && git clone --depth=1 --branch "${BOOTC_VER}" \
         https://github.com/bootc-dev/bootc.git /build/bootc \
+    && curl -fsSL \
+        https://github.com/bootc-dev/bootc/releases/download/${BOOTC_VER}/bootc-${BOOTC_VER#v}-vendor.tar.zstd \
+        | tar --zstd -x -C /build/bootc \
     && . ${RUSTUP_HOME}/env \
-    && cargo build --release --manifest-path /build/bootc/Cargo.toml \
+    && cargo build --release --offline --manifest-path /build/bootc/Cargo.toml \
     && checkinstall \
         --pkgname=bootc \
         --pkgversion="${BOOTC_VER#v}" \
@@ -110,7 +110,8 @@ RUN dpkg -i /tmp/libostree_*.deb /tmp/bootc_*.deb \
 # Proxmox kernel setup
 COPY ./src/pvepreinstall /
 
-RUN chmod +x \
+RUN rm -f /etc/apt/sources.list \
+    && chmod +x \
         /usr/sbin/policy-rc.d \
         /usr/local/bin/pve-domain-set \
     && wget \
