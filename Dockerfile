@@ -69,7 +69,8 @@ RUN mkdir -p /build/bootc-staging \
     && ./configure --prefix=/usr --sysconfdir=/etc \
         --disable-gtk-doc --disable-man \
     && make -j$(nproc) \
-    && make install DESTDIR=/build/out
+    && make install DESTDIR=/build/out \
+    && cp -r /build/out/* /
 
 # Bootc build and install
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
