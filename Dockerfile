@@ -89,7 +89,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     && . ${RUSTUP_HOME}/env \
     && checkinstall \
         --pkgname=bootc \
-        --pkgversion="${BOOTC_VER}" \
+        --pkgversion="${BOOTC_VER#v}" \
         --pkglicense=LGPL \
         --pakdir=/pkg \
         --install=no \
