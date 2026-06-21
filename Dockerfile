@@ -134,7 +134,10 @@ COPY ./src/bootcpostinstall /
 RUN KVER=$(ls /usr/lib/modules | head -1) \
     && dracut \
         --kver "${KVER}" \
-        --force /usr/lib/modules/${KVER}/initramfs.img
+        --force /usr/lib/modules/${KVER}/initramfs.img \
+    && rm -f \
+        /boot/initrd.img* \
+        /boot/initrd*.img
 
 # Optimisations setup
 RUN apt install -y \
