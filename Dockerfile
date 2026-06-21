@@ -64,8 +64,7 @@ RUN rm -f /etc/apt/sources.list \
         bison
 
 # Ostree build and install
-RUN --mount=type=tmpfs,dst=/tmp \
-    curl -fsSL \
+RUN curl -fsSL \
         https://github.com/ostreedev/ostree/releases/download/v${OSTREE_VER}/libostree-${OSTREE_VER}.tar.xz \
         | tar -xJ -C /tmp \
     && cd /tmp/libostree-${OSTREE_VER} \
@@ -83,8 +82,7 @@ RUN --mount=type=tmpfs,dst=/tmp \
         make install
 
 # Bootc build and install
-RUN --mount=type=tmpfs,dst=/tmp \
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- --profile minimal -y \
     && git clone --depth=1 --branch "${BOOTC_VER}" \
         https://github.com/bootc-dev/bootc.git /tmp/bootc \
@@ -93,7 +91,7 @@ RUN --mount=type=tmpfs,dst=/tmp \
         --pkgname=bootc \
         --pkgversion="${BOOTC_VER}" \
         --pkglicense=LGPL \
-        --pakdir=/tmp/pkg \
+        --pakdir=/pkg \
         --install=no \
         --default \
         make -j$(nproc) -C /tmp/bootc bin install-all
