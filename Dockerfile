@@ -61,7 +61,7 @@ RUN apt install -y \
         bison
 
 # Ostree build and install
-RUN mkdir -p /build/bootc-staging \
+RUN mkdir -p /{build,output} \
     && curl -fsSL \
         https://github.com/ostreedev/ostree/releases/download/v${OSTREE_VER}/libostree-${OSTREE_VER}.tar.xz \
         | tar -xJ -C /build \
@@ -69,8 +69,8 @@ RUN mkdir -p /build/bootc-staging \
     && ./configure --prefix=/usr --sysconfdir=/etc \
         --disable-gtk-doc --disable-man \
     && make -j$(nproc) \
-    && make install DESTDIR=/build/out \
-    && cp -r /build/out/* /
+    && make install DESTDIR=/output \
+    && cp -r /output/* /
 
 # Bootc build and install
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -82,8 +82,8 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | tar --zstd -x -C /build/bootc \
     && . ${RUSTUP_HOME}/env \
     && cargo build --release --manifest-path /build/bootc/Cargo.toml \
-    && make -j$(nproc) -C /build/bootc manpages     DESTDIR=/build/out \
-    && make -j$(nproc) -C /build/bootc install-all  DESTDIR=/build/out \
+    && make -j$(nproc) -C /build/bootc manpages     DESTDIR=/output \
+    && make -j$(nproc) -C /build/bootc install-all  DESTDIR=/output \
     && rm -rf /build
 
 #####################################################################################
@@ -91,7 +91,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 #####################################################################################
 FROM base AS final
 
-COPY --from=bootc-builder /build/out /
+COPY --from=bootc-builder /output /
 
 # Proxmox kernel setup
 COPY ./src/pvepreinstall /
