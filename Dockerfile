@@ -28,7 +28,8 @@ RUN apt update \
         git \
         curl \
         wget \
-        dracut
+        dracut \
+        iproute2
 
 #####################################################################################
 # Bootc build image
