@@ -11,8 +11,8 @@ LABEL org.opencontainers.image.base.name="docker.io/library/debian:trixie"
 ENV DEBIAN_FRONTEND=noninteractive \
     CARGO_HOME=/build/rust \
     RUSTUP_HOME=/build/rust \
-    OSTREE_VER=2026.1 \
-    BOOTC_VER=v1.16.1
+    OSTREE_VER=2025.7 \
+    BOOTC_VER=v1.14.1
 
 SHELL ["/bin/bash", "-c"]
 
