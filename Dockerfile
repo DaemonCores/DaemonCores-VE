@@ -10,7 +10,7 @@ LABEL org.opencontainers.image.base.name="ghcr.io/daemoncores/debian-bootc:lates
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-SHELL ["/bin/bash", "-c"]
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
 # Proxmox kernel setup
 COPY ./src/pvepreinstall /
