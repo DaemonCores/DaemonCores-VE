@@ -1,98 +1,16 @@
 #####################################################################################
 # Base image
 #####################################################################################
-FROM debian:trixie AS base
+FROM ghcr.io/daemoncores/debian-bootc:latest
 
 # Environement Setup
 LABEL org.opencontainers.image.title="Proxmox VE"
 LABEL org.opencontainers.image.description="Proxmox VE 9 bootc — Debian 13 Trixie"
-LABEL org.opencontainers.image.base.name="docker.io/library/debian:trixie"
+LABEL org.opencontainers.image.base.name="ghcr.io/daemoncores/debian-bootc:latest"
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    CARGO_HOME=/build/rust \
-    RUSTUP_HOME=/build/rust \
-    OSTREE_VER=2026.1 \
-    BOOTC_VER=v1.16.1
+ENV DEBIAN_FRONTEND=noninteractive
 
 SHELL ["/bin/bash", "-c"]
-
-# Bootc filesystem migrations
-RUN rm -rf /{home,root,mnt,srv,opt}  \
-    && mkdir -p /var/{home,roothome,mnt,srv,opt} \
-    && ln -s /var/{home,mnt,srv,opt} / \
-    && ln -s  /var/roothome /root
-
-# Prepare package
-RUN apt update \
-    && apt install -y \
-        git \
-        curl \
-        wget \
-        dracut \
-        iproute2
-
-#####################################################################################
-# Bootc build image
-#####################################################################################
-FROM base AS bootc-builder
-
-# Prepare package
-COPY ./src/bootcpreinstall /
-RUN apt install -y \
-        make \
-        build-essential \
-        go-md2man \
-        checkinstall \
-        libzstd-dev \
-        pkgconf \
-        autoconf \
-        automake \
-        libtool \
-        libglib2.0-dev \
-        libcurl4-openssl-dev \
-        libgpgme-dev \
-        libarchive-dev \
-        libmount-dev \
-        libfuse3-dev \
-        libssl-dev \
-        libsystemd-dev \
-        gobject-introspection \
-        libgirepository1.0-dev \
-        libsoup-3.0-dev \
-        bison
-
-# Ostree build and install
-RUN mkdir -p /{build,output} \
-    && curl -fsSL \
-        https://github.com/ostreedev/ostree/releases/download/v${OSTREE_VER}/libostree-${OSTREE_VER}.tar.xz \
-        | tar -xJ -C /build \
-    && cd /build/libostree-${OSTREE_VER} \
-    && ./configure --prefix=/usr --sysconfdir=/etc \
-        --disable-gtk-doc --disable-man \
-    && make -j$(nproc) \
-    && make install DESTDIR=/output \
-    && cp -r /output/* /
-
-# Bootc build and install
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- --profile minimal -y \
-    && git clone --depth=1 --branch "${BOOTC_VER}" \
-        https://github.com/bootc-dev/bootc.git /build/bootc \
-    && curl -fsSL \
-        https://github.com/bootc-dev/bootc/releases/download/${BOOTC_VER}/bootc-${BOOTC_VER#v}-vendor.tar.zstd \
-        | tar --zstd -x -C /build/bootc \
-    && . ${RUSTUP_HOME}/env \
-    && cargo build --release --manifest-path /build/bootc/Cargo.toml \
-    && make -j$(nproc) -C /build/bootc manpages     DESTDIR=/output \
-    && make -j$(nproc) -C /build/bootc install-all  DESTDIR=/output \
-    && rm -rf /build
-
-#####################################################################################
-# Final image
-#####################################################################################
-FROM base AS final
-
-COPY --from=bootc-builder /output /
 
 # Proxmox kernel setup
 COPY ./src/pvepreinstall /
@@ -116,7 +34,6 @@ RUN apt update \
 # Proxmox VE setup
 RUN echo "postfix postfix/main_mailer_type string Local only" | debconf-set-selections \
     && echo "postfix postfix/mailname string proxmox.local" | debconf-set-selections \
-    && echo "grub-pc grub-pc/install_devices string /dev/sda" | debconf-set-selections \
     && echo "grub-pc grub-pc/install_devices_empty boolean true" | debconf-set-selections \
     && apt install -y \
         proxmox-ve \
@@ -130,14 +47,10 @@ RUN apt remove -y \
         os-prober \
     2>/dev/null || true
 
-COPY ./src/bootcpostinstall /
 RUN KVER=$(ls /usr/lib/modules | head -1) \
     && dracut \
         --kver "${KVER}" \
-        --force /usr/lib/modules/${KVER}/initramfs.img \
-    && rm -f \
-        /boot/initrd.img* \
-        /boot/initrd*.img
+        --force /usr/lib/modules/${KVER}/initramfs.img
 
 # Optimisations setup
 RUN apt install -y \
@@ -147,6 +60,8 @@ RUN apt install -y \
 COPY ./src/pvepostinstall /
 RUN echo "vm.swappiness = 1" >> /etc/sysctl.conf \
     && chmod +x /usr/local/bin/* \
+    && ln -sf /etc/systemd/system/proxmox-firstboot.service \
+        /etc/systemd/system/multi-user.target.wants/proxmox-firstboot.service \
     && removepvepopup \
     && rm -f /etc/apt/sources.list.d/pve-install-repo.sources
 
@@ -157,5 +72,4 @@ RUN apt autoremove -y \
         /var/lib/apt/lists/* \
         /tmp/* \
         /var/tmp/* \
-        /tmp/bootc \
         /usr/sbin/policy-rc.d
