@@ -9,8 +9,8 @@ LABEL org.opencontainers.image.description="Proxmox VE 9 bootc — Debian 13 Tri
 LABEL org.opencontainers.image.base.name="docker.io/library/debian:trixie"
 
 ENV DEBIAN_FRONTEND=noninteractive \
-    CARGO_HOME=/tmp/rust \
-    RUSTUP_HOME=/tmp/rust \
+    CARGO_HOME=/build/rust \
+    RUSTUP_HOME=/build/rust \
     OSTREE_VER=2025.7 \
     BOOTC_VER=v1.14.0
 
@@ -64,14 +64,14 @@ RUN rm -f /etc/apt/sources.list \
         bison
 
 # Ostree build and install
-RUN curl -fsSL \
+RUN mkdir -p /{pkg,build} \
+    && curl -fsSL \
         https://github.com/ostreedev/ostree/releases/download/v${OSTREE_VER}/libostree-${OSTREE_VER}.tar.xz \
-        | tar -xJ -C /tmp \
-    && cd /tmp/libostree-${OSTREE_VER} \
+        | tar -xJ -C /build \
+    && cd /build/libostree-${OSTREE_VER} \
     && ./configure --prefix=/usr --sysconfdir=/etc \
         --disable-gtk-doc --disable-man \
     && make -j$(nproc) \
-    && mkdir -p /pkg \
     && checkinstall \
         --pkgname=libostree \
         --pkgversion=${OSTREE_VER} \
@@ -85,9 +85,9 @@ RUN curl -fsSL \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- --profile minimal -y \
     && git clone --depth=1 --branch "${BOOTC_VER}" \
-        https://github.com/bootc-dev/bootc.git /tmp/bootc \
+        https://github.com/bootc-dev/bootc.git /build/bootc \
     && . ${RUSTUP_HOME}/env \
-    && cargo build --release --manifest-path /tmp/bootc/Cargo.toml \
+    && cargo build --release --manifest-path /build/bootc/Cargo.toml \
     && checkinstall \
         --pkgname=bootc \
         --pkgversion="${BOOTC_VER#v}" \
@@ -95,7 +95,8 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         --pakdir=/pkg \
         --install=no \
         --default \
-        make -j$(nproc) -C /tmp/bootc install-all
+        make -j$(nproc) -C /build/bootc install-all \
+    && rm -rf /build
 
 #####################################################################################
 # Final image
