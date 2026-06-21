@@ -88,9 +88,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | tar --zstd -x -C /build/bootc \
     && . ${RUSTUP_HOME}/env \
     && cargo build --release --manifest-path /build/bootc/Cargo.toml \
-    && cargo run --release \
-        --manifest-path /build/bootc/Cargo.toml \
-        --package xtask -- manpages \
+    && make -C /build/bootc manpages \
     && checkinstall \
         --pkgname=bootc \
         --pkgversion="${BOOTC_VER#v}" \
