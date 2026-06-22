@@ -80,3 +80,5 @@ RUN apt autoremove -y \
         /tmp/* \
         /var/tmp/* \
         /usr/sbin/policy-rc.d
+
+RUN ostree container commit
