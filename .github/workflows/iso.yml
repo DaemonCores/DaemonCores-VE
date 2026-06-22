@@ -17,16 +17,17 @@ jobs:
       - name: Download AlmaLinux boot ISO
         run: |
           mkdir -p out
-          curl -fSL "https://repo.almalinux.org/almalinux/9/isos/x86_64/" \
+          curl -fSL "https://repo.almalinux.org/almalinux/10/isos/x86_64/" \
             -o /tmp/isos.html
           BOOT_ISO=$(grep -oP 'AlmaLinux-[^"]*-latest-x86_64-boot\.iso' /tmp/isos.html | head -1)
-          curl -fSL "https://repo.almalinux.org/almalinux/9/isos/x86_64/${BOOT_ISO}" \
+          curl -fSL "https://repo.almalinux.org/almalinux/10/isos/x86_64/${BOOT_ISO}" \
             -o out/boot.iso
 
       - name: Inject kickstart URL into ISO
         run: |
-          KS_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/iso.ks"
+          KS_URL="https://raw.githubusercontent.com/${{ github.repository }}/refs/heads/main/iso.ks"
           WORKDIR=$(mktemp -d)
+          NAME="$(echo "${{ github.repository }}" | sed "s|/|-|g")"
 
           xorriso -osirrox on -indev out/boot.iso -extract / "$WORKDIR"
           chmod -R u+w "$WORKDIR"
@@ -43,7 +44,7 @@ jobs:
 
           # Rebuild ISO (BIOS + UEFI hybrid)
           xorriso -as mkisofs \
-            -o out/DaemonCores_AlmaLinux.iso \
+            -o out/${NAME}.iso \
             -R -J -V "PS-NETINSTALL" \
             -b isolinux/isolinux.bin \
             -c isolinux/boot.cat \
@@ -56,7 +57,7 @@ jobs:
             "$WORKDIR"
 
           rm -rf "$WORKDIR" out/boot.iso
-          ls -lh out/DaemonCores_AlmaLinux.iso
+          ls -lh out/${NAME}.iso
 
       - name: Fetch previous release state
         id: prev
@@ -74,7 +75,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           title="Net-install ISO — $(date -u +%Y-%m-%d)"
-          notes="Boot this ISO to install DaemonCores AlmaLinux Build. Anaconda fetches the kickstart from GitHub and pulls the latest image from GHCR at install time."
+          notes="Boot this ISO to install ${NAME} Build. Anaconda fetches the kickstart from GitHub and pulls the latest image from GHCR at install time."
           if [[ '${{ steps.prev.outputs.exists }}' == '1' ]]; then
             gh release edit install-iso \
               --title "$title" \
