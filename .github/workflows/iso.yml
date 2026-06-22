@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install lorax
+      - name: Install xorriso
         run: |
           sudo apt-get update
           sudo apt-get install -y lorax
@@ -26,7 +26,39 @@ jobs:
       - name: Inject kickstart URL into ISO
         run: |
           set -euxo pipefail
-          mkksiso iso.ks out/boot.iso out/${NAME}.iso
+
+          KS_URL="https://raw.githubusercontent.com/${{ github.repository }}/refs/heads/main/iso.ks"
+
+          WORKDIR=$(mktemp -d)
+          NAME="$(echo "${{ github.repository }}" | sed 's|/|-|g')"
+
+          xorriso \
+            -osirrox on \
+            -indev out/boot.iso \
+            -extract / "$WORKDIR"
+
+          chmod -R u+w "$WORKDIR"
+
+          find "$WORKDIR" -name "*.cfg" -type f | while read cfg; do
+            echo "==== $cfg ===="
+            grep -n "inst.stage2" "$cfg" || true
+
+            sed -i \
+              "s|inst\.stage2|inst.ks=${KS_URL} inst.stage2|g" \
+              "$cfg"
+
+            grep -n "inst.ks" "$cfg" || true
+          done
+
+          xorriso \
+            -indev out/boot.iso \
+            -outdev out/${NAME}.iso \
+            -boot_image any replay \
+            -map "$WORKDIR" /
+
+          rm -rf "$WORKDIR"
+
+          ls -lh "out/${NAME}.iso"
 
       - name: Fetch previous release state
         id: prev
