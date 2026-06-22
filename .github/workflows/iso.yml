@@ -6,7 +6,8 @@ on:
 jobs:
   iso:
     runs-on: ubuntu-latest
-    container: almalinux:minimal
+    container: almalinux:10
+
     permissions:
       contents: write
     steps:
