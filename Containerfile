@@ -46,15 +46,9 @@ RUN apt remove -y \
         linux-image-amd64 \
         os-prober \
         $(dpkg -l 'linux-image-[0-9]*' | awk '/^ii/{print $2}' | grep -v proxmox) \
-    2>/dev/null || true
-
-RUN KVER=$(ls -1v /usr/lib/modules | tail -1) \
-    && find /usr/lib/modules -mindepth 1 -maxdepth 1 ! -name "${KVER}" -exec rm -rf {} + \
-    && cp /boot/vmlinuz-${KVER} /usr/lib/modules/${KVER}/vmlinuz \
-    && rm -rf /boot/* \
-    && dracut \
-        --kver "${KVER}" \
-        --force /usr/lib/modules/${KVER}/initramfs.img
+    2>/dev/null || true \
+    KVER=$(ls -1v /usr/lib/modules | tail -1) \
+    && find /usr/lib/modules -mindepth 1 -maxdepth 1 ! -name "${KVER}" -exec rm -rf {} +
 
 # Optimisations setup
 RUN apt install -y \
