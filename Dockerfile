@@ -24,8 +24,7 @@ RUN rm -f /etc/apt/sources.list \
         -O /usr/share/keyrings/proxmox-archive-keyring.gpg \
     && mkdir -p /etc/systemd/system/multi-user.target.wants \
     && ln -sf /etc/systemd/system/pve-domain-set.service \
-        /etc/systemd/system/multi-user.target.wants/pve-domain-set.service \
-    && pve-domain-set
+        /etc/systemd/system/multi-user.target.wants/pve-domain-set.service
 
 RUN apt update \
     && apt full-upgrade -y \
