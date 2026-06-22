@@ -45,15 +45,19 @@ jobs:
               "$cfg" || true
           done
 
-          xorriso \
-            -indev out/boot.iso \
-            -outdev out/${NAME}.iso \
-            -boot_image any replay \
-            -map "$WORKDIR" /
+          # Rebuild ISO without replaying broken El Torito entries
+          xorriso -as mkisofs \
+            -o "out/${NAME}.iso" \
+            -R -J \
+            -V "ALMAKS" \
+            -eltorito-alt-boot \
+            -e images/efiboot.img \
+            -no-emul-boot \
+            "$WORKDIR"
 
           rm -rf "$WORKDIR"
 
-          ls -lh out/${NAME}.iso
+          ls -lh "out/${NAME}.iso"
 
       - name: Fetch previous release state
         id: prev
