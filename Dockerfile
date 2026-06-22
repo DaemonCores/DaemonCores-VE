@@ -49,7 +49,7 @@ RUN apt remove -y \
     2>/dev/null || true
 
 RUN KVER=$(ls -1v /usr/lib/modules | tail -1) \
-    && find /usr/lib/modules -mindepth 1 -maxdepth 1 ! -name "${KVER}" -exec rm -rf {} +
+    && find /usr/lib/modules -mindepth 1 -maxdepth 1 ! -name "${KVER}" -exec rm -rf {} + \
     && cp /boot/vmlinuz-${KVER} /usr/lib/modules/${KVER}/vmlinuz \
     && rm -rf /boot/* \
     && dracut \
