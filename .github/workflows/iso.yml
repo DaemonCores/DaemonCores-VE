@@ -11,10 +11,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install xorriso
+      - name: Install lorax
         run: |
           sudo apt-get update
-          sudo apt-get install -y xorriso
+          sudo apt-get install -y lorax
 
       - name: Download AlmaLinux boot ISO
         run: |
@@ -26,38 +26,7 @@ jobs:
       - name: Inject kickstart URL into ISO
         run: |
           set -euxo pipefail
-
-          KS_URL="https://raw.githubusercontent.com/${{ github.repository }}/refs/heads/main/iso.ks"
-
-          WORKDIR=$(mktemp -d)
-          NAME="$(echo "${{ github.repository }}" | sed 's|/|-|g')"
-
-          xorriso \
-            -osirrox on \
-            -indev out/boot.iso \
-            -extract / "$WORKDIR"
-
-          chmod -R u+w "$WORKDIR"
-
-          find "$WORKDIR" -name "*.cfg" -type f | while read cfg; do
-            sed -i \
-              "s|inst\.stage2|inst.ks=${KS_URL} inst.stage2|g" \
-              "$cfg" || true
-          done
-
-          # Rebuild ISO without replaying broken El Torito entries
-          xorriso -as mkisofs \
-            -o "out/${NAME}.iso" \
-            -R -J \
-            -V "ALMAKS" \
-            -eltorito-alt-boot \
-            -e images/efiboot.img \
-            -no-emul-boot \
-            "$WORKDIR"
-
-          rm -rf "$WORKDIR"
-
-          ls -lh "out/${NAME}.iso"
+          mkksiso iso.ks out/boot.iso out/${NAME}.iso
 
       - name: Fetch previous release state
         id: prev
