@@ -55,21 +55,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euxo pipefail
           NAME="$(echo "${{ github.repository }}" | sed 's|/|-|g')"
           title="Net-install ISO — $(date -u +%Y-%m-%d)"
-          notes="Boot this ISO to install ${NAME} Build. Anaconda fetches the kickstart from GitHub and pulls the latest image from GHCR at install time."
-          
-          if [[ '${{ steps.prev.outputs.exists }}' == '1' ]]; then
+          notes="Boot this ISO to install ${NAME}. Anaconda fetches the kickstart from GitHub and pulls the latest image from GHCR at install time."
+          if [[ "${{ steps.prev.outputs.exists }}" == "1" ]]; then
             gh release edit install-iso \
-              --title "$title" \
-              --notes "$notes" \
-              --target '${{ github.sha }}' \
-              --latest=false
+              --title "$title" --notes "$notes" \
+              --target "${{ github.sha }}" --latest=false
             gh release upload install-iso "out/${NAME}.iso" --clobber
           else
             gh release create install-iso "out/${NAME}.iso" \
-              --title "$title" \
-              --notes "$notes" \
-              --target '${{ github.sha }}' \
-              --latest=false
+              --title "$title" --notes "$notes" \
+              --target "${{ github.sha }}" --latest=false
           fi
