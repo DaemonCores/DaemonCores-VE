@@ -45,7 +45,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if gh release view install-iso >/dev/null 2>&1; then
+          if gh release view install-iso --json name >/dev/null 2>&1; then
             echo "exists=1" >> "$GITHUB_OUTPUT"
           else
             echo "exists=0" >> "$GITHUB_OUTPUT"
@@ -55,28 +55,21 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euxo pipefail
-
           NAME="$(echo "${{ github.repository }}" | sed 's|/|-|g')"
-
           title="Net-install ISO — $(date -u +%Y-%m-%d)"
-          notes="Boot this ISO to install ${NAME}. Anaconda fetches the Kickstart from GitHub and pulls the latest image from GHCR at install time."
-
-          if [[ "${{ steps.prev.outputs.exists }}" == "1" ]]; then
+          notes="Boot this ISO to install ${NAME} Build. Anaconda fetches the kickstart from GitHub and pulls the latest image from GHCR at install time."
+          
+          if [[ '${{ steps.prev.outputs.exists }}' == '1' ]]; then
             gh release edit install-iso \
               --title "$title" \
               --notes "$notes" \
-              --target "${{ github.sha }}" \
+              --target '${{ github.sha }}' \
               --latest=false
-
-            gh release upload install-iso \
-              "out/${NAME}.iso" \
-              --clobber
+            gh release upload install-iso out/DaemonCores_AlmaLinux.iso --clobber
           else
-            gh release create install-iso \
-              "out/${NAME}.iso" \
+            gh release create install-iso out/DaemonCores_AlmaLinux.iso \
               --title "$title" \
               --notes "$notes" \
-              --target "${{ github.sha }}" \
+              --target '${{ github.sha }}' \
               --latest=false
           fi
