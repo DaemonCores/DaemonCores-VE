@@ -65,9 +65,9 @@ jobs:
               --notes "$notes" \
               --target '${{ github.sha }}' \
               --latest=false
-            gh release upload install-iso out/DaemonCores_AlmaLinux.iso --clobber
+            gh release upload install-iso "out/${NAME}.iso" --clobber
           else
-            gh release create install-iso out/DaemonCores_AlmaLinux.iso \
+            gh release create install-iso "out/${NAME}.iso" \
               --title "$title" \
               --notes "$notes" \
               --target '${{ github.sha }}' \
