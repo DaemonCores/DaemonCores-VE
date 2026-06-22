@@ -13,10 +13,10 @@ jobs:
 
       - name: Install lorax
         run: |
-          sudo dnf install 'dnf-command(config-manager)'
-          sudo dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
-          sudo dnf makecache --refresh
-          sudo dnf -y install lorax git wget curl gh gh
+          dnf install 'dnf-command(config-manager)'
+          dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
+          dnf makecache --refresh
+          dnf -y install lorax git wget curl gh gh
 
       - uses: actions/checkout@v7
 
