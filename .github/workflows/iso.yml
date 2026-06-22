@@ -20,6 +20,7 @@ jobs:
           dnf config-manager -y --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
           dnf makecache --refresh
           dnf install -y lorax git wget curl gh gh
+          git config --system --add safe.directory '*'
 
       - uses: actions/checkout@v7
 
