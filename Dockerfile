@@ -7,6 +7,8 @@ FROM ghcr.io/daemoncores/debian-bootc:latest
 LABEL org.opencontainers.image.title="Proxmox VE"
 LABEL org.opencontainers.image.description="Proxmox VE 9 bootc — Debian 13 Trixie"
 LABEL org.opencontainers.image.base.name="ghcr.io/daemoncores/debian-bootc:latest"
+LABEL containers.bootc=1
+LABEL ostree.bootable=1
 
 ENV DEBIAN_FRONTEND=noninteractive
 
