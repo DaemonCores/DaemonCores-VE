@@ -47,7 +47,7 @@ RUN apt remove -y \
         os-prober \
         $(dpkg -l 'linux-image-[0-9]*' | awk '/^ii/{print $2}' | grep -v proxmox) \
     2>/dev/null || true \
-    KVER=$(ls -1v /usr/lib/modules | tail -1) \
+    && KVER=$(ls -1v /usr/lib/modules | tail -1) \
     && find /usr/lib/modules -mindepth 1 -maxdepth 1 ! -name "${KVER}" -exec rm -rf {} +
 
 # Optimisations setup
