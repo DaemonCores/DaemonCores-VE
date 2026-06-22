@@ -6,15 +6,19 @@ on:
 jobs:
   iso:
     runs-on: ubuntu-latest
+    container: almalinux:minimal
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
 
-      - name: Install xorriso
+      - name: Install lorax
         run: |
-          sudo apt-get update
-          sudo apt-get install -y xorriso
+          sudo dnf install 'dnf-command(config-manager)'
+          sudo dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
+          sudo dnf makecache --refresh
+          sudo dnf -y install lorax git wget curl gh gh
+
+      - uses: actions/checkout@v7
 
       - name: Download AlmaLinux boot ISO
         run: |
@@ -26,39 +30,7 @@ jobs:
       - name: Inject kickstart URL into ISO
         run: |
           set -euxo pipefail
-
-          KS_URL="https://raw.githubusercontent.com/${{ github.repository }}/refs/heads/main/iso.ks"
-
-          WORKDIR=$(mktemp -d)
-          NAME="$(echo "${{ github.repository }}" | sed 's|/|-|g')"
-
-          xorriso \
-            -osirrox on \
-            -indev out/boot.iso \
-            -extract / "$WORKDIR"
-
-          chmod -R u+w "$WORKDIR"
-
-          find "$WORKDIR" -name "*.cfg" -type f | while read cfg; do
-            sed -i \
-              "s|inst\.stage2|inst.ks=${KS_URL} inst.stage2|g" \
-              "$cfg" || true
-          done
-
-          VOLID=$(xorriso -indev out/boot.iso -pvd_info 2>/dev/null \
-            | awk -F': ' '/Volume id/ {gsub(/'\''/, "", $2); print $2}')
-
-          xorriso -as mkisofs \
-            -o "out/${NAME}.iso" \
-            -R -J \
-            -V "$VOLID" \
-            -eltorito-alt-boot \
-            -e images/efiboot.img \
-            -no-emul-boot \
-            "$WORKDIR"
-
-          rm -rf "$WORKDIR"
-
+          mkksiso iso.ks out/boot.iso out/${NAME}.iso
           ls -lh "out/${NAME}.iso"
 
       - name: Fetch previous release state
