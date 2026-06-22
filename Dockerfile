@@ -47,6 +47,9 @@ RUN apt remove -y \
     2>/dev/null || true
 
 RUN KVER=$(ls -1v /usr/lib/modules | tail -1) \
+    && rm -f \
+        /boot/initrd.img* \
+        /boot/initrd*.img \
     && dracut \
         --kver "${KVER}" \
         --force /usr/lib/modules/${KVER}/initramfs.img
