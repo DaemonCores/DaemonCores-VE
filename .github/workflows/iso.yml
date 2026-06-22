@@ -33,9 +33,9 @@ jobs:
           set -euxo pipefail
 
           NAME="$(echo "${{ github.repository }}" | sed 's|/|-|g')"
-          KS_URL="https://raw.githubusercontent.com/${{ github.repository }}/refs/heads/main/iso.ks"
-
-          mkksiso --ks "${KS_URL}" out/boot.iso "out/${NAME}.iso"
+          sed -i "s|{{ repo }}|${GITHUB_REPOSITORY,,}|g" iso.ks
+          
+          mkksiso --ks iso.ks out/boot.iso "out/${NAME}.iso"
           ls -lh "out/${NAME}.iso"
 
       - name: Fetch previous release state

@@ -4,7 +4,7 @@
 network --hostname=alma-builder
 
 # Pull the bootc image from the registry
-bootc --source-imgref=ghcr.io/daemoncores/proxmox-atomic:latest --target-imgref=ghcr.io/daemoncores/proxmox-atomic:latest
+bootc --source-imgref=ghcr.io/{{ repo }}:latest --target-imgref=ghcr.io/{{ repo }}:latest
 
 # Reboot after install
 reboot
