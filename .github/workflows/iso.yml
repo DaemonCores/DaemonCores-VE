@@ -40,21 +40,22 @@ jobs:
           chmod -R u+w "$WORKDIR"
 
           find "$WORKDIR" -name "*.cfg" -type f | while read cfg; do
-            echo "==== $cfg ===="
-            grep -n "inst.stage2" "$cfg" || true
-
             sed -i \
               "s|inst\.stage2|inst.ks=${KS_URL} inst.stage2|g" \
-              "$cfg"
-
-            grep -n "inst.ks" "$cfg" || true
+              "$cfg" || true
           done
 
-          xorriso \
-            -indev out/boot.iso \
-            -outdev out/${NAME}.iso \
-            -boot_image any replay \
-            -map "$WORKDIR" /
+          VOLID=$(xorriso -indev out/boot.iso -pvd_info 2>/dev/null \
+            | awk -F': ' '/Volume id/ {gsub(/'\''/, "", $2); print $2}')
+
+          xorriso -as mkisofs \
+            -o "out/${NAME}.iso" \
+            -R -J \
+            -V "$VOLID" \
+            -eltorito-alt-boot \
+            -e images/efiboot.img \
+            -no-emul-boot \
+            "$WORKDIR"
 
           rm -rf "$WORKDIR"
 
