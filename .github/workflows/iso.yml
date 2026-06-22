@@ -17,10 +17,7 @@ jobs:
       - name: Download AlmaLinux boot ISO
         run: |
           mkdir -p out
-          curl -fSL "https://repo.almalinux.org/almalinux/10/isos/x86_64/" \
-            -o /tmp/isos.html
-          BOOT_ISO=$(grep -oP 'AlmaLinux-[^"]*-latest-x86_64-boot\.iso' /tmp/isos.html | head -1)
-          curl -fSL "https://repo.almalinux.org/almalinux/10/isos/x86_64/${BOOT_ISO}" \
+          curl -fSL "https://repo.almalinux.org/almalinux/10/isos/x86_64/AlmaLinux-10-latest-x86_64-minimal.iso " \
             -o out/boot.iso
 
       - name: Inject kickstart URL into ISO
