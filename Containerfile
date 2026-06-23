@@ -34,6 +34,7 @@ RUN chmod +x /usr/sbin/policy-rc.d \
     && echo "grub-pc grub-pc/install_devices_empty boolean true" | debconf-set-selections \
     && apt update \
     && apt full-upgrade -y \
+    && apt update \
     && apt install -y \
         proxmox-default-kernel \
         proxmox-ve \
