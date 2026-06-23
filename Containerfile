@@ -50,10 +50,7 @@ RUN chmod +x /usr/sbin/policy-rc.d \
     2>/dev/null || true \
     && KVER=$(ls -1v /usr/lib/modules | tail -1) \
     && find /usr/lib/modules -mindepth 1 -maxdepth 1 ! -name "${KVER}" -exec rm -rf {} + \
-    && apt autoremove -y \
-    && apt clean \
     && rm -rf \
-        /var/lib/apt/lists/* \
         /tmp/* \
         /var/tmp/* \
         /usr/sbin/policy-rc.d
