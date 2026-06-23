@@ -3,7 +3,7 @@ set -euo pipefail
 
 WAN_IP="$(ip route get 8.8.8.8 \
     | awk -F"src " 'NR==1{split($2,a," ");print a[1]}'
-)"
+)" || exit 0
 WAN_DEVICE="$(ip -br a \
     | grep "${WAN_IP}" \
     | cut -d " " -f 1

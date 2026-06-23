@@ -56,7 +56,7 @@ RUN echo "vm.swappiness = 1" >> /etc/sysctl.conf \
     && chmod +x /usr/local/bin/* \
     && mkdir -p /etc/systemd/system/multi-user.target.wants \
     && ln -sf /etc/systemd/system/pve-domain-set.service \
-        /etc/systemd/system/multi-user.target.wants/pve-domain-set.serviceb\
+        /etc/systemd/system/multi-user.target.wants/pve-domain-set.service \
     && ln -sf /etc/systemd/system/proxmox-firstboot.service \
         /etc/systemd/system/multi-user.target.wants/proxmox-firstboot.service \
     && removepvepopup \
