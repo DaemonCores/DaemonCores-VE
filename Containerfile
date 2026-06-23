@@ -21,7 +21,6 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Setup default shell with fail build on error
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
-
 # Proxmox setup
 COPY ./src/pvepreinstall /
 RUN chmod +x /usr/sbin/policy-rc.d \
@@ -50,10 +49,6 @@ RUN chmod +x /usr/sbin/policy-rc.d \
     2>/dev/null || true \
     && KVER=$(ls -1v /usr/lib/modules | tail -1) \
     && find /usr/lib/modules -mindepth 1 -maxdepth 1 ! -name "${KVER}" -exec rm -rf {} + \
-    && rm -rf \
-        /tmp/* \
-        /var/tmp/* \
-        /usr/sbin/policy-rc.d
 
 # Post install patch
 COPY ./src/pvepostinstall /
@@ -65,4 +60,7 @@ RUN echo "vm.swappiness = 1" >> /etc/sysctl.conf \
     && ln -sf /etc/systemd/system/proxmox-firstboot.service \
         /etc/systemd/system/multi-user.target.wants/proxmox-firstboot.service \
     && removepvepopup \
-    && rm -f /etc/apt/sources.list.d/pve-install-repo.sources
+    && rm -f /etc/apt/sources.list.d/pve-install-repo.sources \
+        /tmp/* \
+        /var/tmp/* \
+        /usr/sbin/policy-rc.d
