@@ -2,6 +2,7 @@
 # Base image
 #####################################################################################
 FROM ghcr.io/daemoncores/debian-bootc:latest
+STOPSIGNAL SIGRTMIN+3
 
 # Environement Setup
 LABEL org.opencontainers.image.title="Proxmox VE Atomic"
