@@ -17,13 +17,14 @@ if [ -n "$AUSER" ]; then
     userdel "$AUSER" 2>/dev/null || true
     rm -rf "/home/${AUSER}"
 
+    groupadd --gid "$AGID" "$AUSER" 2>/dev/null || true
     useradd                              \
-        --home-dir "/home/${AUSER}"      \
-        --base-dir "/home/${AUSER}"      \
-        --uid      "$AUID"               \
-        --no-user-group                  \
-        --shell    /bin/bash             \
-        --comment  "$AGECOS"             \
+        --home-dir    "/home/${AUSER}"   \
+        --base-dir    "/home/${AUSER}"   \
+        --uid         "$AUID"            \
+        --gid         "$AGID"            \
+        --shell       /bin/bash          \
+        --comment     "$AGECOS"          \
         --create-home "$AUSER"
 
     usermod -p "$AHASH" "$AUSER"
