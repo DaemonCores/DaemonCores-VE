@@ -13,15 +13,12 @@ LABEL org.opencontainers.image.licenses="LGPL-2.1"
 LABEL containers.bootc=1
 LABEL ostree.bootable=1
 
-# SHA-256 checksum of the bootc APT repository signing key fetched below.
-# Update this value whenever the key at
-# https://daemoncores.github.io/proxmox-atomic/gpg.key is rotated.
+# SHA-256 checksums of the APT repository signing keys fetched below.
 ARG PROXMOX_ATOMIC_GPG_SHA256=557c791d14da63c4621725fb335c6bd336c57afc6f1ffe3afcf25fc489b65680
-# https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg is rotated.
 ARG PVE_GPG_SHA256=136673be77aba35dcce385b28737689ad64fd785a797e57897589aed08db6e45
 # Setup all environement variables
 ENV DEBIAN_FRONTEND=noninteractive
-# Setup default shell with fail build on error
+# Default shell: fail build on error. Honored with `--format docker` in CI.
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
 # Proxmox setup
@@ -29,7 +26,7 @@ COPY ./src/pvepreinstall /
 RUN chmod +x /usr/sbin/policy-rc.d \
     && wget \
         -O /usr/share/keyrings/proxmox-atomic-keyring.gpg \
-        https://daemoncores.github.io/proxmox-atomic/gpg.key \
+        https://daemoncores.github.io/Proxmox-Atomic/gpg.key \
     && printf '%s  /usr/share/keyrings/proxmox-atomic-keyring.gpg\n' "${PROXMOX_ATOMIC_GPG_SHA256}" \
         | sha256sum -c - \
     && wget \
@@ -77,8 +74,9 @@ RUN echo "vm.swappiness = 1" >> /etc/sysctl.conf \
         /etc/systemd/system/multi-user.target.wants/pve-domain-set.service \
     && ln -sf /etc/systemd/system/proxmox-firstboot.service \
         /etc/systemd/system/multi-user.target.wants/proxmox-firstboot.service \
-    # Remove the no-subscription popup — see README.md section
-    # "No-subscription popup removal" for justification and risks.
+    # Guard: abort if pve-manager is missing (proxmox-ve install failed earlier).
+    && dpkg -s pve-manager >/dev/null 2>&1 \
+        || { echo "ERROR: pve-manager not installed; proxmox-ve install failed." >&2; exit 1; } \
     && removepvepopup \
     && rm -f /etc/apt/sources.list.d/pve-install-repo.sources \
         /tmp/* \
