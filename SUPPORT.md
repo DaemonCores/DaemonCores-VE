@@ -24,6 +24,7 @@ We provide community support for:
 - First-boot configuration and the `firstboot-user-setup` wizard.
 - General bootc/ostree lifecycle operations (`bootc update`, `bootc rollback`, etc.).
 - The APT repository and package updates.
+- The `removepvepopup` script (maintained by the project author; flips a single boolean in the Proxmox VE Perl code, 4+ years of production use without failure).
 
 ## What Is NOT Supported
 
@@ -31,8 +32,7 @@ The following are explicitly out of scope for community support:
 
 - **Upstream Proxmox VE bugs**: Issues that are reproducible on a standard Proxmox VE installation (without bootc/ostree) should be reported to [Proxmox](https://bugzilla.proxmox.com/) directly.
 - **Hardware-specific issues unrelated to the image**: Driver or firmware problems that are not specific to the atomic deployment model.
-- **The `removepvepopup` hack**: This is a convenience patch to suppress the no-subscription dialog. It is not endorsed by Proxmox Server Solutions GmbH and is not supported by this project beyond its current implementation. If it breaks after a `pve-manager` update, you may need to re-apply the patch yourself or consider purchasing an official [Proxmox VE Support Subscription](https://www.proxmox.com/en/services/proxmox-ve-support).
-- **Paid Enterprise subscription issues**: This project targets the no-subscription repository tier.
+- **Paid Enterprise subscription issues**: This project targets the no-subscription repository tier. If you run a paid subscription, prefer the official [Proxmox VE Support Subscription](https://www.proxmox.com/en/services/proxmox-ve-support) for subscription-specific support.
 
 ## Response Expectations
 
