@@ -1,5 +1,5 @@
 Types: deb
-URIs: https://daemoncores.github.io/proxmox-atomic/
+URIs: https://daemoncores.github.io/Proxmox-Atomic/
 Suites: trixie
 Components: main
 Enabled: yes
