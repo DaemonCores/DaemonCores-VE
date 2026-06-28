@@ -56,10 +56,17 @@ RUN chmod +x /usr/sbin/policy-rc.d \
         os-prober \
         $(dpkg -l 'linux-image-[0-9]*' | awk '/^ii/{print $2}' | grep -v proxmox) \
     2>/dev/null || true \
+    # Remove standard Debian kernels to keep only proxmox-default-kernel
+    # which includes ZFS and KVM modules, then prune stale module trees so
+    # only the active Proxmox kernel's modules remain on disk.
     && KVER=$(ls -1v /usr/lib/modules | tail -1) \
     && find /usr/lib/modules -mindepth 1 -maxdepth 1 ! -name "${KVER}" -exec rm -rf {} +
 
 # Post install patch
+# COPY ships /etc/network/interfaces with a pre-configured vmbr0 (and extra
+# bridges) carrying a {{ WAN_DEVICE }} placeholder. Pre-configure default
+# bridge for Proxmox VE networking — proxmox-firstboot resolves the
+# placeholder to the real WAN interface at first boot.
 COPY ./src/pvepostinstall /
 RUN echo "vm.swappiness = 1" >> /etc/sysctl.conf \
     && chmod +x /usr/local/bin/* \
@@ -68,6 +75,8 @@ RUN echo "vm.swappiness = 1" >> /etc/sysctl.conf \
         /etc/systemd/system/multi-user.target.wants/pve-domain-set.service \
     && ln -sf /etc/systemd/system/proxmox-firstboot.service \
         /etc/systemd/system/multi-user.target.wants/proxmox-firstboot.service \
+    # Remove the no-subscription popup — see README.md section
+    # "No-subscription popup removal" for justification and risks.
     && removepvepopup \
     && rm -f /etc/apt/sources.list.d/pve-install-repo.sources \
         /tmp/* \
