@@ -1,0 +1,10 @@
+.git/
+.github/
+workflows/
+*.iso
+out/
+README.md
+LICENSE
+tmp/
+.env
+.secrets
