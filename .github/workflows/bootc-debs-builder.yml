@@ -111,6 +111,12 @@ jobs:
 
           dpkg-deb --build /output/ifupdown2 \
             /debs/ifupdown2_${ORIG_VER}+bootc1_all.deb
+      
+      - name: Upload debs
+        uses: actions/upload-artifact@v7
+        with:
+          name: debs
+          path: /debs/*.deb
 
   publish:
     runs-on: ubuntu-latest
