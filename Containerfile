@@ -14,7 +14,7 @@ LABEL containers.bootc=1
 LABEL ostree.bootable=1
 
 # SHA-256 checksums of the APT repository signing keys fetched below.
-ARG PROXMOX_ATOMIC_GPG_SHA256=557c791d14da63c4621725fb335c6bd336c57afc6f1ffe3afcf25fc489b65680
+ARG PROXMOX_ATOMIC_GPG_SHA256=4920000cfcd8f5a618822c8e57222a3c10768d2efb8c0250a71a19ba0c76ff55
 ARG PVE_GPG_SHA256=136673be77aba35dcce385b28737689ad64fd785a797e57897589aed08db6e45
 # Setup all environement variables
 ENV DEBIAN_FRONTEND=noninteractive
