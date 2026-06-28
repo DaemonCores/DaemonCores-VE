@@ -1,6 +1,6 @@
 Types: deb
-URIs: https://daemoncores.github.io/debian-bootc/
+URIs: https://daemoncores.github.io/proxmox-atomic/
 Suites: trixie
 Components: main
 Enabled: yes
-Signed-By: /usr/share/keyrings/debian-bootc-keyring.gpg
+Signed-By: /usr/share/keyrings/proxmox-atomic-keyring.gpg
