@@ -1,14 +1,8 @@
 name: Container Image CI
 
 on:
-  schedule:
-    - cron: '0 4 1 * *'
-  push:
-    paths:
-      - Containerfile
-      - .dockerignore
-      - src/**
   workflow_dispatch:
+  workflow_call:
 
 jobs:
   build-test-push:
@@ -27,7 +21,7 @@ jobs:
           df -h
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7 
 
       - name: Set image name
         run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
@@ -61,7 +55,7 @@ jobs:
             --tag "${IMAGE}:$(git rev-parse --short HEAD)" \
             $MONTHLY_TAG \
             -f Containerfile \
-            --format docker \
+            --format oci \
             .
 
       - name: Check runtime deps
@@ -87,6 +81,9 @@ jobs:
       - name: Install cosign
         if: github.ref == 'refs/heads/main'
         uses: sigstore/cosign-installer@v3
+        with:
+          install-dir: /usr/local/bin
+          use-sudo: true
 
       - name: Sign image
         if: github.ref == 'refs/heads/main'

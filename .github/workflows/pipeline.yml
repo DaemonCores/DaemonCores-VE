@@ -1,0 +1,61 @@
+name: Full Pipeline
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+on:
+  schedule:
+    - cron: '0 4 1 * *'
+  workflow_dispatch:
+    inputs:
+      run_debs:
+        description: 'Build .deb packages'
+        type: boolean
+        default: true
+      run_iso:
+        description: 'Build ISO'
+        type: boolean
+        default: true
+      run_image:
+        description: 'Build container image'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  packages: write
+  pages: write
+  id-token: write
+
+jobs:
+  debs:
+    name: Build .deb packages
+    if: ${{ github.event_name == 'schedule' || inputs.run_debs }}
+    uses: ./.github/workflows/bootc-debs-builder.yml
+    secrets: inherit
+
+  image:
+    name: Build container image
+    needs: [debs]
+    # always() forces evaluation even when the debs job was skipped.
+    # image runs if: checked AND (debs succeeded OR debs was skipped/not selected).
+    if: |
+      always() &&
+      (github.event_name == 'schedule' || inputs.run_image) &&
+      (needs.debs.result == 'success' || needs.debs.result == 'skipped')
+    uses: ./.github/workflows/bootc-build.yml
+    secrets: inherit
+
+  iso:
+    name: Build ISO
+    needs: [debs, image]
+    # always() forces evaluation even when debs or image were skipped.
+    # iso runs if: checked AND (debs ok OR skipped) AND (image ok OR skipped).
+    if: |
+      always() &&
+      (github.event_name == 'schedule' || inputs.run_iso) &&
+      (needs.debs.result == 'success' || needs.debs.result == 'skipped') &&
+      (needs.image.result == 'success' || needs.image.result == 'skipped')
+    uses: ./.github/workflows/iso.yml
+    secrets: inherit
