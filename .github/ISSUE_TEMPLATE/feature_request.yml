@@ -1,5 +1,4 @@
 name: Feature Request
-about: Suggest a new feature for Proxmox-Atomic
 description: Suggest a new feature or enhancement for Proxmox-Atomic
 labels: ["enhancement", "triage"]
 body:
