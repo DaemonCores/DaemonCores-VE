@@ -62,6 +62,8 @@ RUN chmod +x /usr/sbin/policy-rc.d \
     && KVER=$(ls -1v /usr/lib/modules | tail -1) \
     && find /usr/lib/modules -mindepth 1 -maxdepth 1 ! -name "${KVER}" -exec rm -rf {} +
 
+COPY ./assets/banner/etc /etc/
+
 # Post install patch
 # COPY ships /etc/network/interfaces with a pre-configured vmbr0 (and extra
 # bridges) carrying a {{ WAN_DEVICE }} placeholder. Pre-configure default
