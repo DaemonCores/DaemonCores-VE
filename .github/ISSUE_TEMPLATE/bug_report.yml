@@ -1,5 +1,4 @@
 name: Bug Report
-about: Report a bug in Proxmox-Atomic
 description: Report a bug in Proxmox-Atomic
 labels: ["bug", "triage"]
 body:
