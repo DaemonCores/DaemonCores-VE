@@ -1,0 +1,11 @@
+# Build artifacts
+*.iso
+out/
+tmp/
+
+# Secrets
+.env
+.secrets
+
+# Vector database artifacts (not part of the project)
+lancedb/

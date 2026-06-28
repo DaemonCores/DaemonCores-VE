@@ -1,4 +1,35 @@
 #!/bin/bash
+#
+# removepvepopup — suppress the Proxmox VE "No valid subscription" popup
+#
+# What it does:
+#   Patches /usr/share/perl5/PVE/API2/Subscription.pm so that the subscription
+#   check reports status => "active" instead of "notfound", then restarts
+#   pveproxy.service so the change takes effect in the web UI.
+#
+# Why it is needed:
+#   The Proxmox-Atomic image ships without a Proxmox Enterprise
+#   subscription. Without this patch, every login to the web UI triggers a
+#   "You do not have a valid subscription for this server" dialog that the
+#   user must dismiss manually before doing anything useful.
+#
+# Risks:
+#   - This edits a Perl file owned by the pve-manager package. Any pve-manager
+#     update will overwrite the patch, and the popup will reappear until
+#     this script is run again.
+#   - The modification is not supported by Proxmox Server Solutions GmbH and
+#     may break unexpectedly across Proxmox major versions (API path, the
+#     status string, or the surrounding code can change without notice).
+#   - Running this on a production server entitled to a paid subscription is
+#     pointless and would mask legitimate subscription warnings.
+#
+# Alternative:
+#   Buy a Proxmox VE Support Subscription
+#   (https://www.proxmox.com/en/services/proxmox-ve-support) to obtain a
+#   valid subscription key. This removes the popup legitimately, supports
+#   Proxmox development, and grants access to the Enterprise repository and
+#   support. Revert this patch if you switch to a paid subscription.
+#
 
 sed -i 's/status => "notfound",/status => "active",/g' /usr/share/perl5/PVE/API2/Subscription.pm
 systemctl restart pveproxy.service 2> /dev/null || true
