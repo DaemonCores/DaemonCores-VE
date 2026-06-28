@@ -1,0 +1,12 @@
+
+IP=$(ip -4 addr show scope global | grep -oP "(?<=inet )[\d.]+" | head -1 || true)
+
+if [[ -z "$IP" ]]; then
+  exit 0
+fi
+
+HOST=$(hostname -s)
+FQDN="${HOST}.$(hostname -d 2>/dev/null || echo local)"
+
+sed -i "/${HOST}/d" /etc/hosts
+echo "${IP}    ${FQDN} ${HOST}" >> /etc/hosts
