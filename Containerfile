@@ -81,7 +81,10 @@ RUN echo "vm.swappiness = 1" >> /etc/sysctl.conf \
     && rm -f /etc/apt/sources.list.d/pve-install-repo.sources \
         /tmp/* \
         /var/tmp/* \
-        /usr/sbin/policy-rc.d
+        /usr/sbin/policy-rc.d \
+    # Enable chrony and create chronyd alias for Anaconda (Fedora naming)
+    && systemctl enable chrony \
+    && ln -sf /lib/systemd/system/chrony.service /etc/systemd/system/chronyd.service
 
 # bootc images are updated in-place via ostree; no runtime healthcheck applies.
 HEALTHCHECK NONE
