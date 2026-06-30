@@ -4,6 +4,8 @@ zerombr
 clearpart --all --initlabel
 autopart --type=lvm --fstype=xfs
 
+services --disabled=chronyd
+
 bootc --source-imgref=oci-archive:/run/install/repo/image.tar --target-imgref=ghcr.io/{{ repo }}:latest
 
 %post
