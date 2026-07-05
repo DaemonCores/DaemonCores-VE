@@ -49,6 +49,7 @@ RUN chmod +x /usr/sbin/policy-rc.d \
         systemd-zram-generator \
         dnsmasq \
         fanctl \
+        powerctl \
     && apt remove -y \
         linux-image-amd64 \
         os-prober \
