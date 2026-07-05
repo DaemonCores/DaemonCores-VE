@@ -83,8 +83,10 @@ RUN echo "vm.swappiness = 1" >> /etc/sysctl.conf \
         /tmp/* \
         /var/tmp/* \
         /usr/sbin/policy-rc.d \
-    # Enable chrony and create chronyd alias for Anaconda (Fedora naming)
-    && systemctl enable chrony \
+    # Enable chrony via symlink (bootc-compatible, avoids systemctl enable)
+    && ln -sf /lib/systemd/system/chrony.service \
+        /etc/systemd/system/multi-user.target.wants/chrony.service \
+    # Create chronyd alias for Anaconda (Fedora naming convention)
     && ln -sf /lib/systemd/system/chrony.service /etc/systemd/system/chronyd.service
 
 # bootc images are updated in-place via ostree; no runtime healthcheck applies.
