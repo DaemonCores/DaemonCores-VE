@@ -6,7 +6,7 @@ Maintainer: Gabriel Guillou guillou.gabriel@gmail.com
 Homepage: https://github.com/DaemonCores/Proxmox-Atomic
 Section: admin
 Priority: optional
-Depends: ipmitool, kmod, {{ DEPS }}
+Depends: ipmitool, kmod, openipmi, {{ DEPS }}
 Description: generic temperature-driven fan controller over local IPMI
  A lightweight bash daemon that regulates server fan speed from temperature,
  through the local IPMI interface (/dev/ipmi0).
