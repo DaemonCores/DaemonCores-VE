@@ -200,7 +200,10 @@ jobs:
           sed -i 's#return (stat( $template ))\[9\];#my @arr = stat($template); return @arr ? ($arr[9] || 1) : undef;#' "$PROV"
           grep -qF 'my @arr = stat($template); return @arr ? ($arr[9] || 1) : undef;' "$PROV" \
             || { echo "ERROR: libtemplate-perl mtime patch failed to apply." >&2; exit 1; }
-          perl -c "$PROV" \
+          # Compile-check the patched module. The package is only extracted here,
+          # not installed, so add its own tree to @INC to resolve the sibling
+          # Template::* modules (e.g. Template::Base) it inherits from.
+          perl -I "$(dirname "$(dirname "$PROV")")" -c "$PROV" \
             || { echo "ERROR: patched Provider.pm fails perl -c." >&2; exit 1; }
 
           # Regenerate md5sums after content modification
