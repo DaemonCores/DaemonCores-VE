@@ -18,7 +18,7 @@ iface lo inet loopback
 auto ${IFACE}
 iface ${IFACE} inet dhcp
     dns-nameservers 194.242.2.2 1.1.1.1
-iface ${IFACE} inet6 dhcp
+iface ${IFACE} inet6 auto
     dns-nameservers 2a07:e340::2 2606:4700:4700::1111
 
 # VMBR0 : Default LAN / Prod Internet
