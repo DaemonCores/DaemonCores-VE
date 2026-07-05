@@ -21,7 +21,7 @@ Proxmox-Atomic uses a **two-layer architecture**:
 | Layer | Source | Responsibility |
 |---|---|---|
 | **Base** | `ghcr.io/daemoncores/debian-bootc:latest` | bootc, ostree, composefs, bootupd, GRUB (Fedora rhboot fork), dracut, firstboot-user-setup, ifupdown2 (repacked), systemd-timesyncd (repacked), Secure Boot signing, APT repository |
-| **Proxmox layer** | This repository | Proxmox VE 9, proxmox-default-kernel, chrony, dnsmasq, systemd-zram-generator, proxmox-firstboot, pve-domain-set, removepvepopup |
+| **Proxmox layer** | This repository | Proxmox VE 9, proxmox-default-kernel, chrony, dnsmasq, systemd-zram-generator, proxmox-firstboot, pve-domain-set, removepvepopup, fanctl, powerctl |
 
 ### What the base layer provides
 
@@ -45,6 +45,8 @@ Proxmox-Atomic uses a **two-layer architecture**:
 - **proxmox-firstboot** — detects the WAN interface and binds it to `vmbr0`
 - **pve-domain-set** — pins the host FQDN to its real IP in `/etc/hosts`
 - **removepvepopup** — suppresses the "No valid subscription" web UI dialog
+- **fanctl** — self-calibrating IPMI (any vendor) / hwmon temperature-driven fan controller
+- **powerctl** — measured CPU performance-per-watt operating point and safe peripheral power management
 
 ---
 
@@ -78,9 +80,12 @@ Runs inside a `debian:trixie` container. Its responsibilities:
 1. **Install build dependencies** — compilers, Rust toolchain, Meson, etc.
 2. **Build custom `.deb` packages** from source (inherited from debian-bootc):
    - `libcomposefs`, `libostree`, `bootupd`, `grub-efi-signed`, `bootc`, `firstboot-user-setup`
-   - Repacked `ifupdown2` with bootc-specific patches
-   - Repacked `systemd-timesyncd` with `After=network-online.target` drop-in
-3. **Repack `ifupdown2` from Proxmox** with the bootc fix applied
+   - Repacked `systemd-timesyncd` with an `After=network-online.target` drop-in
+3. **Build the Proxmox-Atomic packages:**
+   - Repacked `ifupdown2` from Proxmox — bootc ordering fix plus a first-boot `ifupdown2-autoconf` that detects the WAN interface and **probes DHCPv6** before adding any `inet6` stanza
+   - Repacked `chrony` with a `chrony.service.d/wait-network.conf` (`After=network-online.target`) drop-in
+   - `fanctl` — generic IPMI (any vendor) / hwmon temperature-driven fan controller
+   - `powerctl` — measured CPU performance-per-watt operating point and safe peripheral power management
 4. **Publish the APT repository** to GitHub Pages using `morph027/apt-repo-action`
 
 The resulting `.deb` artifacts are uploaded as workflow artifacts and consumed by the base image build.
@@ -144,7 +149,6 @@ The `Containerfile` defines the Proxmox layer. It is built `FROM ghcr.io/daemonc
 
 4. **Post-install configuration**
    - Copy `src/pvepostinstall/` into the image (`/etc/network/interfaces`, systemd services, scripts)
-   - Set `vm.swappiness = 1`
    - Enable `pve-domain-set.service` and `proxmox-firstboot.service` via symlinks into `multi-user.target.wants`
    - Run `removepvepopup` to patch the subscription check
    - Clean up temporary files and the `policy-rc.d` inhibitor
@@ -249,7 +253,7 @@ The image ships with four pre-configured bridges in `/etc/network/interfaces`:
 
 ### WAN interface
 
-The WAN interface is detected at first boot by `proxmox-firstboot` and bound to the `vmbr0` bridge via the `bridge_ports` directive. The WAN interface itself is configured for DHCP (IPv4 and IPv6) with public DNS resolvers (`194.242.2.2`, `1.1.1.1` for IPv4; `2a07:e340::2`, `2606:4700:4700::1111` for IPv6).
+The WAN interface is detected at first boot by `ifupdown2-autoconf` and bound to the `vmbr0` bridge via the `bridge_ports` directive. It is configured for IPv4 DHCP with public DNS resolvers (`194.242.2.2`, `1.1.1.1`). For IPv6, `ifupdown2-autoconf` probes for a DHCPv6 server and only adds an `inet6 auto` stanza (with `2a07:e340::2`, `2606:4700:4700::1111`) when one answers; otherwise it relies on kernel SLAAC. This prevents a `dhclient -6` from hanging for 30s and failing `networking.service` on networks whose Router Advertisement requests DHCPv6 with no server present.
 
 ### dnsmasq
 

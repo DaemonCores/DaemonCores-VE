@@ -66,6 +66,8 @@ Proxmox-Atomic is **a layer on top of debian-bootc**, not a fork. The base image
 - **removepvepopup** — suppresses the "No valid subscription" web UI dialog
 - **proxmox-firstboot.service** — detects the WAN interface and injects it into `/etc/network/interfaces`
 - **pve-domain-set.service** — sets the host FQDN in `/etc/hosts` from the detected IP
+- **fanctl** — generic, self-calibrating temperature-driven fan controller (IPMI for any vendor, plus an hwmon backend for standard PCs)
+- **powerctl** — measured CPU performance-per-watt operating point plus safe peripheral power management (SATA ALPM, PCI runtime PM, GPU cap, ZFS-aware disk spin-down, load-driven swappiness)
 
 ---
 
@@ -127,10 +129,10 @@ Inherited from debian-bootc.
 
 ### ifupdown2 (Proxmox repack)
 
-ifupdown2 is sourced from the Proxmox repository and repacked with two targeted patches by debian-bootc:
+ifupdown2 is sourced from the Proxmox repository and repacked with targeted patches:
 
 - `ifupdown2-pre.service` is ordered `After=ostree-remount.service` to ensure the ostree read-only root is mounted before networking attempts to start.
-- An `ifupdown2-autoconf` helper performs DHCP autoconfiguration on first boot if the interfaces file has not yet been customised.
+- An `ifupdown2-autoconf` helper writes `/etc/network/interfaces` on first boot (if not yet customised): it detects the WAN interface, configures IPv4 DHCP, and **probes for a DHCPv6 server** — the `inet6 auto` stanza is only added when one actually answers. This avoids a `dhclient -6` that would otherwise hang 30s and fail `networking.service` on networks whose Router Advertisement requests DHCPv6 with no server; kernel SLAAC still provides IPv6 addressing regardless.
 
 ### Proxmox VE
 
@@ -146,7 +148,7 @@ The image ships the `proxmox-ve` metapackage, the Proxmox kernel (`proxmox-defau
 
 ### chrony
 
-[chrony](https://chrony-project.org/) is the NTP client. It replaces `systemd-timesyncd` because the Proxmox VE stack disables timesyncd in favour of chrony for better time synchronisation in clustered environments.
+[chrony](https://chrony-project.org/) is the NTP client. It replaces `systemd-timesyncd` because the Proxmox VE stack disables timesyncd in favour of chrony for better time synchronisation in clustered environments. It is repacked with a `chrony.service.d/wait-network.conf` drop-in (`After=`/`Wants=network-online.target`) so chronyd does not start before the network is up and fail its initial time sync on a fast boot.
 
 ### dnsmasq
 
@@ -171,6 +173,14 @@ A TUI wizard modelled after the Raspberry Pi OS `userconfig` service. Runs on th
 Runs as `ExecStartPre` on `getty@tty1.service` and writes `/var/lib/firstboot-user-setup.done` on completion to prevent re-execution.
 
 Inherited from debian-bootc.
+
+### fanctl
+
+A lightweight bash daemon that regulates server fan speed from temperature over the local IPMI interface (`/dev/ipmi0`). It self-calibrates: it discovers the temperature sensors and their own Upper-Critical thresholds, measures the real fan/temperature response, and holds the hottest controlling sensor near a target, recalibrating on sustained drift. Fan writing uses an auto-detected vendor profile (Dell iDRAC, Supermicro, …); an hwmon backend (`/sys/class/hwmon/*/pwm*`) covers standard PCs without IPMI, and any unsupported platform falls back to read-only monitoring. Safety is temperature-based: a single failed fan is tolerated, and only a near-critical temperature forces maximum cooling. Configured in `/etc/fanctl/fanctl.conf`; calibration persists in `/var/lib/fanctl/`.
+
+### powerctl
+
+A bash daemon that keeps the CPU at its **measured** performance-per-watt efficiency knee. It sweeps the factory frequency steps under load, reads real package power from RAPL, picks the knee, and floats `scaling_max_freq` between the knee and the factory maximum in real time — driven by workload compute-boundedness (perf IPC) so frequency is only spent when it buys work. Everything stays inside the factory range (no undervolt, no overclock). It also applies safe peripheral power management, each knob auto-disabling when unsupported: governor/EPP, SATA link power (ALPM), PCI runtime PM, PCIe ASPM, GPU power cap (NVIDIA + AMD), C-state re-enabling, ZFS-aware idle-disk spin-down, and load-driven `vm.swappiness`. Configured in `/etc/powerctl/powerctl.conf`; calibration persists in `/var/lib/powerctl/`.
 
 ### Anaconda + Kickstart
 
