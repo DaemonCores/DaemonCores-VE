@@ -144,7 +144,6 @@ printf '%s\n' \
   'optional_modules =' \
   '  org.fedoraproject.Anaconda.Modules.Network' \
   '  org.fedoraproject.Anaconda.Modules.Payloads' \
-  '  org.fedoraproject.Anaconda.Modules.Storage' \
   '  org.fedoraproject.Anaconda.Modules.Services' \
   '  org.fedoraproject.Anaconda.Modules.Security' \
   '  org.fedoraproject.Anaconda.Modules.Subscription' \
