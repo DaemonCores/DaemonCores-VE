@@ -1,75 +1,90 @@
 #!/bin/bash
 #
-# fanctl — generic temperature-driven fan controller over local IPMI
+# fanctl — generic self-calibrating fan controller over local IPMI
 #
-# Usage: fanctl [--daemon|--check|--dry-run|--restore|--once]
-#   --daemon   Run the control loop (default when no argument is given).
-#   --check    Print discovered sensors, fans, vendor and computed state.
-#   --dry-run  Run the control loop but never write to the BMC.
-#   --restore  Hand fan regulation back to the BMC (automatic) and exit.
-#   --once     Print one raw state line and exit.
+# Usage: fanctl [--daemon|--check|--calibrate|--restore|--once]
+#   --daemon     Run the control loop (default when no argument is given).
+#   --check      Print discovered sensors, fans, vendor and current metrics.
+#   --calibrate  Force a calibration pass, persist the result, and exit.
+#   --restore    Hand fan regulation back to the BMC (automatic) and exit.
+#   --once       Print one metrics line and exit.
 #
 # How it works:
 #   Temperature sensors and their own Upper-Critical thresholds are discovered
-#   at runtime from ipmitool, so no threshold is hard-coded and the same speed
-#   curve self-scales to any CPU. Sensors whose Upper-Critical is high enough
-#   (CONTROL_UCR_MIN) are treated as the controlling (CPU-class) sensors.
+#   at runtime, so nothing is hard-coded. Sensors whose Upper-Critical is high
+#   enough (CONTROL_UCR_MIN) are the controlling (CPU-class) sensors; the daemon
+#   holds the hottest of them near TARGET_TEMP.
 #
-#   Writing the fan speed is the only vendor-specific step. The vendor is
-#   auto-detected via "ipmitool mc info" (IANA Manufacturer ID) and mapped to a
-#   small command profile. Dell iDRAC is supported; any unknown vendor falls
-#   back to monitor mode and never touches the fans.
+#   Calibration measures the real thermal response of THIS machine: it converges
+#   the fan speed to the quiet operating point that holds the target, and records
+#   the fan/temperature slope. The result (CAL_PCT, CAL_SLOPE, CAL_INLET) is
+#   persisted so it survives restarts. In normal operation the daemon applies a
+#   proportional correction around the calibrated point, and recalibrates by
+#   itself when the error stays large (too hot, or fans running harder than the
+#   temperature warrants) or when the inlet air temperature drifts.
 #
-#   The BMC automatic regulation is restored on any failsafe: over-temperature,
-#   a failed fan, unreadable sensors, repeated IPMI errors, or process exit.
+#   Safety is temperature-based, never fan-count-based: a single failed fan among
+#   many has no special handling; only an over-temperature (near Upper-Critical)
+#   forces maximum cooling. Writing the fan speed uses an auto-detected vendor
+#   profile (ipmitool mc info); an unknown vendor stays in read-only monitor mode.
 #
-# Note on shell options: the daemon deliberately does not use "set -e". A
-# transient ipmitool failure must not kill the control loop; every command that
-# may fail is handled explicitly and falls back to safe BMC regulation.
+# Note on shell options: the daemon deliberately does not use "set -e"; a
+# transient ipmitool failure must not kill the control loop.
 
 set -uo pipefail
 
 readonly CONF=/etc/fanctl/fanctl.conf
+readonly STATE_DIR=/var/lib/fanctl
+readonly STATE_FILE="${STATE_DIR}/calibration.conf"
 
 # --- Defaults (overridden by CONF) ------------------------------------------
-# These are plain (non-readonly) variables because the config file reassigns
-# them when present.
-IPMITOOL=ipmitool         # ipmitool binary; local IPMI via /dev/ipmi0
-POLL_INTERVAL=15          # Seconds between regulation cycles.
-MIN_PCT=20                # Fan speed floor, percent.
+IPMITOOL=ipmitool         # ipmitool binary; local IPMI via /dev/ipmi0.
+POLL_INTERVAL=20          # Seconds between control cycles.
+MIN_PCT=15                # Fan speed floor, percent.
 MAX_PCT=100               # Fan speed ceiling, percent.
-BASE_TEMP=35              # Idle temperature, degrees C (bottom of the curve).
-SAFETY_MARGIN=15          # Curve top = sensor Upper-Critical minus this (deg C).
-HARD_MARGIN=8             # Failsafe to BMC at Upper-Critical minus this (deg C).
-HYST_PCT=4                # Minimum percent change before issuing a command.
+TARGET_TEMP=60            # Target for the hottest controlling sensor, deg C.
+HARD_MARGIN=10            # Emergency: force max at Upper-Critical minus this.
 CONTROL_UCR_MIN=80        # A sensor with Upper-Critical >= this is CPU-class.
-AMBIENT_MATCH='Inlet|Ambient'  # Regex for the inlet-air sensor (extra guard).
-ALLOW_DEGRADED=0          # 1 = keep regulating with a failed fan (raised floor).
-DEGRADED_MIN_PCT=40       # Fan speed floor while degraded, percent.
+AMBIENT_MATCH='Inlet|Ambient'  # Regex for the inlet-air sensor.
+HYST_PCT=3                # Minimum percent change before issuing a command.
 MAX_FAIL=3                # Consecutive IPMI read errors before failsafe.
 REQUIRE_KNOWN_VENDOR=0    # 1 = exit on unknown vendor; 0 = monitor mode.
+
+# Calibration and drift tuning.
+DEADBAND=3                # Convergence tolerance during calibration, deg C.
+DRIFT=8                   # Sustained |error| that triggers recalibration, deg C.
+DRIFT_CYCLES=5            # Cycles the drift must persist before recalibrating.
+INLET_DRIFT=5            # Inlet change vs calibration that triggers recal, deg C.
+STABILIZE_SECS=40         # Settle time after a fan change while calibrating.
+MAX_CAL_STEPS=10          # Maximum convergence steps per calibration.
+CAL_STEP_MIN=2            # Minimum per-step fan change while calibrating, pct.
+CAL_STEP_MAX=12           # Maximum per-step fan change while calibrating, pct.
+DEFAULT_GAIN=3            # Fallback proportional gain, percent per deg C.
 
 # shellcheck source=/dev/null
 [[ -r "$CONF" ]] && . "$CONF"
 
 # --- Runtime state ----------------------------------------------------------
-VENDOR=unknown            # Detected vendor key.
-RAW_MANUAL=''             # Raw command args: switch to manual fan control.
-RAW_AUTO=''               # Raw command args: switch back to BMC automatic.
-RAW_SET_PREFIX=''         # Raw command prefix: set speed (speed byte appended).
-DRY_RUN=0                 # 1 = never write to the BMC.
+VENDOR=unknown
+RAW_MANUAL=''
+RAW_AUTO=''
+RAW_SET_PREFIX=''
 MODE=auto                 # Current control mode: auto | manual.
 LAST_PCT=-1               # Last applied speed, percent (-1 = unknown).
 FAIL_COUNT=0              # Consecutive IPMI read failures.
-FAN_FAIL_LOGGED=0         # Whether the current fan failure was already logged.
+DRIFT_COUNT=0             # Consecutive cycles with |error| > DRIFT.
 
-#######################################
-# Write a timestamped line to stdout.
-# Arguments:
-#   $* - message
-# Outputs:
-#   Writes the message to stdout.
-#######################################
+# Persisted calibration (loaded from STATE_FILE).
+CAL_PCT=0                 # Calibrated operating fan speed, percent.
+CAL_SLOPE=0               # Measured response, deg C per percent (negative).
+CAL_INLET=0               # Inlet temperature at calibration time, deg C.
+
+# Metrics from the last read (set by eval of read_metrics).
+T=0                       # Hottest controlling sensor, deg C.
+CRITMIN=0                 # Lowest Upper-Critical among controlling sensors.
+INLET=0                   # Inlet-air temperature, deg C.
+NCTRL=0                   # Number of controlling sensors seen.
+
 log() {
   printf '%s fanctl: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"
 }
@@ -78,8 +93,6 @@ log() {
 # Detect the BMC vendor and populate the raw command profile.
 # Globals:
 #   IPMITOOL (read), VENDOR, RAW_MANUAL, RAW_AUTO, RAW_SET_PREFIX (write)
-# Outputs:
-#   Logs the detected vendor.
 #######################################
 detect_vendor() {
   local mc mfg
@@ -100,154 +113,37 @@ detect_vendor() {
   log "vendor detected: ${VENDOR} (Manufacturer ID='${mfg:-?}')"
 }
 
-#######################################
-# Whether active fan control is available for the detected vendor.
-# Globals:
-#   RAW_SET_PREFIX (read)
-# Returns:
-#   0 if control is possible, 1 otherwise.
-#######################################
 can_control() {
   [[ -n "$RAW_SET_PREFIX" ]]
 }
 
-#######################################
-# Hand fan regulation back to the BMC automatic mode.
-# Globals:
-#   DRY_RUN, IPMITOOL, RAW_AUTO (read)
-# Returns:
-#   0 on success, non-zero on IPMI error.
-#######################################
 bmc_auto() {
   can_control || return 0
-  if [[ "$DRY_RUN" == 1 ]]; then
-    log "[dry-run] BMC automatic"
-    return 0
-  fi
   "$IPMITOOL" raw $RAW_AUTO >/dev/null 2>&1
 }
 
-#######################################
-# Switch the BMC to manual fan control.
-# Globals:
-#   DRY_RUN, IPMITOOL, RAW_MANUAL (read)
-# Returns:
-#   0 on success, non-zero on IPMI error.
-#######################################
 bmc_manual() {
   can_control || return 0
-  [[ "$DRY_RUN" == 1 ]] && return 0
   "$IPMITOOL" raw $RAW_MANUAL >/dev/null 2>&1
 }
 
 #######################################
-# Set all fans to a given speed (manual mode must be active).
+# Set all fans to a given speed and remember it.
 # Globals:
-#   DRY_RUN, IPMITOOL, RAW_SET_PREFIX (read)
+#   IPMITOOL, RAW_SET_PREFIX (read), LAST_PCT (write)
 # Arguments:
 #   $1 - speed as a decimal percent
-# Returns:
-#   0 on success, non-zero on IPMI error.
 #######################################
 bmc_set() {
   local hex
   hex=$(printf '0x%02x' "$1")
-  if [[ "$DRY_RUN" == 1 ]]; then
-    log "[dry-run] set fans to ${1}%"
+  if "$IPMITOOL" raw $RAW_SET_PREFIX "$hex" >/dev/null 2>&1; then
+    LAST_PCT="$1"
     return 0
   fi
-  "$IPMITOOL" raw $RAW_SET_PREFIX "$hex" >/dev/null 2>&1
+  return 1
 }
 
-#######################################
-# Read every temperature sensor and derive the control state in one pass.
-# Each controlling sensor is normalized against its own Upper-Critical, and the
-# hottest normalized value drives the fan curve.
-# Globals:
-#   IPMITOOL, BASE_TEMP, SAFETY_MARGIN, HARD_MARGIN, CONTROL_UCR_MIN,
-#   AMBIENT_MATCH (read)
-# Outputs:
-#   One line "MAXN=<0-100> HARD=<0|1> AMBIENT_HOT=<0|1> NCTRL=<n>" to stdout.
-# Returns:
-#   0 on success, 1 if IPMI returned nothing.
-#######################################
-read_state() {
-  local out
-  out=$("$IPMITOOL" sensor 2>/dev/null) || return 1
-  [[ -n "$out" ]] || return 1
-  awk -F'|' \
-    -v base="$BASE_TEMP" -v smarg="$SAFETY_MARGIN" -v hmarg="$HARD_MARGIN" \
-    -v umin="$CONTROL_UCR_MIN" -v amb="$AMBIENT_MATCH" '
-    function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
-    {
-      name = trim($1); reading = trim($2); unit = trim($3); ucr = trim($9)
-    }
-    unit ~ /degrees C/ && reading ~ /^[0-9]+(\.[0-9]+)?$/ {
-      r = reading + 0
-      has_ucr = (ucr ~ /^[0-9]+(\.[0-9]+)?$/)
-      # Inlet-air guard: near-critical inlet forces a failsafe.
-      if (name ~ amb && has_ucr && r >= (ucr + 0) - hmarg) ambient_hot = 1
-      # Controlling sensors: a high Upper-Critical marks CPU-class sensors on
-      # any vendor, which naturally excludes inlet and exhaust probes.
-      if (has_ucr && (ucr + 0) >= umin) {
-        nctrl++
-        target = (ucr + 0) - smarg
-        if (target > base) {
-          n = (r - base) / (target - base)
-          if (n < 0) n = 0
-          if (n > 1) n = 1
-          if (n > maxn) maxn = n
-        }
-        if (r >= (ucr + 0) - hmarg) hard = 1
-      }
-    }
-    END {
-      printf "MAXN=%d HARD=%d AMBIENT_HOT=%d NCTRL=%d\n", \
-        int(maxn * 100 + 0.5), hard + 0, ambient_hot + 0, nctrl + 0
-    }' <<<"$out"
-}
-
-#######################################
-# Detect a failed fan (present but reading zero, or in a critical state).
-# An unpopulated slot reports "ns" (no reading) and is ignored.
-# Globals:
-#   IPMITOOL (read)
-# Returns:
-#   0 if a fan failure is detected, 1 otherwise.
-#######################################
-fan_failed() {
-  local out
-  out=$("$IPMITOOL" sdr type fan 2>/dev/null) || return 1
-  awk -F'|' '
-    function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
-    {
-      status = trim($3); val = trim($5)
-      if (status == "ns") next
-      rpm = val; sub(/ *RPM.*/, "", rpm)
-      if (rpm ~ /^[0-9]+$/ && (rpm + 0) == 0) failed = 1
-      if (status == "cr" || status == "nc") failed = 1
-    }
-    END { exit (failed ? 0 : 1) }' <<<"$out"
-}
-
-#######################################
-# Map a normalized load to a fan speed percent within [MIN_PCT, MAX_PCT].
-# Globals:
-#   MIN_PCT, MAX_PCT (read)
-# Arguments:
-#   $1 - normalized load, 0-100
-# Outputs:
-#   The fan speed percent to stdout.
-#######################################
-pct_from_norm() {
-  echo $(( MIN_PCT + ($1 * (MAX_PCT - MIN_PCT)) / 100 ))
-}
-
-#######################################
-# Switch to BMC automatic mode, updating local state.
-# Globals:
-#   MODE, LAST_PCT (write)
-#######################################
 to_auto() {
   [[ "$MODE" == auto ]] && return 0
   if bmc_auto; then
@@ -256,34 +152,188 @@ to_auto() {
   fi
 }
 
-#######################################
-# Switch to manual mode, updating local state.
-# Globals:
-#   MODE (write)
-#######################################
 to_manual() {
   [[ "$MODE" == manual ]] && return 0
   bmc_manual && MODE=manual
 }
 
 #######################################
-# Restore BMC automatic regulation on exit. Registered as an EXIT/INT/TERM trap.
+# Apply a fan speed with hysteresis (clamped to [MIN_PCT, MAX_PCT]).
+# Arguments:
+#   $1 - desired percent
 #######################################
+apply_pct() {
+  local pct="$1" delta
+  (( pct < MIN_PCT )) && pct="$MIN_PCT"
+  (( pct > MAX_PCT )) && pct="$MAX_PCT"
+  to_manual
+  delta=$(( pct > LAST_PCT ? pct - LAST_PCT : LAST_PCT - pct ))
+  if (( LAST_PCT < 0 || delta >= HYST_PCT )); then
+    if bmc_set "$pct"; then
+      log "fans -> ${pct}% (T=${T}C target=$(effective_target)C)"
+    else
+      log "failed to set fan speed -> BMC automatic"
+      to_auto
+    fi
+  fi
+}
+
+#######################################
+# Read controlling and inlet temperatures in a single ipmitool pass.
+# Globals:
+#   IPMITOOL, CONTROL_UCR_MIN, AMBIENT_MATCH (read)
+# Outputs:
+#   "T=<hottest> CRITMIN=<min ucr> INLET=<inlet> NCTRL=<n>" to stdout.
+# Returns:
+#   0 on success, 1 if IPMI returned nothing.
+#######################################
+read_metrics() {
+  local out
+  out=$("$IPMITOOL" sensor 2>/dev/null) || return 1
+  [[ -n "$out" ]] || return 1
+  awk -F'|' -v umin="$CONTROL_UCR_MIN" -v amb="$AMBIENT_MATCH" '
+    function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+    { name = trim($1); reading = trim($2); unit = trim($3); ucr = trim($9) }
+    unit ~ /degrees C/ && reading ~ /^[0-9]+(\.[0-9]+)?$/ {
+      r = reading + 0
+      if (name ~ amb) inlet = r
+      has_ucr = (ucr ~ /^[0-9]+(\.[0-9]+)?$/)
+      if (has_ucr && (ucr + 0) >= umin) {
+        nctrl++
+        if (r > hottest) hottest = r
+        if (critmin == 0 || (ucr + 0) < critmin) critmin = ucr + 0
+      }
+    }
+    END {
+      printf "T=%d CRITMIN=%d INLET=%d NCTRL=%d\n", \
+        int(hottest + 0.5), int(critmin + 0.5), int(inlet + 0.5), nctrl + 0
+    }' <<<"$out"
+}
+
+#######################################
+# Compute the effective target, kept safely below Upper-Critical.
+# Globals:
+#   TARGET_TEMP, CRITMIN, HARD_MARGIN (read)
+# Outputs:
+#   The effective target temperature to stdout.
+#######################################
+effective_target() {
+  local ceiling=$(( CRITMIN - HARD_MARGIN - 5 ))
+  if (( CRITMIN > 0 && TARGET_TEMP > ceiling )); then
+    echo "$ceiling"
+  else
+    echo "$TARGET_TEMP"
+  fi
+}
+
+#######################################
+# Proportional gain (percent per deg C) from the calibrated slope.
+# Globals:
+#   CAL_SLOPE, DEFAULT_GAIN (read)
+# Outputs:
+#   The gain to stdout.
+#######################################
+current_gain() {
+  # CAL_SLOPE is deg C per percent (negative); gain is its inverse magnitude.
+  awk -v s="$CAL_SLOPE" -v d="$DEFAULT_GAIN" 'BEGIN {
+    a = (s < 0) ? -s : s
+    if (a < 0.05) { print d; exit }
+    g = 1.0 / a
+    if (g < 1) g = 1
+    if (g > 10) g = 10
+    printf "%d", g + 0.5
+  }'
+}
+
+load_calibration() {
+  if [[ -r "$STATE_FILE" ]]; then
+    # shellcheck source=/dev/null
+    . "$STATE_FILE"
+    log "loaded calibration: pct=${CAL_PCT}% slope=${CAL_SLOPE}C/% inlet=${CAL_INLET}C"
+    return 0
+  fi
+  return 1
+}
+
+save_calibration() {
+  mkdir -p "$STATE_DIR"
+  cat > "$STATE_FILE" <<EOF
+# Written by fanctl --calibrate. Do not edit by hand.
+CAL_PCT=${CAL_PCT}
+CAL_SLOPE=${CAL_SLOPE}
+CAL_INLET=${CAL_INLET}
+CAL_TARGET=$(effective_target)
+CAL_TS=$(date '+%Y-%m-%dT%H:%M:%S%z')
+EOF
+}
+
+#######################################
+# Measure the quiet operating point for the current conditions and persist it.
+# Converges the fan speed so the hottest sensor sits near the target, and
+# derives the fan/temperature slope from the last two convergence points.
+# Globals:
+#   Calibration tuning and CAL_* state.
+#######################################
+calibrate() {
+  can_control || return 0
+  read_metrics_into || return 1
+  local target; target=$(effective_target)
+  log "calibrating toward ${target}C (inlet=${INLET}C, ${NCTRL} sensors)..."
+  to_manual
+
+  local pct prev_pct=-1 prev_t=-1 step err
+  pct=$(( CAL_PCT > 0 ? CAL_PCT : (MIN_PCT + MAX_PCT) / 2 ))
+  local i
+  for (( i = 0; i < MAX_CAL_STEPS; i++ )); do
+    (( pct < MIN_PCT )) && pct="$MIN_PCT"
+    (( pct > MAX_PCT )) && pct="$MAX_PCT"
+    bmc_set "$pct"
+    sleep "$STABILIZE_SECS"
+    read_metrics_into || return 1
+    err=$(( T - target ))
+    log "  step ${i}: ${pct}% -> ${T}C (err=${err})"
+
+    # Derive the slope from the last two distinct operating points.
+    if (( prev_pct >= 0 && pct != prev_pct )); then
+      CAL_SLOPE=$(awk -v t1="$prev_t" -v t2="$T" -v p1="$prev_pct" -v p2="$pct" \
+        'BEGIN { printf "%.3f", (t2 - t1) / (p2 - p1) }')
+    fi
+
+    if (( err <= DEADBAND && err >= -DEADBAND )); then break; fi
+    if (( pct <= MIN_PCT && err < 0 )); then break; fi   # As quiet as allowed.
+    if (( pct >= MAX_PCT && err > 0 )); then break; fi   # As loud as allowed.
+
+    prev_pct="$pct"; prev_t="$T"
+    step=$(( err >= 0 ? err : -err ))
+    (( step < CAL_STEP_MIN )) && step="$CAL_STEP_MIN"
+    (( step > CAL_STEP_MAX )) && step="$CAL_STEP_MAX"
+    (( pct += (err > 0 ? step : -step) ))
+  done
+
+  CAL_PCT="$pct"
+  CAL_INLET="$INLET"
+  save_calibration
+  DRIFT_COUNT=0
+  log "calibrated: pct=${CAL_PCT}% slope=${CAL_SLOPE}C/% (gain=$(current_gain)%/C)"
+}
+
+# read_metrics wrapper that assigns the T/CRITMIN/INLET/NCTRL globals.
+read_metrics_into() {
+  local line
+  line=$(read_metrics) || return 1
+  # shellcheck disable=SC2086
+  eval "$line"
+  return 0
+}
+
 cleanup() {
   log "stopping -> restoring BMC automatic regulation"
   can_control && bmc_auto
 }
 
-#######################################
-# Print discovered sensors, fans, vendor and computed state, then exit.
-# Globals:
-#   IPMITOOL, VENDOR (read)
-# Outputs:
-#   Human-readable diagnostics to stdout.
-#######################################
 do_check() {
   detect_vendor
-  echo "--- Temperature sensors (ipmitool sensor) ---"
+  echo "--- Temperature sensors ---"
   "$IPMITOOL" sensor 2>/dev/null | awk -F'|' '
     function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
     { u = trim($3) }
@@ -292,24 +342,20 @@ do_check() {
     }'
   echo "--- Fans ---"
   "$IPMITOOL" sdr type fan 2>/dev/null | sed 's/^/  /'
-  echo "--- Computed state ---"
-  local state
-  if state=$(read_state); then
-    echo "  $state"
+  echo "--- Metrics ---"
+  if read_metrics_into; then
+    echo "  T=${T}C CRITMIN=${CRITMIN}C INLET=${INLET}C sensors=${NCTRL}" \
+      "target=$(effective_target)C"
   else
     echo "  (IPMI read failed)"
   fi
+  echo "--- Calibration ---"
+  if load_calibration; then :; else echo "  (not calibrated yet)"; fi
   echo "--- Active control available? ---"
-  if can_control; then
-    echo "  yes (vendor=${VENDOR})"
-  else
-    echo "  no -> monitor mode (vendor ${VENDOR} not supported)"
-  fi
+  if can_control; then echo "  yes (vendor=${VENDOR})"; else
+    echo "  no -> monitor mode (vendor ${VENDOR} not supported)"; fi
 }
 
-#######################################
-# Hand regulation back to the BMC and exit.
-#######################################
 do_restore() {
   detect_vendor
   if can_control; then
@@ -320,82 +366,44 @@ do_restore() {
 }
 
 #######################################
-# Handle an IPMI read failure: count it and fail safe past the threshold.
+# One regulation cycle: proportional control plus drift-driven recalibration.
 # Globals:
-#   FAIL_COUNT (write), MAX_FAIL (read)
-#######################################
-handle_read_failure() {
-  FAIL_COUNT=$((FAIL_COUNT + 1))
-  log "IPMI read failed (${FAIL_COUNT}/${MAX_FAIL})"
-  if [[ "$FAIL_COUNT" -ge "$MAX_FAIL" ]] && can_control; then
-    to_auto
-  fi
-}
-
-#######################################
-# Apply one regulation decision from a parsed state.
-# Globals:
-#   MAXN, HARD, AMBIENT_HOT, NCTRL (read, set by eval of read_state)
-#   ALLOW_DEGRADED, DEGRADED_MIN_PCT, MIN_PCT, MAX_PCT, HYST_PCT (read)
-#   LAST_PCT, FAN_FAIL_LOGGED (write)
+#   T, CRITMIN, INLET, CAL_PCT, CAL_INLET, DRIFT_COUNT and tuning.
 #######################################
 regulate() {
-  # Failsafes first: hand control back to the BMC.
-  if [[ "$NCTRL" -eq 0 ]]; then
-    log "no readable controlling sensor -> BMC automatic (safety)"
-    to_auto
-    return
-  fi
-  if [[ "$HARD" == 1 || "$AMBIENT_HOT" == 1 ]]; then
-    log "thermal failsafe (hard=${HARD} ambient=${AMBIENT_HOT}) -> BMC automatic"
-    to_auto
+  local target err gain pct inlet_delta
+  target=$(effective_target)
+
+  # Temperature-based emergency: nothing else matters.
+  if (( T >= CRITMIN - HARD_MARGIN )); then
+    log "over-temperature (${T}C, crit ${CRITMIN}C) -> max cooling"
+    apply_pct "$MAX_PCT"
+    DRIFT_COUNT=0
     return
   fi
 
-  # A failed fan reverts to BMC automatic unless degraded mode is allowed.
-  local floor="$MIN_PCT"
-  if fan_failed; then
-    if [[ "$ALLOW_DEGRADED" != 1 ]]; then
-      if [[ "$FAN_FAIL_LOGGED" == 0 ]]; then
-        log "failed fan -> BMC automatic (ALLOW_DEGRADED=0)"
-        FAN_FAIL_LOGGED=1
-      fi
-      to_auto
-      return
-    fi
-    floor="$DEGRADED_MIN_PCT"
-    if [[ "$FAN_FAIL_LOGGED" == 0 ]]; then
-      log "failed fan -> degraded mode, floor ${floor}%"
-      FAN_FAIL_LOGGED=1
-    fi
+  err=$(( T - target ))
+  gain=$(current_gain)
+  pct=$(( CAL_PCT + err * gain ))
+  apply_pct "$pct"
+
+  # Sustained large error (too hot, or fans harder than the temp warrants)
+  # or a shifted inlet means the calibrated point is stale: recalibrate.
+  inlet_delta=$(( INLET > CAL_INLET ? INLET - CAL_INLET : CAL_INLET - INLET ))
+  if (( err > DRIFT || err < -DRIFT )); then
+    (( DRIFT_COUNT++ ))
   else
-    FAN_FAIL_LOGGED=0
+    DRIFT_COUNT=0
   fi
-
-  # Compute and apply the target speed with hysteresis.
-  local pct
-  pct=$(pct_from_norm "$MAXN")
-  [[ "$pct" -lt "$floor" ]] && pct="$floor"
-  [[ "$pct" -gt "$MAX_PCT" ]] && pct="$MAX_PCT"
-
-  to_manual
-  local delta=$(( pct > LAST_PCT ? pct - LAST_PCT : LAST_PCT - pct ))
-  if [[ "$LAST_PCT" -lt 0 || "$delta" -ge "$HYST_PCT" ]]; then
-    if bmc_set "$pct"; then
-      log "load=${MAXN}% -> fans ${pct}%"
-      LAST_PCT="$pct"
-    else
-      log "failed to set fan speed -> BMC automatic (safety)"
-      to_auto
-    fi
+  if (( DRIFT_COUNT >= DRIFT_CYCLES )); then
+    log "sustained drift (err=${err}C) -> recalibrate"
+    calibrate
+  elif (( inlet_delta > INLET_DRIFT )); then
+    log "inlet shifted (${CAL_INLET}C -> ${INLET}C) -> recalibrate"
+    calibrate
   fi
 }
 
-#######################################
-# Run the control loop until terminated.
-# Globals:
-#   Most configuration and runtime state variables.
-#######################################
 run_daemon() {
   detect_vendor
   if ! can_control; then
@@ -406,26 +414,34 @@ run_daemon() {
     fi
     log "monitor mode: read-only, fans stay under BMC automatic control."
   fi
-  # Restore BMC regulation on exit; a signal exits cleanly through that trap.
   trap cleanup EXIT
   trap 'exit 0' INT TERM
-  log "starting (poll=${POLL_INTERVAL}s min=${MIN_PCT}% max=${MAX_PCT}%" \
-    "base=${BASE_TEMP}C margin=${SAFETY_MARGIN}C)"
+  log "starting (poll=${POLL_INTERVAL}s target=${TARGET_TEMP}C" \
+    "range=${MIN_PCT}-${MAX_PCT}%)"
 
-  local state
+  if can_control; then
+    to_manual
+    load_calibration || calibrate
+  fi
+
   while :; do
-    if ! state=$(read_state); then
-      handle_read_failure
+    if ! read_metrics_into; then
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+      log "IPMI read failed (${FAIL_COUNT}/${MAX_FAIL})"
+      (( FAIL_COUNT >= MAX_FAIL )) && can_control && to_auto
       sleep "$POLL_INTERVAL"
       continue
     fi
     FAIL_COUNT=0
-    # read_state emits "MAXN=.. HARD=.. AMBIENT_HOT=.. NCTRL=..".
-    # shellcheck disable=SC2086
-    eval "$state"
 
     if ! can_control; then
-      log "monitor: load=${MAXN}% (controlling sensors=${NCTRL})"
+      log "monitor: T=${T}C inlet=${INLET}C sensors=${NCTRL}"
+      sleep "$POLL_INTERVAL"
+      continue
+    fi
+    if (( NCTRL == 0 )); then
+      log "no controlling sensor readable -> BMC automatic (safety)"
+      to_auto
       sleep "$POLL_INTERVAL"
       continue
     fi
@@ -435,20 +451,21 @@ run_daemon() {
   done
 }
 
-#######################################
-# Entry point: dispatch on the first argument.
-# Arguments:
-#   $1 - mode flag (default --daemon)
-#######################################
 main() {
   case "${1:---daemon}" in
     --check) do_check ;;
     --restore) do_restore ;;
-    --dry-run) DRY_RUN=1; run_daemon ;;
-    --once) detect_vendor; read_state ;;
+    --calibrate)
+      detect_vendor
+      to_manual
+      load_calibration || true
+      calibrate
+      cleanup
+      ;;
+    --once) detect_vendor; read_metrics ;;
     --daemon) run_daemon ;;
     *)
-      echo "usage: fanctl [--daemon|--check|--dry-run|--restore|--once]" >&2
+      echo "usage: fanctl [--daemon|--check|--calibrate|--restore|--once]" >&2
       exit 2
       ;;
   esac

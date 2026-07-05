@@ -15,10 +15,12 @@ Restart=on-failure
 RestartSec=10
 Nice=5
 
+# Persistent calibration state in /var/lib/fanctl (created and made writable).
+StateDirectory=fanctl
+
 # Light hardening (needs /dev/ipmi0 and to execute ipmitool).
 ProtectHome=yes
 ProtectSystem=strict
-ReadWritePaths=/run
 NoNewPrivileges=yes
 
 [Install]
