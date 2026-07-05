@@ -1,0 +1,464 @@
+#!/bin/bash
+#
+# powerctl — measured performance-per-watt operating-point controller
+#
+# Usage: powerctl [--daemon|--check|--calibrate|--restore|--once]
+#   --daemon     Run the control loop (default when no argument is given).
+#   --check      Print detected features, calibrated tiers and live metrics.
+#   --calibrate  Force a calibration now (loads the CPU) and persist tiers.
+#   --restore    Remove any frequency cap and restore defaults, then exit.
+#   --once       Print one metrics line and exit.
+#
+# What it does:
+#   The CPU frequency/voltage curve has an efficiency knee: the top few hundred
+#   MHz cost disproportionate watts (and therefore heat and fan noise) for little
+#   extra work. powerctl measures that curve on THIS machine — it caps the CPU at
+#   each factory frequency step, saturates the cores, and reads the real package
+#   power from RAPL — then picks the knee as the default operating point. The
+#   kernel governor still scales below the cap with load; powerctl raises the cap
+#   toward the factory maximum only while a sustained load actually benefits from
+#   more frequency, and returns to the knee when it does not.
+#
+#   Everything stays inside the factory range: it only chooses WHERE on the
+#   stock curve to sit, never beyond spec. There is no undervolt and no
+#   overclock, so there is no crash or corruption risk.
+#
+#   Calibration loads the CPU, so it is disruptive: it runs only in an idle
+#   window (low utilization sustained) unless forced with --calibrate. First
+#   boot (no saved tiers) and drift both defer to the next idle window.
+#
+# Note on shell options: the daemon deliberately does not use "set -e"; a
+# transient read failure must not kill the control loop.
+
+set -uo pipefail
+
+readonly CONF=/etc/powerctl/powerctl.conf
+readonly STATE_DIR=/var/lib/powerctl
+readonly STATE_FILE="${STATE_DIR}/tiers.conf"
+readonly CPUBASE=/sys/devices/system/cpu
+readonly RAPLBASE=/sys/class/powercap
+
+# --- Defaults (overridden by CONF) ------------------------------------------
+GOVERNOR=schedutil        # Preferred governor; falls back if unavailable.
+EPP=balance_power         # energy_performance_preference when supported.
+POLL_INTERVAL=20          # Seconds between control cycles.
+N_TIERS=6                 # Calibration frequency steps when the list is continuous.
+LOAD_SECS=4               # Core-saturation settle time per tier, seconds.
+SAMPLE_SECS=3             # RAPL sampling window per tier, seconds.
+KNEE_FRACTION=50          # Keep climbing while marginal MHz/W >= this % of best.
+ESCALATE_UTIL=80          # Utilization (%) above which the cap may rise.
+DEESCALATE_UTIL=40        # Utilization (%) below which the cap falls to knee.
+IPC_BUSY=70               # IPC x100: at or above this the workload is compute-bound.
+IPC_SAMPLE_SECS=1         # perf sampling window per cycle, seconds.
+CAP_STEP_PCT=15           # Cap move per cycle, percent of the knee..max range.
+IDLE_UTIL=10              # Utilization (%) considered idle for calibration.
+IDLE_WINDOW=300           # Idle must last this long before calibrating, seconds.
+DRIFT_WATT_PCT=20         # Watt deviation vs calibration that flags drift.
+SET_MIN_TO_HW=1           # 1 = pin scaling_min_freq to hardware min while running.
+
+# shellcheck source=/dev/null
+[[ -r "$CONF" ]] && . "$CONF"
+
+# --- Runtime state ----------------------------------------------------------
+HAVE_CPUFREQ=0
+HAVE_RAPL=0
+KNEE_FREQ=0               # Calibrated efficiency-knee frequency, kHz.
+MAX_FREQ=0               # Factory maximum frequency, kHz.
+MIN_FREQ=0               # Factory minimum frequency, kHz.
+KNEE_WATTS=0             # Package watts measured at the knee.
+CUR_CAP=0                # Currently applied cap, kHz.
+HAVE_PERF=0              # 1 = perf PMU counters available (compute-bound sense).
+IDLE_ELAPSED=0          # Seconds of sustained idle accumulated.
+NEED_CAL=0               # 1 = a calibration is pending (first boot or drift).
+PREV_STAT=''            # Previous /proc/stat first line for utilization delta.
+
+log() {
+  printf '%s powerctl: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"
+}
+
+#######################################
+# Detect available power-management interfaces.
+# Globals:
+#   HAVE_CPUFREQ, HAVE_RAPL, HAVE_PERF, MIN_FREQ, MAX_FREQ (write)
+#######################################
+detect_features() {
+  if [[ -r "${CPUBASE}/cpu0/cpufreq/scaling_max_freq" ]]; then
+    HAVE_CPUFREQ=1
+    MAX_FREQ=$(cat "${CPUBASE}/cpu0/cpufreq/cpuinfo_max_freq" 2>/dev/null || echo 0)
+    MIN_FREQ=$(cat "${CPUBASE}/cpu0/cpufreq/cpuinfo_min_freq" 2>/dev/null || echo 0)
+  fi
+  # RAPL only counts if we can actually read the energy counter (root-only).
+  [[ -n "$(rapl_energy)" ]] && HAVE_RAPL=1
+  # perf PMU access lets us sense compute-boundedness for the real-time curve.
+  if command -v perf >/dev/null 2>&1 \
+    && perf stat -e instructions -- true >/dev/null 2>&1; then
+    HAVE_PERF=1
+  fi
+  log "features: cpufreq=${HAVE_CPUFREQ} rapl=${HAVE_RAPL} perf=${HAVE_PERF}" \
+    "freq=${MIN_FREQ}-${MAX_FREQ}kHz"
+}
+
+#######################################
+# Measure whole-system IPC (instructions per cycle) over a short window via perf.
+# Globals:
+#   IPC_SAMPLE_SECS (read)
+# Outputs:
+#   IPC x100 as an integer to stdout (empty if unavailable).
+#######################################
+read_ipc() {
+  local out ins cyc
+  out=$(perf stat -a --no-big-num -e instructions,cycles -- \
+    sleep "$IPC_SAMPLE_SECS" 2>&1) || return 1
+  ins=$(awk '/instructions/ {gsub(/[^0-9]/, "", $1); print $1; exit}' <<<"$out")
+  cyc=$(awk '/cycles/ {gsub(/[^0-9]/, "", $1); print $1; exit}' <<<"$out")
+  [[ "$ins" =~ ^[0-9]+$ && "$cyc" =~ ^[0-9]+$ && "$cyc" -gt 0 ]] || return 1
+  echo $(( ins * 100 / cyc ))
+}
+
+# Write a value to the same cpufreq attribute on every CPU.
+cpufreq_write_all() {
+  local attr="$1" val="$2" f
+  for f in "${CPUBASE}"/cpu[0-9]*/cpufreq/"$attr"; do
+    [[ -w "$f" ]] && echo "$val" > "$f" 2>/dev/null
+  done
+}
+
+# Pick the preferred governor if available, otherwise a sensible fallback.
+choose_governor() {
+  local avail
+  avail=$(cat "${CPUBASE}/cpu0/cpufreq/scaling_available_governors" 2>/dev/null)
+  local g
+  for g in "$GOVERNOR" schedutil ondemand powersave; do
+    [[ " $avail " == *" $g "* ]] && { echo "$g"; return; }
+  done
+  echo ""
+}
+
+#######################################
+# Sum RAPL package energy across all sockets, in microjoules.
+# Outputs:
+#   Total energy_uj to stdout (empty if RAPL is absent).
+#######################################
+rapl_energy() {
+  local d total=0 e
+  for d in "${RAPLBASE}"/*-rapl:[0-9]; do
+    e=$(cat "$d/energy_uj" 2>/dev/null) || continue
+    total=$(( total + e ))
+  done
+  [[ "$total" -gt 0 ]] && echo "$total"
+}
+
+#######################################
+# Measure average package power over a window.
+# Arguments:
+#   $1 - sample seconds
+# Outputs:
+#   Average watts to stdout (empty if RAPL is absent).
+#######################################
+read_watts() {
+  local e0 e1
+  e0=$(rapl_energy) || return 1
+  sleep "$1"
+  e1=$(rapl_energy) || return 1
+  awk -v a="$e0" -v b="$e1" -v t="$1" \
+    'BEGIN { d = b - a; if (d < 0) d = b; printf "%.1f", d / 1e6 / t }'
+}
+
+#######################################
+# CPU utilization (%) since the previous call, from /proc/stat.
+# Globals:
+#   PREV_STAT (read/write)
+# Outputs:
+#   Integer utilization percent to stdout.
+#######################################
+cpu_util() {
+  local cur idle1 total1 idle0 total0
+  cur=$(awk '/^cpu /{i=$5+$6; t=0; for(k=2;k<=NF;k++)t+=$k; print i, t}' /proc/stat)
+  if [[ -z "$PREV_STAT" ]]; then PREV_STAT="$cur"; echo 0; return; fi
+  read -r idle0 total0 <<<"$PREV_STAT"
+  read -r idle1 total1 <<<"$cur"
+  PREV_STAT="$cur"
+  awk -v i0="$idle0" -v t0="$total0" -v i1="$idle1" -v t1="$total1" 'BEGIN {
+    dt = t1 - t0; di = i1 - i0
+    if (dt <= 0) { print 0; exit }
+    printf "%d", (100 * (dt - di) / dt) + 0.5
+  }'
+}
+
+#######################################
+# Build the list of factory frequency tiers to probe, in kHz ascending.
+# Outputs:
+#   Space-separated frequencies to stdout.
+#######################################
+frequency_tiers() {
+  local avail
+  avail=$(cat "${CPUBASE}/cpu0/cpufreq/scaling_available_frequencies" 2>/dev/null)
+  if [[ -n "$avail" ]]; then
+    tr ' ' '\n' <<<"$avail" | grep -E '^[0-9]+$' | sort -n | uniq
+    return
+  fi
+  # Continuous range (intel_pstate): synthesise N evenly-spaced tiers.
+  awk -v lo="$MIN_FREQ" -v hi="$MAX_FREQ" -v n="$N_TIERS" 'BEGIN {
+    if (n < 2) n = 2
+    for (i = 0; i < n; i++) printf "%d\n", lo + (hi - lo) * i / (n - 1)
+  }'
+}
+
+#######################################
+# Read the hottest controlling temperature, reusing fanctl's approach.
+# Outputs:
+#   Integer degrees C, or empty if ipmitool/sensors are unavailable.
+#######################################
+read_temp() {
+  # Prefer IPMI when present; otherwise fall back to Linux hwmon (standard PC).
+  local t
+  if command -v ipmitool >/dev/null; then
+    t=$(ipmitool sensor 2>/dev/null | awk -F'|' '
+      function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+      { u = trim($3); r = trim($2); c = trim($9) }
+      u ~ /degrees C/ && r ~ /^[0-9.]+$/ && c ~ /^[0-9.]+$/ && (c + 0) >= 80 {
+        if (r + 0 > h) h = r + 0
+      }
+      END { if (h > 0) printf "%d", h }')
+    [[ -n "$t" ]] && { echo "$t"; return 0; }
+  fi
+  local ti val h=0
+  for ti in /sys/class/hwmon/hwmon*/temp[0-9]*_input; do
+    [[ -r "$ti" ]] || continue
+    val=$(cat "$ti" 2>/dev/null); [[ "$val" =~ ^[0-9]+$ ]] || continue
+    (( val / 1000 > h )) && h=$(( val / 1000 ))
+  done
+  (( h > 0 )) && echo "$h"
+}
+
+save_tiers() {
+  mkdir -p "$STATE_DIR"
+  cat > "$STATE_FILE" <<EOF
+# Written by powerctl --calibrate. Do not edit by hand.
+KNEE_FREQ=${KNEE_FREQ}
+KNEE_WATTS=${KNEE_WATTS}
+MAX_FREQ=${MAX_FREQ}
+MIN_FREQ=${MIN_FREQ}
+CAL_TS=$(date '+%Y-%m-%dT%H:%M:%S%z')
+EOF
+}
+
+load_tiers() {
+  [[ -r "$STATE_FILE" ]] || return 1
+  # shellcheck source=/dev/null
+  . "$STATE_FILE"
+  return 0
+}
+
+# Apply a maximum-frequency cap (kHz) across all CPUs.
+apply_cap() {
+  local cap="$1"
+  cpufreq_write_all scaling_max_freq "$cap"
+  CUR_CAP="$cap"
+}
+
+#######################################
+# Measure the package power at each factory frequency tier and pick the knee.
+# Saturates the cores at each capped frequency, so this is disruptive.
+# Globals:
+#   KNEE_FREQ, KNEE_WATTS, CUR_CAP (write)
+#######################################
+calibrate() {
+  [[ "$HAVE_CPUFREQ" == 1 ]] || { log "no cpufreq -> cannot calibrate"; return 1; }
+  if [[ "$HAVE_RAPL" != 1 ]]; then
+    log "no RAPL -> cannot measure watts; holding factory maximum"
+    KNEE_FREQ="$MAX_FREQ"; KNEE_WATTS=0; save_tiers; NEED_CAL=0; return 0
+  fi
+
+  local gov; gov=$(cat "${CPUBASE}/cpu0/cpufreq/scaling_governor" 2>/dev/null)
+  log "calibrating: sweeping frequency tiers under load (disruptive)..."
+  cpufreq_write_all scaling_governor performance
+
+  local tiers; tiers=$(frequency_tiers)
+  local f watts temp
+  local -a F=() W=()
+  for f in $tiers; do
+    cpufreq_write_all scaling_min_freq "$f"
+    cpufreq_write_all scaling_max_freq "$f"
+    # Saturate every core with a dependency-free busy load.
+    local n; n=$(nproc)
+    local pids=() i
+    for (( i = 0; i < n; i++ )); do yes >/dev/null & pids+=($!); done
+    sleep "$LOAD_SECS"
+    watts=$(read_watts "$SAMPLE_SECS")
+    temp=$(read_temp)
+    kill "${pids[@]}" 2>/dev/null; wait "${pids[@]}" 2>/dev/null
+    F+=("$f"); W+=("$watts")
+    log "  tier $(( f / 1000 ))MHz -> ${watts}W${temp:+ ${temp}C}"
+  done
+
+  # Restore a scalable configuration before choosing the operating point.
+  cpufreq_write_all scaling_min_freq "$MIN_FREQ"
+  [[ -n "$gov" ]] && cpufreq_write_all scaling_governor "$gov"
+
+  # Knee: climb while the marginal MHz-per-watt stays within KNEE_FRACTION%
+  # of the best marginal step seen; stop at the first big efficiency drop.
+  local knee_idx best=0 j
+  KNEE_FREQ="${F[0]}"; KNEE_WATTS="${W[0]}"; knee_idx=0
+  for (( j = 1; j < ${#F[@]}; j++ )); do
+    local marg
+    marg=$(awk -v f1="${F[$((j-1))]}" -v f2="${F[$j]}" \
+      -v w1="${W[$((j-1))]}" -v w2="${W[$j]}" 'BEGIN {
+        dw = w2 - w1; if (dw <= 0) dw = 0.1
+        printf "%d", ((f2 - f1) / 1000.0) / dw
+      }')
+    (( marg > best )) && best="$marg"
+    local floor=$(( best * KNEE_FRACTION / 100 ))
+    if (( marg >= floor )); then knee_idx="$j"; else break; fi
+  done
+  KNEE_FREQ="${F[$knee_idx]}"; KNEE_WATTS="${W[$knee_idx]}"
+  save_tiers
+  NEED_CAL=0
+  apply_cap "$KNEE_FREQ"
+  log "calibrated: knee=$(( KNEE_FREQ / 1000 ))MHz at ${KNEE_WATTS}W" \
+    "(max $(( MAX_FREQ / 1000 ))MHz)"
+}
+
+#######################################
+# One control cycle: float the cap continuously between the knee and the factory
+# maximum. It rises while the workload is busy AND compute-bound (frequency buys
+# real work), and falls toward the knee when idle or memory/IO-bound (frequency
+# wasted). Compute-boundedness comes from perf IPC; without perf, utilization
+# alone drives it.
+# Globals:
+#   CUR_CAP (read/write); KNEE_FREQ, MAX_FREQ, HAVE_PERF and tuning (read)
+# Arguments:
+#   $1 - current utilization percent
+#######################################
+regulate() {
+  local util="$1" ipc="" want=0 step newcap
+  [[ "$HAVE_PERF" == 1 ]] && ipc=$(read_ipc)
+
+  if [[ -n "$ipc" ]]; then
+    # Raise only when frequency actually buys work; otherwise ease back.
+    if (( util >= ESCALATE_UTIL && ipc >= IPC_BUSY )); then want=1
+    elif (( util < DEESCALATE_UTIL || ipc < IPC_BUSY )); then want=-1
+    fi
+  else
+    if (( util >= ESCALATE_UTIL )); then want=1
+    elif (( util < DEESCALATE_UTIL )); then want=-1
+    fi
+  fi
+
+  step=$(( (MAX_FREQ - KNEE_FREQ) * CAP_STEP_PCT / 100 ))
+  (( step < 1 )) && step=1
+  newcap="$CUR_CAP"
+  (( want > 0 )) && newcap=$(( CUR_CAP + step ))
+  (( want < 0 )) && newcap=$(( CUR_CAP - step ))
+  (( newcap > MAX_FREQ )) && newcap="$MAX_FREQ"
+  (( newcap < KNEE_FREQ )) && newcap="$KNEE_FREQ"
+
+  if (( newcap != CUR_CAP )); then
+    apply_cap "$newcap"
+    log "cap -> $(( newcap / 1000 ))MHz (util=${util}% ipc=${ipc:-n/a})"
+  fi
+}
+
+apply_static_settings() {
+  local gov; gov=$(choose_governor)
+  [[ -n "$gov" ]] && { cpufreq_write_all scaling_governor "$gov"; log "governor -> $gov"; }
+  [[ -w "${CPUBASE}/cpu0/cpufreq/energy_performance_preference" ]] \
+    && cpufreq_write_all energy_performance_preference "$EPP"
+  [[ "$SET_MIN_TO_HW" == 1 && "$MIN_FREQ" -gt 0 ]] \
+    && cpufreq_write_all scaling_min_freq "$MIN_FREQ"
+}
+
+cleanup() {
+  log "stopping -> removing frequency cap"
+  [[ "$MAX_FREQ" -gt 0 ]] && cpufreq_write_all scaling_max_freq "$MAX_FREQ"
+}
+
+do_check() {
+  detect_features
+  echo "--- Governor ---"
+  echo "  current : $(cat "${CPUBASE}/cpu0/cpufreq/scaling_governor" 2>/dev/null || echo n/a)"
+  echo "  available: $(cat "${CPUBASE}/cpu0/cpufreq/scaling_available_governors" 2>/dev/null || echo n/a)"
+  echo "--- Frequency ---"
+  echo "  min/max : $(( MIN_FREQ / 1000 ))/$(( MAX_FREQ / 1000 )) MHz"
+  echo "  cap now : $(( $(cat "${CPUBASE}/cpu0/cpufreq/scaling_max_freq" 2>/dev/null || echo 0) / 1000 )) MHz"
+  echo "--- Power (RAPL) ---"
+  if [[ "$HAVE_RAPL" == 1 ]]; then echo "  package : $(read_watts 1) W"; else echo "  n/a"; fi
+  echo "--- Utilization ---"
+  cpu_util >/dev/null; sleep 1; echo "  $(cpu_util)%"
+  echo "--- Calibrated tiers ---"
+  if load_tiers; then
+    echo "  knee=$(( KNEE_FREQ / 1000 ))MHz @ ${KNEE_WATTS}W  max=$(( MAX_FREQ / 1000 ))MHz"
+  else
+    echo "  (not calibrated yet)"
+  fi
+}
+
+run_daemon() {
+  detect_features
+  if [[ "$HAVE_CPUFREQ" != 1 ]]; then
+    log "no cpufreq interface -> nothing to control, exiting"
+    exit 0
+  fi
+  trap cleanup EXIT
+  trap 'exit 0' INT TERM
+  apply_static_settings
+
+  if load_tiers; then
+    log "loaded tiers: knee=$(( KNEE_FREQ / 1000 ))MHz @ ${KNEE_WATTS}W"
+    apply_cap "$KNEE_FREQ"
+  else
+    NEED_CAL=1
+    log "no calibration yet -> will calibrate at the next idle window"
+  fi
+
+  cpu_util >/dev/null   # Prime the utilization delta.
+  while :; do
+    sleep "$POLL_INTERVAL"
+    local util; util=$(cpu_util)
+
+    # Track idle windows for (re)calibration.
+    if (( util < IDLE_UTIL )); then
+      (( IDLE_ELAPSED += POLL_INTERVAL ))
+    else
+      IDLE_ELAPSED=0
+    fi
+
+    if (( NEED_CAL == 1 && IDLE_ELAPSED >= IDLE_WINDOW )); then
+      calibrate
+      IDLE_ELAPSED=0
+      continue
+    fi
+
+    (( NEED_CAL == 1 )) && continue   # Hold factory settings until calibrated.
+    regulate "$util"
+
+    # Drift: at the knee under light load, watts far from calibration -> recal.
+    if (( HAVE_RAPL == 1 && CUR_CAP == KNEE_FREQ && util < DEESCALATE_UTIL )); then
+      local w; w=$(read_watts 1)
+      local dev
+      dev=$(awk -v a="$w" -v b="$KNEE_WATTS" 'BEGIN {
+        if (b <= 0) { print 0; exit }
+        d = (a - b) / b * 100; if (d < 0) d = -d; printf "%d", d }')
+      if (( dev > DRIFT_WATT_PCT )); then
+        NEED_CAL=1
+        log "power drift ${dev}% vs calibration -> recalibrate when idle"
+      fi
+    fi
+  done
+}
+
+main() {
+  case "${1:---daemon}" in
+    --check) do_check ;;
+    --restore) detect_features; cleanup ;;
+    --calibrate) detect_features; apply_static_settings; calibrate ;;
+    --once) detect_features; echo "util=$( cpu_util >/dev/null; sleep 1; cpu_util )%" ;;
+    --daemon) run_daemon ;;
+    *)
+      echo "usage: powerctl [--daemon|--check|--calibrate|--restore|--once]" >&2
+      exit 2
+      ;;
+  esac
+}
+
+main "$@"

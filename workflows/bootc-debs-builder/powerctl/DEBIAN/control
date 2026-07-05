@@ -1,0 +1,23 @@
+Source: powerctl
+Package: powerctl
+Version: {{ VER }}
+Architecture: all
+Maintainer: Gabriel Guillou guillou.gabriel@gmail.com
+Homepage: https://github.com/DaemonCores/Proxmox-Atomic
+Section: admin
+Priority: optional
+Depends: coreutils, {{ DEPS }}
+Description: measured performance-per-watt CPU operating-point controller
+ A lightweight bash daemon that keeps the CPU at its measured efficiency knee
+ and only spends frequency (and therefore watts, heat and fan noise) when a
+ sustained load actually benefits from it.
+ .
+ It measures the real frequency/power curve of this machine with RAPL by
+ sweeping the factory frequency steps under load, picks the knee as the default
+ operating point via scaling_max_freq, and raises the cap toward the factory
+ maximum only under sustained utilization. Everything stays inside the factory
+ range, so there is no undervolt or overclock and no crash or corruption risk.
+ .
+ Calibration loads the CPU and therefore runs only in an idle window, or on
+ demand with "powerctl --calibrate". Pairs with fanctl: less heat lets the fans
+ run lower.
