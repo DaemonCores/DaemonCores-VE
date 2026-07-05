@@ -115,7 +115,7 @@ jobs:
       - name: Build fanctl
         shell: bash
         env:
-          FANCTL_VER: "1.1.1"
+          FANCTL_VER: "1.2.0"
         run: |
           SAVE_PWD=$(pwd)
 
@@ -132,7 +132,28 @@ jobs:
 
           dpkg-deb --build /output/fanctl \
             /debs/fanctl_${FANCTL_VER}_all.deb
-      
+
+      - name: Build powerctl
+        shell: bash
+        env:
+          POWERCTL_VER: "1.0.0"
+        run: |
+          SAVE_PWD=$(pwd)
+
+          mkdir -p /output/powerctl
+          cp -r "${SAVE_PWD}"/workflows/bootc-debs-builder/powerctl/* /output/powerctl/
+
+          chmod 0755 /output/powerctl/usr/sbin/powerctl
+          chmod 0755 /output/powerctl/DEBIAN/postinst
+
+          sed -i \
+            -e "s|{{ VER }}|${POWERCTL_VER}|g" \
+            -e "s|, {{ DEPS }}||g" \
+            /output/powerctl/DEBIAN/control
+
+          dpkg-deb --build /output/powerctl \
+            /debs/powerctl_${POWERCTL_VER}_all.deb
+
       - name: Upload debs
         uses: actions/upload-artifact@v7
         with:

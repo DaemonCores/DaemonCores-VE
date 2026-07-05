@@ -45,6 +45,7 @@ MAX_PCT=100               # Fan speed ceiling, percent.
 TARGET_TEMP=60            # Target for the hottest controlling sensor, deg C.
 HARD_MARGIN=10            # Emergency: force max at Upper-Critical minus this.
 CONTROL_UCR_MIN=80        # A sensor with Upper-Critical >= this is CPU-class.
+HWMON_CPU_CRIT=95         # Fallback critical temp for hwmon sensors lacking one.
 AMBIENT_MATCH='Inlet|Ambient'  # Regex for the inlet-air sensor.
 HYST_PCT=3                # Minimum percent change before issuing a command.
 TRIM_MAX=4                # Max fan change per cycle while holding, percent.
@@ -66,10 +67,15 @@ DEFAULT_GAIN=3            # Fallback proportional gain, percent per deg C.
 [[ -r "$CONF" ]] && . "$CONF"
 
 # --- Runtime state ----------------------------------------------------------
-VENDOR=unknown
+BACKEND=none              # Fan-control backend: ipmi | hwmon | none.
+# IPMI backend: detected vendor and its manual/auto raw commands.
+IPMI_VENDOR=unknown
 RAW_MANUAL=''
 RAW_AUTO=''
-RAW_SET_PREFIX=''
+# hwmon backend: parallel arrays of controllable PWM channels.
+HWMON_PWM=()              # Paths to writable pwmN files.
+HWMON_EN=()               # Matching pwmN_enable paths.
+HWMON_EN_ORIG=()          # Their original enable values (restored on stop).
 MODE=auto                 # Current control mode: auto | manual.
 LAST_PCT=-1               # Last applied speed, percent (-1 = unknown).
 FAIL_COUNT=0              # Consecutive IPMI read failures.
@@ -92,63 +98,154 @@ log() {
 }
 
 #######################################
-# Detect the BMC vendor and populate the raw command profile.
+# Find writable hwmon PWM channels (standard PC fan control, no IPMI).
 # Globals:
-#   IPMITOOL (read), VENDOR, RAW_MANUAL, RAW_AUTO, RAW_SET_PREFIX (write)
+#   HWMON_PWM, HWMON_EN, HWMON_EN_ORIG (write)
+# Returns:
+#   0 if at least one controllable channel was found, 1 otherwise.
 #######################################
-detect_vendor() {
+detect_hwmon() {
+  local pwm en
+  for pwm in /sys/class/hwmon/hwmon*/pwm[0-9]*; do
+    [[ "$pwm" =~ /pwm[0-9]+$ ]] || continue   # skip pwmN_enable, pwmN_auto_*
+    en="${pwm}_enable"
+    [[ -w "$pwm" && -e "$en" ]] || continue
+    HWMON_PWM+=("$pwm")
+    HWMON_EN+=("$en")
+    HWMON_EN_ORIG+=("$(cat "$en" 2>/dev/null || echo 2)")
+  done
+  [[ ${#HWMON_PWM[@]} -gt 0 ]]
+}
+
+#######################################
+# Map an IPMI Manufacturer ID to a fan-control profile. Reading temperatures and
+# fan tachometers over IPMI is standard across vendors; only the WRITE commands
+# are OEM-specific, so this table is where brand support is added. Add a case to
+# support a new vendor. Dell is verified on real hardware; other entries come
+# from vendor documentation. The per-vendor speed encoding lives in fan_set.
+# Globals:
+#   IPMI_VENDOR, RAW_MANUAL, RAW_AUTO (write)
+# Arguments:
+#   $1 - Manufacturer ID (IANA number)
+#######################################
+ipmi_profile() {
+  case "$1" in
+    674)    # Dell (iDRAC 7/8/9) — verified.
+      IPMI_VENDOR=dell
+      RAW_MANUAL='0x30 0x30 0x01 0x00'
+      RAW_AUTO='0x30 0x30 0x01 0x01'
+      ;;
+    10876)  # Supermicro (X9/X10/X11) — from documentation; zone-based speed.
+      IPMI_VENDOR=supermicro
+      RAW_MANUAL='0x30 0x45 0x01 0x01'
+      RAW_AUTO='0x30 0x45 0x01 0x00'
+      ;;
+    *)
+      IPMI_VENDOR=unknown
+      ;;
+  esac
+}
+
+#######################################
+# Select the fan-control backend: a profiled IPMI BMC (any brand), else hwmon.
+# An IPMI BMC whose vendor is not profiled still allows read-only monitoring.
+# Globals:
+#   IPMITOOL (read); BACKEND, IPMI_VENDOR, RAW_*, HWMON_* (write)
+#######################################
+detect_backend() {
   local mc mfg
   mc=$("$IPMITOOL" mc info 2>/dev/null) || true
   mfg=$(awk -F: '/Manufacturer ID/ {gsub(/[^0-9]/, "", $2); print $2; exit}' \
     <<<"$mc")
-  case "$mfg" in
-    674)  # Dell (iDRAC 7/8/9): the 0x30 0x30 OEM command family.
-      VENDOR=dell
-      RAW_MANUAL='0x30 0x30 0x01 0x00'
-      RAW_AUTO='0x30 0x30 0x01 0x01'
-      RAW_SET_PREFIX='0x30 0x30 0x02 0xff'  # Append speed byte (hex percent).
-      ;;
-    *)
-      VENDOR=unknown
-      ;;
-  esac
-  log "vendor detected: ${VENDOR} (Manufacturer ID='${mfg:-?}')"
+  ipmi_profile "$mfg"
+  if [[ -n "$RAW_MANUAL" ]]; then
+    BACKEND=ipmi
+    log "backend: ipmi/${IPMI_VENDOR} (Manufacturer ID=${mfg})"
+    return
+  fi
+  if detect_hwmon; then
+    BACKEND=hwmon
+    log "backend: hwmon (${#HWMON_PWM[@]} controllable PWM channel(s))"
+    return
+  fi
+  BACKEND=none
+  if [[ -n "$mfg" ]]; then
+    log "backend: none (IPMI vendor ${mfg} not profiled; monitoring via IPMI)"
+  else
+    log "backend: none (no controllable fan interface; monitor only)"
+  fi
 }
 
 can_control() {
-  [[ -n "$RAW_SET_PREFIX" ]]
+  [[ "$BACKEND" != none ]]
 }
 
-bmc_auto() {
-  can_control || return 0
-  "$IPMITOOL" raw $RAW_AUTO >/dev/null 2>&1
+fan_auto() {
+  case "$BACKEND" in
+    ipmi) "$IPMITOOL" raw $RAW_AUTO >/dev/null 2>&1 ;;
+    hwmon)
+      local i
+      for i in "${!HWMON_EN[@]}"; do
+        echo "${HWMON_EN_ORIG[$i]}" > "${HWMON_EN[$i]}" 2>/dev/null
+      done ;;
+    *) return 0 ;;
+  esac
 }
 
-bmc_manual() {
-  can_control || return 0
-  "$IPMITOOL" raw $RAW_MANUAL >/dev/null 2>&1
+fan_manual() {
+  case "$BACKEND" in
+    ipmi) "$IPMITOOL" raw $RAW_MANUAL >/dev/null 2>&1 ;;
+    hwmon)
+      local en
+      for en in "${HWMON_EN[@]}"; do echo 1 > "$en" 2>/dev/null; done ;;
+    *) return 0 ;;
+  esac
 }
 
 #######################################
-# Set all fans to a given speed and remember it.
+# Set all fans to a given speed and remember it. The IPMI speed encoding is
+# per-vendor (Dell: one command, all fans; Supermicro: one per fan zone).
 # Globals:
-#   IPMITOOL, RAW_SET_PREFIX (read), LAST_PCT (write)
+#   BACKEND, IPMI_VENDOR, IPMITOOL, HWMON_PWM (read), LAST_PCT (write)
 # Arguments:
 #   $1 - speed as a decimal percent
+# Returns:
+#   0 on success, 1 on failure.
 #######################################
-bmc_set() {
-  local hex
-  hex=$(printf '0x%02x' "$1")
-  if "$IPMITOOL" raw $RAW_SET_PREFIX "$hex" >/dev/null 2>&1; then
-    LAST_PCT="$1"
-    return 0
-  fi
-  return 1
+fan_set() {
+  case "$BACKEND" in
+    ipmi)
+      local hex; hex=$(printf '0x%02x' "$1")
+      case "$IPMI_VENDOR" in
+        dell)
+          "$IPMITOOL" raw 0x30 0x30 0x02 0xff "$hex" >/dev/null 2>&1 || return 1
+          ;;
+        supermicro)
+          local z
+          for z in 0x00 0x01; do
+            "$IPMITOOL" raw 0x30 0x70 0x66 0x01 "$z" "$hex" >/dev/null 2>&1 \
+              || return 1
+          done
+          ;;
+        *) return 1 ;;
+      esac
+      ;;
+    hwmon)
+      local pwmval p; pwmval=$(( $1 * 255 / 100 ))
+      (( pwmval > 255 )) && pwmval=255
+      for p in "${HWMON_PWM[@]}"; do
+        echo "$pwmval" > "$p" 2>/dev/null || return 1
+      done
+      ;;
+    *) return 1 ;;
+  esac
+  LAST_PCT="$1"
+  return 0
 }
 
 to_auto() {
   [[ "$MODE" == auto ]] && return 0
-  if bmc_auto; then
+  if fan_auto; then
     MODE=auto
     LAST_PCT=-1
   fi
@@ -156,7 +253,7 @@ to_auto() {
 
 to_manual() {
   [[ "$MODE" == manual ]] && return 0
-  bmc_manual && MODE=manual
+  fan_manual && MODE=manual
 }
 
 #######################################
@@ -171,17 +268,17 @@ apply_pct() {
   to_manual
   delta=$(( pct > LAST_PCT ? pct - LAST_PCT : LAST_PCT - pct ))
   if (( LAST_PCT < 0 || delta >= HYST_PCT )); then
-    if bmc_set "$pct"; then
+    if fan_set "$pct"; then
       log "fans -> ${pct}% (T=${T}C target=$(effective_target)C)"
     else
-      log "failed to set fan speed -> BMC automatic"
+      log "failed to set fan speed -> automatic fan control"
       to_auto
     fi
   fi
 }
 
 #######################################
-# Read controlling and inlet temperatures in a single ipmitool pass.
+# Read metrics via IPMI in a single ipmitool pass.
 # Globals:
 #   IPMITOOL, CONTROL_UCR_MIN, AMBIENT_MATCH (read)
 # Outputs:
@@ -189,7 +286,7 @@ apply_pct() {
 # Returns:
 #   0 on success, 1 if IPMI returned nothing.
 #######################################
-read_metrics() {
+read_metrics_ipmi() {
   local out
   out=$("$IPMITOOL" sensor 2>/dev/null) || return 1
   [[ -n "$out" ]] || return 1
@@ -210,6 +307,60 @@ read_metrics() {
       printf "T=%d CRITMIN=%d INLET=%d NCTRL=%d\n", \
         int(hottest + 0.5), int(critmin + 0.5), int(inlet + 0.5), nctrl + 0
     }' <<<"$out"
+}
+
+#######################################
+# Read metrics from Linux hwmon sensors (coretemp, k10temp, ...).
+# A sensor counts as controlling when its critical threshold is CPU-class, or
+# when its label looks like a CPU domain (fallback critical = HWMON_CPU_CRIT).
+# Globals:
+#   CONTROL_UCR_MIN, HWMON_CPU_CRIT, AMBIENT_MATCH (read)
+# Outputs:
+#   "T=<hottest> CRITMIN=<min crit> INLET=<inlet> NCTRL=<n>" to stdout.
+# Returns:
+#   0 if any temperature was read, 1 otherwise.
+#######################################
+read_metrics_hwmon() {
+  local ti base val label crit
+  local hottest=0 critmin=0 inlet=0 nctrl=0 any=0 tdeg cdeg
+  for ti in /sys/class/hwmon/hwmon*/temp[0-9]*_input; do
+    [[ -r "$ti" ]] || continue
+    val=$(cat "$ti" 2>/dev/null); [[ "$val" =~ ^[0-9]+$ ]] || continue
+    any=1
+    tdeg=$(( val / 1000 ))
+    base="${ti%_input}"
+    label=$(cat "${base}_label" 2>/dev/null || echo "")
+    [[ "$label" =~ $AMBIENT_MATCH ]] && inlet=$tdeg
+    crit=$(cat "${base}_crit" 2>/dev/null || echo "")
+    if [[ "$crit" =~ ^[0-9]+$ ]]; then cdeg=$(( crit / 1000 )); else cdeg=0; fi
+    if (( cdeg >= CONTROL_UCR_MIN )); then
+      :
+    elif [[ "$label" =~ (Package|Tctl|Tdie|Core|CPU) ]]; then
+      cdeg=$HWMON_CPU_CRIT
+    else
+      continue
+    fi
+    (( nctrl++ ))
+    (( tdeg > hottest )) && hottest=$tdeg
+    (( critmin == 0 || cdeg < critmin )) && critmin=$cdeg
+  done
+  (( any == 0 )) && return 1
+  printf "T=%d CRITMIN=%d INLET=%d NCTRL=%d\n" \
+    "$hottest" "$critmin" "$inlet" "$nctrl"
+}
+
+#######################################
+# Read metrics through whichever source fits the active backend.
+# Falls back to trying both in monitor mode so temperatures can still be logged.
+# Globals:
+#   BACKEND, IPMITOOL (read)
+#######################################
+read_metrics() {
+  case "$BACKEND" in
+    ipmi) read_metrics_ipmi ;;
+    hwmon) read_metrics_hwmon ;;
+    *) read_metrics_ipmi || read_metrics_hwmon ;;
+  esac
 }
 
 #######################################
@@ -289,7 +440,7 @@ calibrate() {
   for (( i = 0; i < MAX_CAL_STEPS; i++ )); do
     (( pct < MIN_PCT )) && pct="$MIN_PCT"
     (( pct > MAX_PCT )) && pct="$MAX_PCT"
-    bmc_set "$pct"
+    fan_set "$pct"
     sleep "$STABILIZE_SECS"
     read_metrics_into || return 1
     err=$(( T - target ))
@@ -329,41 +480,61 @@ read_metrics_into() {
 }
 
 cleanup() {
-  log "stopping -> restoring BMC automatic regulation"
-  can_control && bmc_auto
+  log "stopping -> restoring automatic fan control"
+  can_control && fan_auto
 }
 
 do_check() {
-  detect_vendor
+  detect_backend
   echo "--- Temperature sensors ---"
-  "$IPMITOOL" sensor 2>/dev/null | awk -F'|' '
-    function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
-    { u = trim($3) }
-    u ~ /degrees C/ {
-      printf "  %-22s reading=%-8s upper-crit=%s\n", trim($1), trim($2), trim($9)
-    }'
+  if [[ "$BACKEND" == hwmon ]]; then
+    local ti b
+    for ti in /sys/class/hwmon/hwmon*/temp[0-9]*_input; do
+      [[ -r "$ti" ]] || continue
+      b="${ti%_input}"
+      printf "  %-24s reading=%sC crit=%sC\n" \
+        "$(cat "${b}_label" 2>/dev/null || basename "$b")" \
+        "$(( $(cat "$ti") / 1000 ))" \
+        "$(( $(cat "${b}_crit" 2>/dev/null || echo 0) / 1000 ))"
+    done
+  else
+    "$IPMITOOL" sensor 2>/dev/null | awk -F'|' '
+      function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+      { u = trim($3) }
+      u ~ /degrees C/ {
+        printf "  %-22s reading=%-8s upper-crit=%s\n", trim($1), trim($2), trim($9)
+      }'
+  fi
   echo "--- Fans ---"
-  "$IPMITOOL" sdr type fan 2>/dev/null | sed 's/^/  /'
+  if [[ "$BACKEND" == hwmon ]]; then
+    local f
+    for f in /sys/class/hwmon/hwmon*/fan[0-9]*_input; do
+      [[ -r "$f" ]] && printf "  %s: %s RPM\n" \
+        "$(basename "$(dirname "$f")")/$(basename "${f%_input}")" "$(cat "$f")"
+    done
+  else
+    "$IPMITOOL" sdr type fan 2>/dev/null | sed 's/^/  /'
+  fi
   echo "--- Metrics ---"
   if read_metrics_into; then
     echo "  T=${T}C CRITMIN=${CRITMIN}C INLET=${INLET}C sensors=${NCTRL}" \
       "target=$(effective_target)C"
   else
-    echo "  (IPMI read failed)"
+    echo "  (no readable sensors)"
   fi
   echo "--- Calibration ---"
   if load_calibration; then :; else echo "  (not calibrated yet)"; fi
   echo "--- Active control available? ---"
-  if can_control; then echo "  yes (vendor=${VENDOR})"; else
-    echo "  no -> monitor mode (vendor ${VENDOR} not supported)"; fi
+  if can_control; then echo "  yes (backend=${BACKEND})"; else
+    echo "  no -> monitor mode (backend=${BACKEND})"; fi
 }
 
 do_restore() {
-  detect_vendor
+  detect_backend
   if can_control; then
-    bmc_auto && log "regulation handed back to the BMC (automatic)"
+    fan_auto && log "regulation handed back (automatic)"
   else
-    log "nothing to restore (vendor ${VENDOR})"
+    log "nothing to restore (backend=${BACKEND})"
   fi
 }
 
@@ -433,14 +604,14 @@ regulate() {
 }
 
 run_daemon() {
-  detect_vendor
+  detect_backend
   if ! can_control; then
-    log "vendor not supported."
+    log "no controllable fan backend."
     if [[ "$REQUIRE_KNOWN_VENDOR" == 1 ]]; then
       log "REQUIRE_KNOWN_VENDOR=1 -> exiting"
       exit 0
     fi
-    log "monitor mode: read-only, fans stay under BMC automatic control."
+    log "monitor mode: read-only, fans left to automatic control."
   fi
   trap cleanup EXIT
   trap 'exit 0' INT TERM
@@ -468,7 +639,7 @@ run_daemon() {
       continue
     fi
     if (( NCTRL == 0 )); then
-      log "no controlling sensor readable -> BMC automatic (safety)"
+      log "no controlling sensor readable -> automatic fan control (safety)"
       to_auto
       sleep "$POLL_INTERVAL"
       continue
@@ -484,13 +655,13 @@ main() {
     --check) do_check ;;
     --restore) do_restore ;;
     --calibrate)
-      detect_vendor
+      detect_backend
       to_manual
       load_calibration || true
       calibrate
       cleanup
       ;;
-    --once) detect_vendor; read_metrics ;;
+    --once) detect_backend; read_metrics ;;
     --daemon) run_daemon ;;
     *)
       echo "usage: fanctl [--daemon|--check|--calibrate|--restore|--once]" >&2
