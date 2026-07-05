@@ -112,6 +112,36 @@ jobs:
           dpkg-deb --build /output/ifupdown2 \
             /debs/ifupdown2_${ORIG_VER}+bootc3_all.deb
 
+      - name: Repack chrony with bootc fix
+        shell: bash
+        run: |
+          SAVE_PWD=$(pwd)
+
+          apt update
+          cd /tmp
+          apt-get download chrony
+
+          mkdir -p /output/chrony
+          dpkg-deb -R /tmp/chrony_*.deb /output/chrony
+
+          ORIG_VER=$(dpkg-deb -f /tmp/chrony_*.deb Version)
+          ARCH=$(dpkg-deb -f /tmp/chrony_*.deb Architecture)
+
+          cp -r "${SAVE_PWD}"/workflows/bootc-debs-builder/chronypostinstall/* \
+            /output/chrony/
+
+          # Regenerate md5sums after content modification
+          find /output/chrony -not -path '*/DEBIAN/*' -type f \
+            | xargs md5sum \
+            | sed "s|/output/chrony/||" \
+            > /output/chrony/DEBIAN/md5sums
+
+          sed -i "s/^Version: .*/Version: 1:${ORIG_VER}+bootc1/" \
+            /output/chrony/DEBIAN/control
+
+          dpkg-deb --build /output/chrony \
+            /debs/chrony_${ORIG_VER}+bootc1_${ARCH}.deb
+
       - name: Build fanctl
         shell: bash
         env:
