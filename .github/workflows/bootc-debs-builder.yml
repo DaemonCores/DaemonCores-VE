@@ -136,7 +136,7 @@ jobs:
       - name: Build powerctl
         shell: bash
         env:
-          POWERCTL_VER: "1.0.0"
+          POWERCTL_VER: "1.0.1"
         run: |
           SAVE_PWD=$(pwd)
 
