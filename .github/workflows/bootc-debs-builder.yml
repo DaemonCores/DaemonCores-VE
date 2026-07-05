@@ -108,7 +108,7 @@ jobs:
           sed -i "s/^Version: .*/Version: 1:${ORIG_VER}+bootc4/" \
             /output/ifupdown2/DEBIAN/control
           chmod +x /output/ifupdown2/usr/sbin/ifupdown2-autoconf \
-            /output/ifupdown2/usr/sbin/pve-domain-set
+            /output/ifupdown2/usr/sbin/domain-set
 
           dpkg-deb --build /output/ifupdown2 \
             /debs/ifupdown2_${ORIG_VER}+bootc4_all.deb
@@ -256,6 +256,75 @@ jobs:
 
           dpkg-deb --build /output/pve-manager \
             /debs/pve-manager_${ORIG_VER}+bootc1_${ARCH}.deb
+
+      - name: Repack proxmox-kernel-helper without the bootc-hostile grub/boot handling
+        shell: bash
+        run: |
+          apt update
+          cd /tmp
+          apt-get download proxmox-kernel-helper
+
+          O=/output/proxmox-kernel-helper
+          mkdir -p "$O"
+          dpkg-deb -R /tmp/proxmox-kernel-helper_*.deb "$O"
+
+          ORIG_VER=$(dpkg-deb -f /tmp/proxmox-kernel-helper_*.deb Version)
+          ARCH=$(dpkg-deb -f /tmp/proxmox-kernel-helper_*.deb Architecture)
+
+          # In a bootc/ostree image the ESP is owned by bootupd, not by
+          # proxmox-boot-tool. Stock proxmox-kernel-helper diverts
+          # /usr/sbin/grub-install to a proxmox-boot-tool wrapper and registers
+          # dpkg triggers on /usr/lib/grub, /usr/lib/shim and /usr/lib/systemd/boot
+          # that run `proxmox-boot-tool reinit` on every grub/shim change. On bootc
+          # that reinit repeatedly calls grub-install and relocates the Debian
+          # signed grub, producing the noisy
+          # "mv: cannot stat '.../grubx64.efi.signed'" error and a boot path that
+          # competes with bootupd. Strip that whole grub/boot integration; keep
+          # only the kernel NeverAutoRemove hooks (proxmox-auto-removal) and the
+          # now-inert helper binaries so the proxmox-ve dependency stays satisfied.
+          # grub itself is left untouched.
+
+          # 1. Drop the grub-install wrapper and the proxmox-boot-tool hooks.
+          rm -f \
+            "$O/usr/sbin/grub-install" \
+            "$O/etc/grub.d/000_proxmox_boot_header" \
+            "$O/etc/initramfs/post-update.d/proxmox-boot-sync" \
+            "$O/etc/kernel/postinst.d/zz-proxmox-boot" \
+            "$O/etc/kernel/postrm.d/zz-proxmox-boot"
+
+          # 2. No dpkg triggers: the package must not react to grub/shim changes.
+          rm -f "$O/DEBIAN/triggers"
+
+          # 3. Keep only the two proxmox-auto-removal conffiles.
+          printf '%s\n' \
+            /etc/kernel/postinst.d/proxmox-auto-removal \
+            /etc/kernel/postrm.d/proxmox-auto-removal \
+            > "$O/DEBIAN/conffiles"
+
+          # 4. Neutral maintainer scripts: no grub-install diversion, no
+          #    proxmox-boot-tool reinit. The kept conffiles are managed by dpkg
+          #    directly and need no registration.
+          for s in preinst postinst prerm postrm; do
+            printf '#!/bin/sh\nset -e\nexit 0\n' > "$O/DEBIAN/$s"
+            chmod 0755 "$O/DEBIAN/$s"
+          done
+
+          # Guard: the grub-install wrapper and dpkg triggers must be gone.
+          test ! -e "$O/usr/sbin/grub-install" \
+            || { echo "ERROR: grub-install wrapper still present." >&2; exit 1; }
+          test ! -e "$O/DEBIAN/triggers" \
+            || { echo "ERROR: dpkg triggers still present." >&2; exit 1; }
+
+          # Regenerate md5sums after content modification
+          find "$O" -not -path '*/DEBIAN/*' -type f \
+            | xargs md5sum \
+            | sed "s|$O/||" \
+            > "$O/DEBIAN/md5sums"
+
+          sed -i "s/^Version: .*/Version: 1:${ORIG_VER}+bootc1/" "$O/DEBIAN/control"
+
+          dpkg-deb --build "$O" \
+            /debs/proxmox-kernel-helper_${ORIG_VER}+bootc1_${ARCH}.deb
 
       - name: Build fanctl
         shell: bash
