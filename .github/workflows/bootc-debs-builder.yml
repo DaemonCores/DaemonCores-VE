@@ -111,6 +111,27 @@ jobs:
 
           dpkg-deb --build /output/ifupdown2 \
             /debs/ifupdown2_${ORIG_VER}+bootc1_all.deb
+
+      - name: Build fanctl
+        shell: bash
+        env:
+          FANCTL_VER: "1.0.0"
+        run: |
+          SAVE_PWD=$(pwd)
+
+          mkdir -p /output/fanctl
+          cp -r "${SAVE_PWD}"/workflows/bootc-debs-builder/fanctl/* /output/fanctl/
+
+          chmod 0755 /output/fanctl/usr/sbin/fanctl
+          chmod 0755 /output/fanctl/DEBIAN/postinst
+
+          sed -i \
+            -e "s|{{ VER }}|${FANCTL_VER}|g" \
+            -e "s|, {{ DEPS }}||g" \
+            /output/fanctl/DEBIAN/control
+
+          dpkg-deb --build /output/fanctl \
+            /debs/fanctl_${FANCTL_VER}_all.deb
       
       - name: Upload debs
         uses: actions/upload-artifact@v7
