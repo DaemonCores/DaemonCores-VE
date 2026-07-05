@@ -53,7 +53,6 @@ IPC_SAMPLE_SECS=1         # perf sampling window per cycle, seconds.
 CAP_STEP_PCT=15           # Cap move per cycle, percent of the knee..max range.
 IDLE_UTIL=10              # Utilization (%) considered idle for calibration.
 IDLE_WINDOW=300           # Idle must last this long before calibrating, seconds.
-DRIFT_WATT_PCT=20         # Watt deviation vs calibration that flags drift.
 SET_MIN_TO_HW=1           # 1 = pin scaling_min_freq to hardware min while running.
 
 # --- Peripheral power management (each auto-skips if unsupported) ------------
@@ -607,21 +606,12 @@ run_daemon() {
 
     (( NEED_CAL == 1 )) && continue   # Hold factory settings until calibrated.
     regulate "$util"
-
-    # Drift: at the knee under light load, watts far from calibration -> recal.
-    if (( HAVE_RAPL == 1 && CUR_CAP == KNEE_FREQ && util < DEESCALATE_UTIL )); then
-      local w; w=$(read_watts 1)
-      local dev
-      dev=$(awk -v a="$w" -v b="$KNEE_WATTS" 'BEGIN {
-        if (b <= 0) { print 0; exit }
-        d = (a - b) / b * 100; if (d < 0) d = -d; printf "%d", d }')
-      if (( dev > DRIFT_WATT_PCT )); then
-        NEED_CAL=1
-        log "power drift ${dev}% vs calibration -> recalibrate when idle"
-      fi
-    fi
   done
 }
+
+# The efficiency knee is a stable property of the CPU, so there is no runtime
+# "watt drift" recalibration: re-measure only on first boot or via --calibrate
+# (e.g. after a CPU swap). KNEE_WATTS is kept for information only.
 
 main() {
   case "${1:---daemon}" in
