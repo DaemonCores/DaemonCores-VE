@@ -47,6 +47,7 @@ HARD_MARGIN=10            # Emergency: force max at Upper-Critical minus this.
 CONTROL_UCR_MIN=80        # A sensor with Upper-Critical >= this is CPU-class.
 AMBIENT_MATCH='Inlet|Ambient'  # Regex for the inlet-air sensor.
 HYST_PCT=3                # Minimum percent change before issuing a command.
+TRIM_MAX=4                # Max fan change per cycle while holding, percent.
 MAX_FAIL=3                # Consecutive IPMI read errors before failsafe.
 REQUIRE_KNOWN_VENDOR=0    # 1 = exit on unknown vendor; 0 = monitor mode.
 
@@ -73,6 +74,7 @@ MODE=auto                 # Current control mode: auto | manual.
 LAST_PCT=-1               # Last applied speed, percent (-1 = unknown).
 FAIL_COUNT=0              # Consecutive IPMI read failures.
 DRIFT_COUNT=0             # Consecutive cycles with |error| > DRIFT.
+EMERG_COUNT=0             # Consecutive over-temperature cycles.
 
 # Persisted calibration (loaded from STATE_FILE).
 CAL_PCT=0                 # Calibrated operating fan speed, percent.
@@ -371,24 +373,50 @@ do_restore() {
 #   T, CRITMIN, INLET, CAL_PCT, CAL_INLET, DRIFT_COUNT and tuning.
 #######################################
 regulate() {
-  local target err gain pct inlet_delta
-  target=$(effective_target)
+  local target err gain step pct base inlet_delta
 
-  # Temperature-based emergency: nothing else matters.
+  # Temperature-based emergency: force max cooling. Repeated emergencies mean
+  # the calibration is badly wrong, so escalate to a recalibration.
   if (( T >= CRITMIN - HARD_MARGIN )); then
-    log "over-temperature (${T}C, crit ${CRITMIN}C) -> max cooling"
     apply_pct "$MAX_PCT"
-    DRIFT_COUNT=0
+    (( EMERG_COUNT++ ))
+    log "over-temperature (${T}C, crit ${CRITMIN}C) -> max cooling"
+    if (( EMERG_COUNT >= DRIFT_CYCLES )); then
+      log "repeated over-temperature -> recalibrate"
+      calibrate
+      EMERG_COUNT=0
+    fi
     return
   fi
+  EMERG_COUNT=0
 
+  target=$(effective_target)
   err=$(( T - target ))
+
+  # Gentle incremental (integral) tracking: nudge the current speed toward the
+  # target by a bounded step. Bounding the per-cycle change keeps it stable and
+  # free of the oscillation an unbounded proportional term would cause.
   gain=$(current_gain)
-  pct=$(( CAL_PCT + err * gain ))
+  step=$(( err * gain ))
+  (( step > TRIM_MAX )) && step="$TRIM_MAX"
+  (( step < -TRIM_MAX )) && step=$(( -TRIM_MAX ))
+  if (( step == 0 )); then
+    (( err > DEADBAND )) && step=1
+    (( err < -DEADBAND )) && step=-1
+  fi
+  base=$(( LAST_PCT >= 0 ? LAST_PCT : CAL_PCT ))
+  pct=$(( base + step ))
   apply_pct "$pct"
 
-  # Sustained large error (too hot, or fans harder than the temp warrants)
-  # or a shifted inlet means the calibrated point is stale: recalibrate.
+  # Keep the persisted operating point fresh while sitting on target.
+  if (( err <= DEADBAND && err >= -DEADBAND && LAST_PCT != CAL_PCT )); then
+    CAL_PCT="$LAST_PCT"
+    CAL_INLET="$INLET"
+    save_calibration
+  fi
+
+  # A large error the gentle tracking cannot absorb, or a shifted inlet, means
+  # the operating point moved a lot: run a fast full recalibration.
   inlet_delta=$(( INLET > CAL_INLET ? INLET - CAL_INLET : CAL_INLET - INLET ))
   if (( err > DRIFT || err < -DRIFT )); then
     (( DRIFT_COUNT++ ))
