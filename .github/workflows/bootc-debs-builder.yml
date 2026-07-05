@@ -137,16 +137,46 @@ jobs:
             | sed "s|/output/chrony/||" \
             > /output/chrony/DEBIAN/md5sums
 
-          sed -i "s/^Version: .*/Version: 1:${ORIG_VER}+bootc1/" \
+          sed -i "s/^Version: .*/Version: 1:${ORIG_VER}+bootc2/" \
             /output/chrony/DEBIAN/control
 
           dpkg-deb --build /output/chrony \
-            /debs/chrony_${ORIG_VER}+bootc1_${ARCH}.deb
+            /debs/chrony_${ORIG_VER}+bootc2_${ARCH}.deb
+
+      - name: Repack openipmi with no-IPMI skip
+        shell: bash
+        run: |
+          SAVE_PWD=$(pwd)
+
+          apt update
+          cd /tmp
+          apt-get download openipmi
+
+          mkdir -p /output/openipmi
+          dpkg-deb -R /tmp/openipmi_*.deb /output/openipmi
+
+          ORIG_VER=$(dpkg-deb -f /tmp/openipmi_*.deb Version)
+          ARCH=$(dpkg-deb -f /tmp/openipmi_*.deb Architecture)
+
+          cp -r "${SAVE_PWD}"/workflows/bootc-debs-builder/openipmipostinstall/* \
+            /output/openipmi/
+
+          # Regenerate md5sums after content modification
+          find /output/openipmi -not -path '*/DEBIAN/*' -type f \
+            | xargs md5sum \
+            | sed "s|/output/openipmi/||" \
+            > /output/openipmi/DEBIAN/md5sums
+
+          sed -i "s/^Version: .*/Version: 1:${ORIG_VER}+bootc1/" \
+            /output/openipmi/DEBIAN/control
+
+          dpkg-deb --build /output/openipmi \
+            /debs/openipmi_${ORIG_VER}+bootc1_${ARCH}.deb
 
       - name: Build fanctl
         shell: bash
         env:
-          FANCTL_VER: "1.2.0"
+          FANCTL_VER: "1.2.1"
         run: |
           SAVE_PWD=$(pwd)
 
