@@ -21,7 +21,7 @@ Proxmox-Atomic uses a **two-layer architecture**:
 | Layer | Source | Responsibility |
 |---|---|---|
 | **Base** | `ghcr.io/daemoncores/debian-bootc:latest` | bootc, ostree, composefs, bootupd, GRUB (Fedora rhboot fork), dracut, firstboot-user-setup, ifupdown2 (repacked), systemd-timesyncd (repacked), Secure Boot signing, APT repository |
-| **Proxmox layer** | This repository | Proxmox VE 9, proxmox-default-kernel, chrony, dnsmasq, systemd-zram-generator, proxmox-firstboot, pve-domain-set, removepvepopup, fanctl, powerctl |
+| **Proxmox layer** | This repository | Proxmox VE 9, proxmox-default-kernel, chrony, dnsmasq, systemd-zram-generator, proxmox-firstboot, pve-domain-set, pve-manager (repacked: no-subscription popup), libtemplate-perl (repacked: ostree mtime fix), fanctl, powerctl |
 
 ### What the base layer provides
 
@@ -44,7 +44,8 @@ Proxmox-Atomic uses a **two-layer architecture**:
 - **systemd-zram-generator** — compressed swap via zram
 - **proxmox-firstboot** — detects the WAN interface and binds it to `vmbr0`
 - **pve-domain-set** — pins the host FQDN to its real IP in `/etc/hosts`
-- **removepvepopup** — suppresses the "No valid subscription" web UI dialog
+- **pve-manager (repacked)** — the Proxmox VE management stack, repacked (`+bootc1`) to flip the subscription check to `active` so the "No valid subscription" web UI dialog never appears
+- **libtemplate-perl (repacked)** — Template Toolkit, repacked (`+bootc1`) to fix the ostree `mtime=0` bug that otherwise makes the web UI return HTTP 500 (`index.html.tpl: not found`)
 - **fanctl** — self-calibrating IPMI (any vendor) / hwmon temperature-driven fan controller
 - **powerctl** — measured CPU performance-per-watt operating point and safe peripheral power management
 
@@ -150,8 +151,9 @@ The `Containerfile` defines the Proxmox layer. It is built `FROM ghcr.io/daemonc
 4. **Post-install configuration**
    - Copy `src/pvepostinstall/` into the image (`/etc/network/interfaces`, systemd services, scripts)
    - Enable `pve-domain-set.service` and `proxmox-firstboot.service` via symlinks into `multi-user.target.wants`
-   - Run `removepvepopup` to patch the subscription check
    - Clean up temporary files and the `policy-rc.d` inhibitor
+
+   The subscription-popup and Template Toolkit `mtime` fixes are no longer applied here: they are folded into the repacked `pve-manager` and `libtemplate-perl` packages (built by `bootc-debs-builder`, published to the APT repository), which apt installs during the Proxmox install step above.
 
 5. **Health check**
    - `HEALTHCHECK NONE` — bootc images are updated in-place via ostree; no runtime healthcheck applies

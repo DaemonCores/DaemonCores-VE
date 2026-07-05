@@ -24,7 +24,7 @@ We provide community support for:
 - First-boot configuration and the `firstboot-user-setup` wizard.
 - General bootc/ostree lifecycle operations (`bootc update`, `bootc rollback`, etc.).
 - The APT repository and package updates.
-- The `removepvepopup` script (maintained by the project author; flips a single boolean in the Proxmox VE Perl code, 4+ years of production use without failure).
+- The no-subscription popup patch, now folded into the repacked `pve-manager` package (maintained by the project author; flips a single boolean in the Proxmox VE Perl code, 4+ years of production use without failure).
 
 ## What Is NOT Supported
 

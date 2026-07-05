@@ -38,12 +38,12 @@ Only the latest published image is actively maintained with security updates. Us
 
 The kickstart installer sets a temporary default root password `BootcDebug@0` as a deliberate fallback. This password is intended to be replaced by the `firstboot-user-setup` wizard on the first successful boot. Leaving this password unchanged beyond first boot is a known security risk. See the [README](README.md#default-root-password) for details.
 
-### `removepvepopup` Modification
+### No-Subscription Popup Modification (repacked `pve-manager`)
 
-The `removepvepopup` script patches a Proxmox VE Perl source file (`/usr/share/perl5/PVE/API2/Subscription.pm`) to suppress the no-subscription dialog. This modification:
+The repacked `pve-manager` package patches a Proxmox VE Perl source file (`/usr/share/perl5/PVE/API2/Subscription.pm`) to suppress the no-subscription dialog. This modification:
 
 - Is **not supported** by Proxmox Server Solutions GmbH.
-- Can be overwritten by `pve-manager` package updates.
+- Is reapplied at every image build; a stock `pve-manager` (without the `+bootc1` repack) would drop it.
 - Relies on internal API paths that may change without notice.
 
 See the [README](README.md#no-subscription-popup-removal) for risks and the official subscription alternative.

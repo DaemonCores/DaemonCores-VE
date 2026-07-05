@@ -38,27 +38,25 @@ This default is **identical to debian-bootc**. The root password is never meant 
 
 ---
 
-## 2. No-Subscription Popup Removal (`removepvepopup`)
+## 2. Proxmox VE Web UI Fixes (repacked `pve-manager` and `libtemplate-perl`)
 
-### What we do
+Two web-UI defects are fixed by repacking an upstream package with a minimal overlay and republishing it (`+bootc1`) to the Proxmox-Atomic APT repository — the same mechanism used for `ifupdown2`, `chrony`, and `openipmi`. apt installs the patched packages at image-build time. There is no standalone script and no apt hook (this replaces the former `removepvepopup` script and its apt `Post-Invoke` hook, which are no longer shipped).
 
-The `removepvepopup` script patches `/usr/share/perl5/PVE/API2/Subscription.pm` so the subscription check reports `status => "active"` instead of `status => "notfound"`, then restarts `pveproxy.service`.
+### 2a. No-subscription popup (`pve-manager`)
 
-### Why it is necessary
+**What we do.** The repacked `pve-manager` flips `status => "notfound"` to `status => "active"` in `/usr/share/perl5/PVE/API2/Subscription.pm`.
 
-The Proxmox-Atomic image ships **without a Proxmox Enterprise subscription**. Without this patch, every login to the Proxmox VE web UI triggers a "You do not have a valid subscription for this server" modal dialog that the user must dismiss manually before doing anything useful. In an atomic/bootc deployment model where the OS is rebuilt from a container image, requiring manual dismissal of a popup on every login is not acceptable.
+**Why it is necessary.** The image ships **without a Proxmox Enterprise subscription**. Without this patch, every login to the web UI triggers a "You do not have a valid subscription for this server" modal that the user must dismiss manually. In an atomic/bootc model rebuilt from a container image, requiring manual dismissal on every login is not acceptable.
 
-### Proven track record
+**Proven track record.** This is **not** an experimental hack. The change has run in production for over four years on the author's own servers and those of friends and collaborators, without a single failure — across every Proxmox VE update in that period. It flips a single boolean in the Proxmox VE Perl code, nothing else; that simplicity is why it has stayed stable across versions. Folding it into the repacked package means apt prefers the `+bootc1` version and reapplies the change automatically at every image build.
 
-This is **not** an experimental or unsupported hack. `removepvepopup` is maintained by the author of Proxmox-Atomic and has been running in production for over four years on the author's own servers and on those of friends and collaborators, without a single failure — including across every Proxmox VE update applied in that period. The modification is deliberately minimal and targeted: it flips a single boolean in the Perl code of Proxmox VE (`status => "notfound"` → `status => "active"`), nothing else. That simplicity is the reason the patch has remained stable and easy to maintain across versions. In the bootc/atomic model the patch is reapplied at image build time, so each new deployment restores it automatically.
+**Alternative.** Buying a [Proxmox VE Support Subscription](https://www.proxmox.com/en/services/proxmox-ve-support) is a valid choice — it removes the popup without any local patch and grants a legitimate key, Enterprise repository access, and vendor support. Either path is acceptable; revert this patch if you switch to a paid subscription. Running it on a host that already holds a paid subscription would mask legitimate subscription warnings — prefer the subscription path there.
 
-### Note on updates
+### 2b. Web UI HTTP 500 on ostree (`libtemplate-perl`)
 
-A `pve-manager` update overwrites the patched Perl file, so the popup reappears until the script runs again. Under the bootc model this is handled by the next image build; on a running system a `pve-manager` update via `apt` would temporarily restore the popup until the script is re-run. Because the patch only touches a single, stable boolean field, it has consistently re-applied cleanly across versions. Running this on a production server that already holds a paid subscription would mask legitimate subscription warnings — in that case prefer the subscription path instead.
+**What we do.** The repacked `libtemplate-perl` patches Template Toolkit's `_template_modified` (`Template/Provider.pm`) to map a real-but-zero file mtime to `1`, while still returning `undef` for genuinely missing files.
 
-### Alternative
-
-Buying a [Proxmox VE Support Subscription](https://www.proxmox.com/en/services/proxmox-ve-support) is a valid choice if you want a legitimate subscription key, access to the Enterprise repository, and vendor support — and it removes the popup without any local patch. Either path is acceptable; pick the one that fits your deployment. Revert this patch if you switch to a paid subscription.
+**Why it is necessary.** ostree canonicalizes every `/usr` file mtime to `0` (epoch) at deploy time. Template Toolkit uses that mtime as the "does this template exist?" truth value; a zero mtime is falsy, so **every** template shipped under `/usr` is reported missing and the web UI answers HTTP 500 (`index.html.tpl: not found`). This is intrinsic to the ostree deployment layer — it appears only after deployment, not in the OCI image (which has real mtimes), so it is not a Containerfile mistake. The fix restores correct existence detection on ostree without disturbing Template Toolkit's freshness cache, and applies to every Template Toolkit template, not just the Proxmox UI.
 
 ---
 
@@ -185,7 +183,8 @@ Remove the flag and rely on the stable cosign verification path. This would requ
 | Decision | Justification | Risk Level | Alternative |
 |---|---|---|---|
 | Default root password | Fallback if firstboot wizard fails | Low (temporary, replaced immediately) | Remove fallback; risk lockout |
-| `removepvepopup` | Maintained by author, 4+ years production, single-boolean patch | Low (single stable field, re-applied at build time) | Buy Proxmox subscription |
+| `pve-manager` subscription patch (repacked) | Maintained by author, 4+ years production, single-boolean patch folded into the package | Low (single stable field, re-applied at build time) | Buy Proxmox subscription |
+| `libtemplate-perl` mtime patch (repacked) | Fixes ostree `mtime=0` breaking Template Toolkit → web UI HTTP 500 | Low (2-line change, guarded by build-time asserts) | Patch Proxmox templates individually |
 | Privileged ISO container | Required for `mount -o loop` | Low (isolated to single job, ephemeral runner) | Self-hosted runner with loop devices |
 | Debian Trixie (testing) | Kernel recency, bootc evolution, Proxmox VE 9 target | Medium (testing instability) | Wait for Debian 14 stable |
 | Kernel replacement | ZFS built-in, KVM optimizations, bootc immutability | Low (Proxmox kernel is stable) | Keep Debian kernel + DKMS ZFS |

@@ -63,7 +63,8 @@ Proxmox-Atomic is **a layer on top of debian-bootc**, not a fork. The base image
 - **chrony** — NTP client, replacing systemd-timesyncd (disabled in the Proxmox VE stack)
 - **dnsmasq** — lightweight DNS forwarder and DHCP server
 - **systemd-zram-generator** — compressed swap via zram
-- **removepvepopup** — suppresses the "No valid subscription" web UI dialog
+- **pve-manager (repacked)** — Proxmox VE management stack, patched to suppress the "No valid subscription" web UI dialog
+- **libtemplate-perl (repacked)** — Template Toolkit, patched to fix the ostree `mtime=0` bug that otherwise makes the web UI return HTTP 500
 - **proxmox-firstboot.service** — detects the WAN interface and injects it into `/etc/network/interfaces`
 - **pve-domain-set.service** — sets the host FQDN in `/etc/hosts` from the detected IP
 - **fanctl** — generic, self-calibrating temperature-driven fan controller (IPMI for any vendor, plus an hwmon backend for standard PCs)
@@ -345,7 +346,7 @@ The Proxmox VE web interface displays a "You do not have a valid subscription fo
 
 ### What the image does
 
-The `removepvepopup` script patches `/usr/share/perl5/PVE/API2/Subscription.pm` so the subscription check reports `status => "active"` instead of `status => "notfound"`, then restarts `pveproxy.service` so the change takes effect in the web UI. This script is run during the container build (`RUN removepvepopup` in the Containerfile).
+The subscription check is patched inside a **repacked `pve-manager` package**: the `pve-manager` shipped by Proxmox is downloaded, `/usr/share/perl5/PVE/API2/Subscription.pm` is edited so the check reports `status => "active"` instead of `status => "notfound"`, and the result is republished (`+bootc1`) to the Proxmox-Atomic APT repository. apt then installs the patched package at image-build time — the same mechanism used for the other repacked packages (`ifupdown2`, `chrony`, `openipmi`). This replaces the former standalone `removepvepopup` script and its apt hook, which are no longer shipped.
 
 ### Why it is necessary
 
@@ -353,15 +354,29 @@ The Proxmox-Atomic image ships without a Proxmox Enterprise subscription. Withou
 
 ### Maintained and proven in production
 
-This is **not** an unsupported hack. `removepvepopup` is a script maintained by the author of Proxmox-Atomic. It has been running in production for over four years on the author's own servers and on those of friends and collaborators, without a single failure — including across every Proxmox VE update applied in that period. The modification is deliberately minimal and targeted: it flips a single boolean in the Perl code of Proxmox VE (`status => "notfound"` → `status => "active"`), nothing else. In the bootc/atomic model the patch is reapplied at image build time, so each new deployment restores it automatically.
+This is **not** an unsupported hack. The change is maintained by the author of Proxmox-Atomic and has been running in production for over four years on the author's own servers and on those of friends and collaborators, without a single failure — including across every Proxmox VE update applied in that period. The modification is deliberately minimal and targeted: it flips a single boolean in the Perl code of Proxmox VE (`status => "notfound"` → `status => "active"`), nothing else. Because it is folded into the repacked package, each new image build reapplies it automatically.
 
 ### Note on updates
 
-A `pve-manager` update overwrites the patched Perl file, so the popup reappears until the script runs again. Under the bootc model this is handled by the next image build; on a running system an `apt` update of `pve-manager` would temporarily restore the popup until the script is re-run. The patch has consistently re-applied cleanly across versions because it only touches a single, stable boolean field.
+Because the patch lives in the repacked `pve-manager` published to the Proxmox-Atomic APT repository, apt prefers the `+bootc1` version over the stock Proxmox package and reapplies it automatically on every image build. The change only touches a single, stable boolean field, so it has re-applied cleanly across versions.
 
 ### Alternative
 
 Buying a [Proxmox VE Support Subscription](https://www.proxmox.com/en/services/proxmox-ve-support) is a valid choice if you want a legitimate subscription key, access to the Enterprise repository, and vendor support — and it removes the popup without any local patch. Either path is acceptable; pick the one that fits your deployment. Revert this patch if you switch to a paid subscription.
+
+---
+
+## Web UI HTTP 500 on ostree (Template Toolkit mtime fix)
+
+On a freshly deployed atomic image, the Proxmox VE web UI could return HTTP 500 with `index.html.tpl: not found`, even though the template is present on disk.
+
+### Root cause
+
+ostree canonicalizes every `/usr` file mtime to `0` (epoch) when it deploys the image. Template Toolkit (`libtemplate-perl`) uses a template's mtime as its "does this template exist?" truth value; a zero mtime is falsy, so every template shipped under `/usr` is treated as missing. This is intrinsic to the ostree deployment layer — it appears only after deployment, not in the OCI image (which still carries real mtimes), so it is **not** a Containerfile misconfiguration.
+
+### What the image does
+
+`libtemplate-perl` is repacked (`+bootc1`) with a small patch to `_template_modified` (`Template/Provider.pm`): a real-but-zero mtime is mapped to `1`, while genuinely missing files still return `undef`. This restores correct template existence detection on ostree without disturbing the freshness cache, and fixes the web UI globally — the correction applies to every Template Toolkit template, not just the Proxmox UI.
 
 ---
 
