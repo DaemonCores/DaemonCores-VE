@@ -63,6 +63,10 @@ DISK_SPINDOWN_MIN=0       # HDD standby after N min idle (0 = off). ZFS/mounted 
 GPU_POWER_PCT=0           # Cap GPU power at N% of its max (0 = leave factory). NVIDIA+AMD.
 USB_AUTOSUSPEND=leave     # leave | on (power-save) | off (stability, always powered).
 CSTATES_ENSURE=1          # 1 = re-enable any disabled CPU idle C-state.
+SWAPPINESS_DYNAMIC=1      # 1 = scale vm.swappiness from the averaged CPU load.
+SWAPPINESS_MIN=1          # Swappiness under heavy load (protect the working set).
+SWAPPINESS_MAX=60         # Swappiness at idle (reclaim inactive pages for cache).
+SWAPPINESS_STEP=5         # Only rewrite swappiness when it moves by at least this.
 REAPPLY_EVERY=30          # Re-apply peripheral PM every N control cycles.
 
 # shellcheck source=/dev/null
@@ -80,6 +84,7 @@ HAVE_PERF=0              # 1 = perf PMU counters available (compute-bound sense)
 IDLE_ELAPSED=0          # Seconds of sustained idle accumulated.
 NEED_CAL=0               # 1 = a calibration is pending (first boot or drift).
 PREV_STAT=''            # Previous /proc/stat first line for utilization delta.
+LAST_SWAPPINESS=-1      # Last applied vm.swappiness (-1 = unknown).
 
 log() {
   printf '%s powerctl: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"
@@ -507,6 +512,28 @@ ensure_cstates() {
   (( n > 0 )) && log "C-states: re-enabled ${n} disabled idle state(s)"
 }
 
+#######################################
+# Scale vm.swappiness from the averaged CPU load: low under heavy load (keep the
+# working set resident), higher at idle (let the kernel reclaim inactive pages
+# for cache). Driven by the interval-averaged utilization, not the instantaneous
+# frequency, which schedutil changes every few ms and would make swappiness flap.
+# Globals:
+#   SWAPPINESS_* (read), LAST_SWAPPINESS (write)
+# Arguments:
+#   $1 - averaged utilization percent
+#######################################
+apply_swappiness() {
+  [[ "$SWAPPINESS_DYNAMIC" == 1 ]] || return 0
+  [[ -w /proc/sys/vm/swappiness ]] || return 0
+  local sw=$(( SWAPPINESS_MAX - (SWAPPINESS_MAX - SWAPPINESS_MIN) * $1 / 100 ))
+  (( sw < SWAPPINESS_MIN )) && sw="$SWAPPINESS_MIN"
+  (( sw > SWAPPINESS_MAX )) && sw="$SWAPPINESS_MAX"
+  local delta=$(( sw > LAST_SWAPPINESS ? sw - LAST_SWAPPINESS : LAST_SWAPPINESS - sw ))
+  if (( LAST_SWAPPINESS < 0 || delta >= SWAPPINESS_STEP )); then
+    echo "$sw" > /proc/sys/vm/swappiness 2>/dev/null && LAST_SWAPPINESS="$sw"
+  fi
+}
+
 # Apply every peripheral power setting; each function no-ops if unsupported.
 apply_peripheral_pm() {
   apply_sata_alpm
@@ -556,6 +583,7 @@ do_check() {
   echo "  USB susp  : ${USB_AUTOSUSPEND}"
   echo "  GPU cap   : $((( GPU_POWER_PCT > 0 )) && echo "${GPU_POWER_PCT}%" || echo off)$(command -v nvidia-smi >/dev/null 2>&1 && echo ' (nvidia present)')$(compgen -G '/sys/class/drm/card*/device/hwmon/hwmon*/power1_cap' >/dev/null 2>&1 && echo ' (amdgpu present)')"
   echo "  C-states  : $([[ "$CSTATES_ENSURE" == 1 ]] && echo ensure-enabled || echo leave)"
+  echo "  swappiness: $([[ "$SWAPPINESS_DYNAMIC" == 1 ]] && echo "dynamic ${SWAPPINESS_MIN}..${SWAPPINESS_MAX} (now $(cat /proc/sys/vm/swappiness 2>/dev/null))" || echo static)"
   if (( DISK_SPINDOWN_MIN > 0 )); then
     echo "  disk spin : ${DISK_SPINDOWN_MIN}min (ZFS-excluded: $(zfs_backed_disks | sort -u | tr '\n' ' '))"
   else
@@ -587,6 +615,9 @@ run_daemon() {
   while :; do
     sleep "$POLL_INTERVAL"
     local util; util=$(cpu_util)
+
+    # Swappiness follows the averaged load every cycle (cheap, stable signal).
+    apply_swappiness "$util"
 
     # Periodically re-apply peripheral PM (new hotplugged devices, fresh ZFS scan).
     (( ++loop_n % REAPPLY_EVERY == 0 )) && apply_peripheral_pm
