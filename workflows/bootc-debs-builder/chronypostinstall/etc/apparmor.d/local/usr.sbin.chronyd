@@ -1,0 +1,10 @@
+# Site-local additions to the chronyd AppArmor profile.
+#
+# Under systemd service sandboxing (ProtectSystem=strict, PrivateTmp) on an
+# ostree/bootc system, chronyd's sd_notify and journal sockets appear to
+# AppArmor as "disconnected" paths without the /run prefix. The stock profile's
+# @{run}/systemd/notify and journal rules therefore do not match, chronyd is
+# denied writing to them, cannot send READY=1, and the Type=notify service is
+# marked failed. Allowing the disconnected socket paths fixes the startup.
+/systemd/notify w,
+/systemd/journal/dev-log w,
