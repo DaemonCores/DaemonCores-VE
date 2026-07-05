@@ -1,0 +1,25 @@
+[Unit]
+Description=powerctl — measured performance-per-watt operating point
+Documentation=https://github.com/DaemonCores/Proxmox-Atomic
+# Only start when the kernel exposes cpufreq.
+ConditionPathExists=/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/powerctl --daemon
+# On stop, remove any frequency cap so the machine is left unrestricted.
+ExecStopPost=/usr/sbin/powerctl --restore
+Restart=on-failure
+RestartSec=10
+Nice=10
+
+# Persistent calibration state in /var/lib/powerctl.
+StateDirectory=powerctl
+
+# Light hardening (needs to write cpufreq/powercap sysfs, so no ProtectSystem).
+ProtectHome=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
