@@ -6,7 +6,7 @@ Maintainer: Gabriel Guillou guillou.gabriel@gmail.com
 Homepage: https://github.com/DaemonCores/Proxmox-Atomic
 Section: admin
 Priority: optional
-Depends: coreutils, util-linux, {{ DEPS }}
+Depends: coreutils, util-linux, linux-perf, {{ DEPS }}
 Recommends: hdparm
 Description: measured performance-per-watt CPU operating-point controller
  A lightweight bash daemon that keeps the CPU at its measured efficiency knee
