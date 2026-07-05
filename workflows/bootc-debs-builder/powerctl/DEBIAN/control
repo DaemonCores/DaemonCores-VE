@@ -6,7 +6,8 @@ Maintainer: Gabriel Guillou guillou.gabriel@gmail.com
 Homepage: https://github.com/DaemonCores/Proxmox-Atomic
 Section: admin
 Priority: optional
-Depends: coreutils, {{ DEPS }}
+Depends: coreutils, util-linux, {{ DEPS }}
+Recommends: hdparm
 Description: measured performance-per-watt CPU operating-point controller
  A lightweight bash daemon that keeps the CPU at its measured efficiency knee
  and only spends frequency (and therefore watts, heat and fan noise) when a
@@ -21,3 +22,8 @@ Description: measured performance-per-watt CPU operating-point controller
  Calibration loads the CPU and therefore runs only in an idle window, or on
  demand with "powerctl --calibrate". Pairs with fanctl: less heat lets the fans
  run lower.
+ .
+ It also applies safe peripheral power management: SATA link power (low power
+ between commands, instant wake), PCI runtime power management, optional PCIe
+ ASPM, and optional idle-disk spin-down that always excludes ZFS-backed, mounted
+ and root disks. Every knob auto-disables when the hardware does not support it.
