@@ -1,0 +1,22 @@
+Source: fanctl
+Package: fanctl
+Version: {{ VER }}
+Architecture: all
+Maintainer: Gabriel Guillou guillou.gabriel@gmail.com
+Homepage: https://github.com/DaemonCores/Proxmox-Atomic
+Section: admin
+Priority: optional
+Depends: ipmitool, kmod, {{ DEPS }}
+Description: generic temperature-driven fan controller over local IPMI
+ A lightweight bash daemon that regulates server fan speed from temperature,
+ through the local IPMI interface (/dev/ipmi0).
+ .
+ Self-adapting: it discovers temperature sensors and their own Upper-Critical
+ thresholds, then normalizes the speed curve per sensor, so nothing is
+ hard-coded and it works across CPUs and servers.
+ .
+ Writing the fan speed uses an auto-detected vendor profile (ipmitool mc info).
+ Dell iDRAC is supported; any unrecognized vendor falls back to monitor mode
+ (read-only) and never touches the fans. Fan regulation is handed back to the
+ BMC automatically on over-temperature, a failed fan, or loss of IPMI
+ communication.

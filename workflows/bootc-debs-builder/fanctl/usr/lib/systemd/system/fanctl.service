@@ -1,0 +1,25 @@
+[Unit]
+Description=fanctl — generic fan controller (local IPMI)
+Documentation=https://github.com/DaemonCores/Proxmox-Atomic
+# Only start when the local IPMI interface is present.
+ConditionPathExists=/dev/ipmi0
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/fanctl --daemon
+# Safety net if the process is killed (SIGKILL cannot be trapped): explicitly
+# hand fan regulation back to the BMC automatic mode.
+ExecStopPost=/usr/sbin/fanctl --restore
+Restart=on-failure
+RestartSec=10
+Nice=5
+
+# Light hardening (needs /dev/ipmi0 and to execute ipmitool).
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/run
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

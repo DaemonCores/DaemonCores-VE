@@ -48,6 +48,7 @@ RUN chmod +x /usr/sbin/policy-rc.d \
         chrony \
         systemd-zram-generator \
         dnsmasq \
+        fanctl \
     && apt remove -y \
         linux-image-amd64 \
         os-prober \
