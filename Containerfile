@@ -69,8 +69,7 @@ COPY ./assets/banner/etc /etc/
 # bridge for Proxmox VE networking — proxmox-firstboot resolves the
 # placeholder to the real WAN interface at first boot.
 COPY ./src/pvepostinstall /
-RUN echo "vm.swappiness = 1" >> /etc/sysctl.conf \
-    && chmod +x /usr/local/bin/* \
+RUN chmod +x /usr/local/bin/* \
     && mkdir -p /etc/systemd/system/multi-user.target.wants \
     && ln -sf /etc/systemd/system/pve-domain-set.service \
         /etc/systemd/system/multi-user.target.wants/pve-domain-set.service \
