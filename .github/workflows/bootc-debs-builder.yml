@@ -173,6 +173,87 @@ jobs:
           dpkg-deb --build /output/openipmi \
             /debs/openipmi_${ORIG_VER}+bootc1_${ARCH}.deb
 
+      - name: Repack libtemplate-perl with ostree mtime fix
+        shell: bash
+        run: |
+          apt update
+          cd /tmp
+          apt-get download libtemplate-perl
+
+          mkdir -p /output/libtemplate-perl
+          dpkg-deb -R /tmp/libtemplate-perl_*.deb /output/libtemplate-perl
+
+          ORIG_VER=$(dpkg-deb -f /tmp/libtemplate-perl_*.deb Version)
+          ARCH=$(dpkg-deb -f /tmp/libtemplate-perl_*.deb Architecture)
+
+          # ostree canonicalizes every /usr file mtime to 0 (epoch) at deploy
+          # time. Template Toolkit's _template_modified returns that mtime and
+          # its caller uses the value as the "does this template exist?" truth:
+          # a zero mtime is falsy, so every template shipped under /usr is
+          # reported missing and the Proxmox VE web UI answers HTTP 500
+          # ("index.html.tpl: not found"). Map a real-but-zero mtime to 1
+          # (truthy and stable, so the freshness cache never thrashes) while
+          # still returning undef for genuinely absent files.
+          PROV=$(find /output/libtemplate-perl -path '*/Template/Provider.pm')
+          grep -qF 'return (stat( $template ))[9];' "$PROV" \
+            || { echo "ERROR: libtemplate-perl _template_modified changed upstream; patch needs review." >&2; exit 1; }
+          sed -i 's#return (stat( $template ))\[9\];#my @arr = stat($template); return @arr ? ($arr[9] || 1) : undef;#' "$PROV"
+          grep -qF 'my @arr = stat($template); return @arr ? ($arr[9] || 1) : undef;' "$PROV" \
+            || { echo "ERROR: libtemplate-perl mtime patch failed to apply." >&2; exit 1; }
+          perl -c "$PROV" \
+            || { echo "ERROR: patched Provider.pm fails perl -c." >&2; exit 1; }
+
+          # Regenerate md5sums after content modification
+          find /output/libtemplate-perl -not -path '*/DEBIAN/*' -type f \
+            | xargs md5sum \
+            | sed "s|/output/libtemplate-perl/||" \
+            > /output/libtemplate-perl/DEBIAN/md5sums
+
+          sed -i "s/^Version: .*/Version: 1:${ORIG_VER}+bootc1/" \
+            /output/libtemplate-perl/DEBIAN/control
+
+          dpkg-deb --build /output/libtemplate-perl \
+            /debs/libtemplate-perl_${ORIG_VER}+bootc1_${ARCH}.deb
+
+      - name: Repack pve-manager without the subscription-notice popup
+        shell: bash
+        run: |
+          apt update
+          cd /tmp
+          apt-get download pve-manager
+
+          mkdir -p /output/pve-manager
+          dpkg-deb -R /tmp/pve-manager_*.deb /output/pve-manager
+
+          ORIG_VER=$(dpkg-deb -f /tmp/pve-manager_*.deb Version)
+          ARCH=$(dpkg-deb -f /tmp/pve-manager_*.deb Architecture)
+
+          # This image ships without a Proxmox VE Enterprise subscription, so the
+          # subscription API reports status "notfound" and the web UI shows a
+          # "No valid subscription" dialog on every login. Flip that single
+          # status field to "active" so the popup never appears. This folds the
+          # patch into the image build the same way as the other repacked
+          # packages, replacing the former removepvepopup script and its apt
+          # Post-Invoke hook. Buying a Proxmox VE Support Subscription is the
+          # supported alternative and also removes the popup; revert this if you
+          # switch to a paid subscription.
+          SUB=/output/pve-manager/usr/share/perl5/PVE/API2/Subscription.pm
+          grep -qF 'status => "notfound",' "$SUB" \
+            || { echo "ERROR: pve-manager Subscription.pm changed upstream; patch needs review." >&2; exit 1; }
+          sed -i 's/status => "notfound",/status => "active",/g' "$SUB"
+
+          # Regenerate md5sums after content modification
+          find /output/pve-manager -not -path '*/DEBIAN/*' -type f \
+            | xargs md5sum \
+            | sed "s|/output/pve-manager/||" \
+            > /output/pve-manager/DEBIAN/md5sums
+
+          sed -i "s/^Version: .*/Version: 1:${ORIG_VER}+bootc1/" \
+            /output/pve-manager/DEBIAN/control
+
+          dpkg-deb --build /output/pve-manager \
+            /debs/pve-manager_${ORIG_VER}+bootc1_${ARCH}.deb
+
       - name: Build fanctl
         shell: bash
         env:

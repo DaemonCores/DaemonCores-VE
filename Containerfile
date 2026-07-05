@@ -69,8 +69,7 @@ COPY ./assets/banner/etc /etc/
 # bridge for Proxmox VE networking — proxmox-firstboot resolves the
 # placeholder to the real WAN interface at first boot.
 COPY ./src/pvepostinstall /
-RUN chmod +x /usr/local/bin/* \
-    && mkdir -p /etc/systemd/system/multi-user.target.wants \
+RUN mkdir -p /etc/systemd/system/multi-user.target.wants \
     && ln -sf /etc/systemd/system/pve-domain-set.service \
         /etc/systemd/system/multi-user.target.wants/pve-domain-set.service \
     && ln -sf /etc/systemd/system/proxmox-firstboot.service \
@@ -78,7 +77,6 @@ RUN chmod +x /usr/local/bin/* \
     # Guard: abort if pve-manager is missing (proxmox-ve install failed earlier).
     && dpkg -s pve-manager >/dev/null 2>&1 \
         || { echo "ERROR: pve-manager not installed; proxmox-ve install failed." >&2; exit 1; } \
-    && removepvepopup \
     && rm -f /etc/apt/sources.list.d/pve-install-repo.sources \
         /tmp/* \
         /var/tmp/* \
