@@ -12,3 +12,6 @@ FQDN="${HOST}.$(hostname -d 2>/dev/null || echo local)"
 
 sed -i "/${HOST}/d" /etc/hosts
 echo "${IP}    ${FQDN} ${HOST}" >> /etc/hosts
+
+cp /etc/issue.tpl /etc/issue
+sed -i "s|{{ IP }}|${IP}|g" /etc/issue
