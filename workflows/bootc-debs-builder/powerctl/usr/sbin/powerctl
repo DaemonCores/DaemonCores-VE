@@ -56,6 +56,16 @@ IDLE_WINDOW=300           # Idle must last this long before calibrating, seconds
 DRIFT_WATT_PCT=20         # Watt deviation vs calibration that flags drift.
 SET_MIN_TO_HW=1           # 1 = pin scaling_min_freq to hardware min while running.
 
+# --- Peripheral power management (each auto-skips if unsupported) ------------
+SATA_ALPM=med_power_with_dipm  # SATA link power ('' = leave alone). Safe + ZFS-ok.
+PCI_RUNTIME_PM=1          # 1 = set PCI devices power/control=auto (wake on demand).
+PCIE_ASPM=''             # PCIe ASPM policy ('' = leave; can hang buggy devices).
+DISK_SPINDOWN_MIN=0       # HDD standby after N min idle (0 = off). ZFS/mounted excluded.
+GPU_POWER_PCT=0           # Cap GPU power at N% of its max (0 = leave factory). NVIDIA+AMD.
+USB_AUTOSUSPEND=leave     # leave | on (power-save) | off (stability, always powered).
+CSTATES_ENSURE=1          # 1 = re-enable any disabled CPU idle C-state.
+REAPPLY_EVERY=30          # Re-apply peripheral PM every N control cycles.
+
 # shellcheck source=/dev/null
 [[ -r "$CONF" ]] && . "$CONF"
 
@@ -359,6 +369,156 @@ regulate() {
   fi
 }
 
+# Set the SATA link power policy (low power between commands, instant wake on
+# I/O). Safe for a live ZFS pool: the platters keep spinning, only the link idles.
+apply_sata_alpm() {
+  [[ -n "$SATA_ALPM" ]] || return 0
+  local h n=0
+  for h in /sys/class/scsi_host/host*/link_power_management_policy; do
+    [[ -w "$h" ]] || continue
+    echo "$SATA_ALPM" > "$h" 2>/dev/null && (( n++ ))
+  done
+  (( n > 0 )) && log "SATA link PM: ${SATA_ALPM} on ${n} host(s)"
+}
+
+# Let idle PCI devices enter low power and wake on demand.
+apply_pci_runtime_pm() {
+  [[ "$PCI_RUNTIME_PM" == 1 ]] || return 0
+  local c n=0
+  for c in /sys/bus/pci/devices/*/power/control; do
+    [[ -w "$c" ]] || continue
+    echo auto > "$c" 2>/dev/null && (( n++ ))
+  done
+  (( n > 0 )) && log "PCI runtime PM: auto on ${n} device(s)"
+}
+
+apply_pcie_aspm() {
+  [[ -n "$PCIE_ASPM" ]] || return 0
+  local f=/sys/module/pcie_aspm/parameters/policy
+  [[ -w "$f" ]] && echo "$PCIE_ASPM" > "$f" 2>/dev/null \
+    && log "PCIe ASPM policy: ${PCIE_ASPM}"
+}
+
+#######################################
+# Whole-disk kernel names that back any ZFS pool, whether imported or only
+# carrying a zfs_member signature (an exported/foreign pool). These must never
+# be spun down: ZFS writes metadata continuously and would thrash the drive.
+# Outputs:
+#   One disk name (sdX, nvmeXnY) per line.
+#######################################
+zfs_backed_disks() {
+  lsblk -rno NAME,FSTYPE,PKNAME 2>/dev/null | awk \
+    '$2 == "zfs_member" { print ($3 != "" ? $3 : $1) }'
+  if command -v zpool >/dev/null 2>&1; then
+    local p
+    while read -r p; do
+      lsblk -no PKNAME "$p" 2>/dev/null
+    done < <(zpool status -LP 2>/dev/null | awk '/\/dev\//{print $1}')
+  fi
+}
+
+#######################################
+# Spin down idle rotational disks after DISK_SPINDOWN_MIN minutes. ZFS-backed,
+# mounted, and root-backing disks are excluded (safety); wake is automatic on
+# access. Opt-in (DISK_SPINDOWN_MIN=0 disables it).
+#######################################
+apply_disk_spindown() {
+  (( DISK_SPINDOWN_MIN > 0 )) || return 0
+  if ! command -v hdparm >/dev/null 2>&1; then
+    log "disk spindown requested but hdparm is missing"
+    return 0
+  fi
+  local sval
+  if (( DISK_SPINDOWN_MIN <= 20 )); then
+    sval=$(( DISK_SPINDOWN_MIN * 12 ))          # 1..240 -> 5 s units
+  else
+    sval=$(( 240 + (DISK_SPINDOWN_MIN + 29) / 30 ))  # 241..251 -> 30 min units
+    (( sval > 251 )) && sval=251
+  fi
+  local protected d name
+  protected=" $(zfs_backed_disks | sort -u | tr '\n' ' ') "
+  local tran
+  for d in /sys/block/sd* /sys/block/hd*; do
+    [[ -e "$d" ]] || continue
+    name=$(basename "$d")
+    [[ "$(cat "$d/queue/rotational" 2>/dev/null)" == 1 ]] || continue
+    # Only genuine internal ATA/SATA/SAS disks (never USB/SD/loop).
+    tran=$(lsblk -dno TRAN "/dev/$name" 2>/dev/null)
+    case "$tran" in sata | sas | ata) ;; *) continue ;; esac
+    [[ "$protected" == *" $name "* ]] && continue
+    # Skip if any partition (or the disk) is mounted, incl. the root disk.
+    lsblk -rno MOUNTPOINT "/dev/$name" 2>/dev/null | grep -q . && continue
+    hdparm -S "$sval" "/dev/$name" >/dev/null 2>&1 \
+      && log "disk spindown: /dev/$name after ${DISK_SPINDOWN_MIN}min"
+  done
+}
+
+# Cap GPU power at GPU_POWER_PCT% of its factory maximum (datasheet-bounded, no
+# crash risk). Auto-detects NVIDIA (nvidia-smi) and AMD (amdgpu sysfs power cap).
+apply_gpu_power() {
+  (( GPU_POWER_PCT > 0 )) || return 0
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    local maxw capw
+    maxw=$(nvidia-smi --query-gpu=power.max_limit --format=csv,noheader,nounits \
+      2>/dev/null | head -1 | cut -d. -f1)
+    if [[ "$maxw" =~ ^[0-9]+$ ]]; then
+      capw=$(( maxw * GPU_POWER_PCT / 100 ))
+      nvidia-smi -pm 1 >/dev/null 2>&1
+      nvidia-smi -pl "$capw" >/dev/null 2>&1 \
+        && log "NVIDIA GPU power cap: ${capw}W (${GPU_POWER_PCT}% of ${maxw}W)"
+    fi
+  fi
+  local f max cap n=0
+  for f in /sys/class/drm/card*/device/hwmon/hwmon*/power1_cap; do
+    [[ -w "$f" ]] || continue
+    max=$(cat "${f}_max" 2>/dev/null); [[ "$max" =~ ^[0-9]+$ ]] || continue
+    cap=$(( max * GPU_POWER_PCT / 100 ))
+    echo "$cap" > "$f" 2>/dev/null && (( n++ ))
+  done
+  (( n > 0 )) && log "AMD GPU power cap: ${GPU_POWER_PCT}% of max on ${n} card(s)"
+}
+
+# USB autosuspend: 'on' saves power, 'off' keeps links always powered (stability),
+# 'leave' does not touch the kernel default.
+apply_usb_autosuspend() {
+  local val
+  case "$USB_AUTOSUSPEND" in
+    on)  val=auto ;;
+    off) val=on ;;
+    *)   return 0 ;;
+  esac
+  local c n=0
+  for c in /sys/bus/usb/devices/*/power/control; do
+    [[ -w "$c" ]] || continue
+    echo "$val" > "$c" 2>/dev/null && (( n++ ))
+  done
+  (( n > 0 )) && log "USB autosuspend: ${USB_AUTOSUSPEND} on ${n} device(s)"
+}
+
+# Re-enable any CPU idle C-state that was disabled, so deep idle power saving is
+# available. Safe: enabling idle states never destabilises the CPU.
+ensure_cstates() {
+  [[ "$CSTATES_ENSURE" == 1 ]] || return 0
+  local s n=0
+  for s in "${CPUBASE}"/cpu[0-9]*/cpuidle/state[0-9]*/disable; do
+    [[ -w "$s" ]] || continue
+    [[ "$(cat "$s" 2>/dev/null)" == 1 ]] || continue
+    echo 0 > "$s" 2>/dev/null && (( n++ ))
+  done
+  (( n > 0 )) && log "C-states: re-enabled ${n} disabled idle state(s)"
+}
+
+# Apply every peripheral power setting; each function no-ops if unsupported.
+apply_peripheral_pm() {
+  apply_sata_alpm
+  apply_pci_runtime_pm
+  apply_pcie_aspm
+  apply_usb_autosuspend
+  apply_gpu_power
+  ensure_cstates
+  apply_disk_spindown
+}
+
 apply_static_settings() {
   local gov; gov=$(choose_governor)
   [[ -n "$gov" ]] && { cpufreq_write_all scaling_governor "$gov"; log "governor -> $gov"; }
@@ -391,12 +551,24 @@ do_check() {
   else
     echo "  (not calibrated yet)"
   fi
+  echo "--- Peripheral PM ---"
+  echo "  SATA ALPM : ${SATA_ALPM:-off}"
+  echo "  PCI rtpm  : $([[ "$PCI_RUNTIME_PM" == 1 ]] && echo on || echo off)"
+  echo "  USB susp  : ${USB_AUTOSUSPEND}"
+  echo "  GPU cap   : $((( GPU_POWER_PCT > 0 )) && echo "${GPU_POWER_PCT}%" || echo off)$(command -v nvidia-smi >/dev/null 2>&1 && echo ' (nvidia present)')$(compgen -G '/sys/class/drm/card*/device/hwmon/hwmon*/power1_cap' >/dev/null 2>&1 && echo ' (amdgpu present)')"
+  echo "  C-states  : $([[ "$CSTATES_ENSURE" == 1 ]] && echo ensure-enabled || echo leave)"
+  if (( DISK_SPINDOWN_MIN > 0 )); then
+    echo "  disk spin : ${DISK_SPINDOWN_MIN}min (ZFS-excluded: $(zfs_backed_disks | sort -u | tr '\n' ' '))"
+  else
+    echo "  disk spin : off"
+  fi
 }
 
 run_daemon() {
   detect_features
+  apply_peripheral_pm            # SATA/PCI/disk PM works even without cpufreq.
   if [[ "$HAVE_CPUFREQ" != 1 ]]; then
-    log "no cpufreq interface -> nothing to control, exiting"
+    log "no cpufreq interface -> peripheral power management applied, no cap loop"
     exit 0
   fi
   trap cleanup EXIT
@@ -412,9 +584,13 @@ run_daemon() {
   fi
 
   cpu_util >/dev/null   # Prime the utilization delta.
+  local loop_n=0
   while :; do
     sleep "$POLL_INTERVAL"
     local util; util=$(cpu_util)
+
+    # Periodically re-apply peripheral PM (new hotplugged devices, fresh ZFS scan).
+    (( ++loop_n % REAPPLY_EVERY == 0 )) && apply_peripheral_pm
 
     # Track idle windows for (re)calibration.
     if (( util < IDLE_UTIL )); then
