@@ -40,7 +40,7 @@ readonly STATE_FILE="${STATE_DIR}/calibration.conf"
 # --- Defaults (overridden by CONF) ------------------------------------------
 IPMITOOL=ipmitool         # ipmitool binary; local IPMI via /dev/ipmi0.
 POLL_INTERVAL=20          # Seconds between control cycles.
-MIN_PCT=15                # Fan speed floor, percent.
+MIN_PCT=10                # Fan speed floor, percent (keeps baseline airflow).
 MAX_PCT=100               # Fan speed ceiling, percent.
 TARGET_TEMP=60            # Target for the hottest controlling sensor, deg C.
 HARD_MARGIN=10            # Emergency: force max at Upper-Critical minus this.

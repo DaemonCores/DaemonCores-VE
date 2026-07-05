@@ -115,7 +115,7 @@ jobs:
       - name: Build fanctl
         shell: bash
         env:
-          FANCTL_VER: "1.1.0"
+          FANCTL_VER: "1.1.1"
         run: |
           SAVE_PWD=$(pwd)
 
