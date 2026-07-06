@@ -1,5 +1,5 @@
 name: Feature Request
-description: Suggest a new feature or enhancement for Proxmox-Atomic
+description: Suggest a new feature or enhancement for DaemonCores-VE
 labels: ["enhancement", "triage"]
 body:
   - type: textarea

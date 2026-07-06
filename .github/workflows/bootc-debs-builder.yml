@@ -392,7 +392,7 @@ jobs:
         id: create-apt-repo
         uses: morph027/apt-repo-action@v3
         with:
-          repo-name: proxmox-atomic
+          repo-name: daemoncores-ve
           signing-key: ${{ secrets.APT_GPG_KEY }}
           codename: trixie
           components: main

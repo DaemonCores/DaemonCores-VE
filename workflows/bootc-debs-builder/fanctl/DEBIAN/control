@@ -3,7 +3,7 @@ Package: fanctl
 Version: {{ VER }}
 Architecture: all
 Maintainer: Gabriel Guillou guillou.gabriel@gmail.com
-Homepage: https://github.com/DaemonCores/Proxmox-Atomic
+Homepage: https://github.com/DaemonCores/DaemonCores-VE
 Section: admin
 Priority: optional
 Depends: ipmitool, kmod, openipmi, {{ DEPS }}

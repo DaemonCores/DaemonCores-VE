@@ -1,14 +1,14 @@
-# Proxmox-Atomic Architecture
+# DaemonCores-VE Architecture
 
 **Atomic / bootc (OSTree) image for Proxmox VE, based on Debian 13 (Trixie)**
 
-This document describes the architecture of Proxmox-Atomic: its layered composition, the CI/CD build pipeline, the runtime first-boot flow, and key design decisions.
+This document describes the architecture of DaemonCores-VE: its layered composition, the CI/CD build pipeline, the runtime first-boot flow, and key design decisions.
 
 ---
 
 ## 1. Project Overview
 
-Proxmox-Atomic is a bootc-compliant OSTree image that delivers Proxmox VE as an atomic, rollback-capable operating system. It is built as a **layer on top of [debian-bootc](https://github.com/DaemonCores/debian-bootc)**, inheriting the full bootc/OSTree infrastructure from the base image and adding only the Proxmox hypervisor layer.
+DaemonCores-VE is a bootc-compliant OSTree image that delivers Proxmox VE as an atomic, rollback-capable operating system. It is built as a **layer on top of [debian-bootc](https://github.com/DaemonCores/debian-bootc)**, inheriting the full bootc/OSTree infrastructure from the base image and adding only the Proxmox hypervisor layer.
 
 The project follows the **bootc model**: the entire OS is built in a standard container pipeline (`podman build`), pushed to a container registry (GHCR), and applied atomically to the host using ostree as the on-disk storage engine. Updates are transactional and fully rollback-capable from the bootloader.
 
@@ -16,7 +16,7 @@ The project follows the **bootc model**: the entire OS is built in a standard co
 
 ## 2. Layered Architecture
 
-Proxmox-Atomic uses a **two-layer architecture**:
+DaemonCores-VE uses a **two-layer architecture**:
 
 | Layer | Source | Responsibility |
 |---|---|---|
@@ -82,7 +82,7 @@ Runs inside a `debian:trixie` container. Its responsibilities:
 2. **Build custom `.deb` packages** from source (inherited from debian-bootc):
    - `libcomposefs`, `libostree`, `bootupd`, `grub-efi-signed`, `bootc`, `firstboot-user-setup`
    - Repacked `systemd-timesyncd` with an `After=network-online.target` drop-in
-3. **Build the Proxmox-Atomic packages:**
+3. **Build the DaemonCores-VE packages:**
    - Repacked `ifupdown2` from Proxmox — bootc ordering fix plus a first-boot `ifupdown2-autoconf` that detects the WAN interface and **probes DHCPv6** before adding any `inet6` stanza
    - Repacked `chrony` with a `chrony.service.d/wait-network.conf` (`After=network-online.target`) drop-in
    - `fanctl` — generic IPMI (any vendor) / hwmon temperature-driven fan controller
@@ -141,7 +141,7 @@ The `Containerfile` defines the Proxmox layer. It is built `FROM ghcr.io/daemonc
    - `SHELL ["/bin/bash", "-euo", "pipefail", "-c"]` — fail fast on any error
 
 2. **GPG key verification**
-   - Download and SHA-256 verify both the Proxmox-Atomic APT signing key and the official Proxmox enterprise key before trusting them
+   - Download and SHA-256 verify both the DaemonCores-VE APT signing key and the official Proxmox enterprise key before trusting them
 
 3. **Proxmox installation**
    - Install `proxmox-default-kernel`, `proxmox-ve`, `postfix`, `open-iscsi`, `chrony`, `systemd-zram-generator`, `dnsmasq`
