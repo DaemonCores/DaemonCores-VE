@@ -1,12 +1,12 @@
 name: Bug Report
-description: Report a bug in Proxmox-Atomic
+description: Report a bug in DaemonCores-VE
 labels: ["bug", "triage"]
 body:
   - type: input
     id: version
     attributes:
       label: Version
-      description: Which version of the Proxmox-Atomic image are you running? (e.g., `v1.2.3`, image digest, or git SHA)
+      description: Which version of the DaemonCores-VE image are you running? (e.g., `v1.2.3`, image digest, or git SHA)
       placeholder: e.g., v1.2.3
     validations:
       required: true
@@ -28,7 +28,7 @@ body:
     id: deployment_type
     attributes:
       label: Deployment Type
-      description: How did you deploy Proxmox-Atomic?
+      description: How did you deploy DaemonCores-VE?
       options:
         - Online ISO
         - Offline ISO
