@@ -1,8 +1,8 @@
-# Proxmox-Atomic
+# DaemonCores-VE
 
 **Atomic / bootc (OSTree) image for Proxmox VE, based on Debian 13 (Trixie), built on top of [debian-bootc](https://github.com/DaemonCores/debian-bootc).**
 
-Proxmox-Atomic delivers a complete, transactional Proxmox VE deployment that inherits the bootc/OSTree infrastructure from debian-bootc and layers the Proxmox hypervisor stack on top. The entire OS is managed as an OCI container image: build, push, deploy, rollback — no manual package management on the host.
+DaemonCores-VE delivers a complete, transactional Proxmox VE deployment that inherits the bootc/OSTree infrastructure from debian-bootc and layers the Proxmox hypervisor stack on top. The entire OS is managed as an OCI container image: build, push, deploy, rollback — no manual package management on the host.
 
 ---
 
@@ -38,7 +38,7 @@ This project solves that by building Proxmox VE as a **bootc image**:
 
 ## Relationship with debian-bootc
 
-Proxmox-Atomic is **a layer on top of debian-bootc**, not a fork. The base image (`ghcr.io/daemoncores/debian-bootc:latest`) provides the full bootc/OSTree infrastructure, and this repository adds only the Proxmox VE layer.
+DaemonCores-VE is **a layer on top of debian-bootc**, not a fork. The base image (`ghcr.io/daemoncores/debian-bootc:latest`) provides the full bootc/OSTree infrastructure, and this repository adds only the Proxmox VE layer.
 
 ### What comes from debian-bootc
 
@@ -56,7 +56,7 @@ Proxmox-Atomic is **a layer on top of debian-bootc**, not a fork. The base image
 - **Secure Boot** — MOK-enrolled GRUB with debian-bootc signing key
 - **APT repository** — signed APT repo on GitHub Pages for all custom packages
 
-### What Proxmox-Atomic adds
+### What DaemonCores-VE adds
 
 - **Proxmox VE 9** — the hypervisor stack (kernel, pve-manager, corosync, etc.)
 - **Proxmox VE kernel** (`proxmox-default-kernel`) replaces the generic Debian kernel
@@ -202,9 +202,9 @@ The container image is signed with [cosign](https://github.com/sigstore/cosign) 
 
 Verify a pulled image:
 ```bash
-cosign verify ghcr.io/DaemonCores/Proxmox-Atomic:latest \
+cosign verify ghcr.io/DaemonCores/DaemonCores-VE:latest \
   --certificate-identity-regexp \
-    "https://github.com/DaemonCores/Proxmox-Atomic/.github/workflows/bootc-build.yml@refs/heads/main" \
+    "https://github.com/DaemonCores/DaemonCores-VE/.github/workflows/bootc-build.yml@refs/heads/main" \
   --certificate-oidc-issuer \
     "https://token.actions.githubusercontent.com"
 ```
@@ -234,7 +234,7 @@ cosign verify ghcr.io/DaemonCores/Proxmox-Atomic:latest \
 
 The **Full Pipeline** workflow (`pipeline.yml`) orchestrates all three stages with optional per-stage toggles, useful for rebuilding only the component that changed without running the full 30+ minute pipeline.
 
-The Proxmox-Atomic layer runs in the second and third stages: the OCI image build (`bootc-build.yml`) and the ISO generation (`install-iso.yml`). The first stage (`bootc-debs-builder.yml`) is inherited from debian-bootc and builds all custom packages.
+The DaemonCores-VE layer runs in the second and third stages: the OCI image build (`bootc-build.yml`) and the ISO generation (`install-iso.yml`). The first stage (`bootc-debs-builder.yml`) is inherited from debian-bootc and builds all custom packages.
 
 ### Why GitHub Actions are not pinned to commit SHAs
 
@@ -246,26 +246,26 @@ This repository instead relies on **Dependabot** (`.github/dependabot.yml`) for 
 
 ## APT repository
 
-The custom packages (bootc, ostree, composefs, bootupd, GRUB, firstboot-user-setup, ifupdown2, timesyncd) are published to a signed APT repository on GitHub Pages by the debian-bootc pipeline. Proxmox-Atomic adds its own packages (pve-manager, proxmox kernel, etc.) from the official Proxmox repositories.
+The custom packages (bootc, ostree, composefs, bootupd, GRUB, firstboot-user-setup, ifupdown2, timesyncd) are published to a signed APT repository on GitHub Pages by the debian-bootc pipeline. DaemonCores-VE adds its own packages (pve-manager, proxmox kernel, etc.) from the official Proxmox repositories.
 
 The signing key SHA-256 is hardcoded in the Containerfile and verified at build time before the key is trusted.
 
 Add to an existing Debian Trixie system:
 
 ```bash
-wget -O /usr/share/keyrings/proxmox-atomic-keyring.gpg \
-  https://daemoncores.github.io/proxmox-atomic/gpg.key
+wget -O /usr/share/keyrings/daemoncores-ve-keyring.gpg \
+  https://daemoncores.github.io/daemoncores-ve/gpg.key
 
 # Optionally verify the key fingerprint before trusting it:
-sha256sum /usr/share/keyrings/proxmox-atomic-keyring.gpg
+sha256sum /usr/share/keyrings/daemoncores-ve-keyring.gpg
 
-cat > /etc/apt/sources.list.d/proxmox-atomic.sources << 'EOF'
+cat > /etc/apt/sources.list.d/daemoncores-ve.sources << 'EOF'
 Types: deb
-URIs: https://daemoncores.github.io/proxmox-atomic/
+URIs: https://daemoncores.github.io/daemoncores-ve/
 Suites: trixie
 Components: main
 Enabled: yes
-Signed-By: /usr/share/keyrings/proxmox-atomic-keyring.gpg
+Signed-By: /usr/share/keyrings/daemoncores-ve-keyring.gpg
 EOF
 
 apt update
@@ -346,19 +346,19 @@ The Proxmox VE web interface displays a "You do not have a valid subscription fo
 
 ### What the image does
 
-The subscription check is patched inside a **repacked `pve-manager` package**: the `pve-manager` shipped by Proxmox is downloaded, `/usr/share/perl5/PVE/API2/Subscription.pm` is edited so the check reports `status => "active"` instead of `status => "notfound"`, and the result is republished (`+bootc1`) to the Proxmox-Atomic APT repository. apt then installs the patched package at image-build time — the same mechanism used for the other repacked packages (`ifupdown2`, `chrony`, `openipmi`). This replaces the former standalone `removepvepopup` script and its apt hook, which are no longer shipped.
+The subscription check is patched inside a **repacked `pve-manager` package**: the `pve-manager` shipped by Proxmox is downloaded, `/usr/share/perl5/PVE/API2/Subscription.pm` is edited so the check reports `status => "active"` instead of `status => "notfound"`, and the result is republished (`+bootc1`) to the DaemonCores-VE APT repository. apt then installs the patched package at image-build time — the same mechanism used for the other repacked packages (`ifupdown2`, `chrony`, `openipmi`). This replaces the former standalone `removepvepopup` script and its apt hook, which are no longer shipped.
 
 ### Why it is necessary
 
-The Proxmox-Atomic image ships without a Proxmox Enterprise subscription. Without this patch, every login to the web UI would trigger a modal dialog that the user must dismiss manually before doing anything useful.
+The DaemonCores-VE image ships without a Proxmox Enterprise subscription. Without this patch, every login to the web UI would trigger a modal dialog that the user must dismiss manually before doing anything useful.
 
 ### Maintained and proven in production
 
-This is **not** an unsupported hack. The change is maintained by the author of Proxmox-Atomic and has been running in production for over four years on the author's own servers and on those of friends and collaborators, without a single failure — including across every Proxmox VE update applied in that period. The modification is deliberately minimal and targeted: it flips a single boolean in the Perl code of Proxmox VE (`status => "notfound"` → `status => "active"`), nothing else. Because it is folded into the repacked package, each new image build reapplies it automatically.
+This is **not** an unsupported hack. The change is maintained by the author of DaemonCores-VE and has been running in production for over four years on the author's own servers and on those of friends and collaborators, without a single failure — including across every Proxmox VE update applied in that period. The modification is deliberately minimal and targeted: it flips a single boolean in the Perl code of Proxmox VE (`status => "notfound"` → `status => "active"`), nothing else. Because it is folded into the repacked package, each new image build reapplies it automatically.
 
 ### Note on updates
 
-Because the patch lives in the repacked `pve-manager` published to the Proxmox-Atomic APT repository, apt prefers the `+bootc1` version over the stock Proxmox package and reapplies it automatically on every image build. The change only touches a single, stable boolean field, so it has re-applied cleanly across versions.
+Because the patch lives in the repacked `pve-manager` published to the DaemonCores-VE APT repository, apt prefers the `+bootc1` version over the stock Proxmox package and reapplies it automatically on every image build. The change only touches a single, stable boolean field, so it has re-applied cleanly across versions.
 
 ### Alternative
 

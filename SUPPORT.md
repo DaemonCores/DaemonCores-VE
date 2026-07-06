@@ -4,14 +4,14 @@
 
 ### Documentation
 
-The [Proxmox-Atomic Wiki](https://github.com/DaemonCores/Proxmox-Atomic/wiki) contains the latest documentation, build instructions, and troubleshooting guides.
+The [DaemonCores-VE Wiki](https://github.com/DaemonCores/DaemonCores-VE/wiki) contains the latest documentation, build instructions, and troubleshooting guides.
 
 ### GitHub Issues
 
 If you encounter a bug or want to request a feature, please use the GitHub issue forms:
 
-- [Bug Report](https://github.com/DaemonCores/Proxmox-Atomic/issues/new?template=bug_report.yml)
-- [Feature Request](https://github.com/DaemonCores/Proxmox-Atomic/issues/new?template=feature_request.yml)
+- [Bug Report](https://github.com/DaemonCores/DaemonCores-VE/issues/new?template=bug_report.yml)
+- [Feature Request](https://github.com/DaemonCores/DaemonCores-VE/issues/new?template=feature_request.yml)
 
 Before opening an issue, please search existing issues to avoid duplicates.
 
@@ -19,7 +19,7 @@ Before opening an issue, please search existing issues to avoid duplicates.
 
 We provide community support for:
 
-- Building and deploying the Proxmox-Atomic image.
+- Building and deploying the DaemonCores-VE image.
 - ISO installer generation (online and offline).
 - First-boot configuration and the `firstboot-user-setup` wizard.
 - General bootc/ostree lifecycle operations (`bootc update`, `bootc rollback`, etc.).

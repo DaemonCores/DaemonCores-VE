@@ -1,7 +1,7 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Proxmox-Atomic Documentation
-    url: https://github.com/DaemonCores/Proxmox-Atomic/wiki
+  - name: DaemonCores-VE Documentation
+    url: https://github.com/DaemonCores/DaemonCores-VE/wiki
     about: Check the wiki for documentation before opening an issue
   - name: debian-bootc (base image)
     url: https://github.com/DaemonCores/debian-bootc
