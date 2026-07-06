@@ -2,10 +2,10 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in Proxmox-Atomic, please report it privately.
+If you discover a security vulnerability in DaemonCores-VE, please report it privately.
 
 - **Email**: `guillou.gabriel@gmail.com` (PGP key available on request)
-- **GitHub Private Vulnerability Reporting**: Use [GitHub Security Advisories](https://github.com/DaemonCores/Proxmox-Atomic/security/advisories/new)
+- **GitHub Private Vulnerability Reporting**: Use [GitHub Security Advisories](https://github.com/DaemonCores/DaemonCores-VE/security/advisories/new)
 
 Please do **not** open public issues for security vulnerabilities.
 

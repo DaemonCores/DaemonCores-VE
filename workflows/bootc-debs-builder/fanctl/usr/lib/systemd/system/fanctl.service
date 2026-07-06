@@ -1,6 +1,6 @@
 [Unit]
 Description=fanctl — generic fan controller (local IPMI)
-Documentation=https://github.com/DaemonCores/Proxmox-Atomic
+Documentation=https://github.com/DaemonCores/DaemonCores-VE
 # Only start when the local IPMI interface is present.
 ConditionPathExists=/dev/ipmi0
 After=multi-user.target

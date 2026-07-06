@@ -78,7 +78,7 @@ jobs:
         run: |
           set +e
           git clone \
-            "https://x-access-token:${GH_TOKEN}@github.com/DaemonCores/Proxmox-Atomic.wiki.git" \
+            "https://x-access-token:${GH_TOKEN}@github.com/DaemonCores/DaemonCores-VE.wiki.git" \
             wiki-tmp
           clone_status=$?
           set -e
@@ -91,9 +91,9 @@ jobs:
             # remote branch and the wiki becomes visible once a page exists.
             git init -b master
             git remote add origin \
-              "https://x-access-token:${GH_TOKEN}@github.com/DaemonCores/Proxmox-Atomic.wiki.git"
+              "https://x-access-token:${GH_TOKEN}@github.com/DaemonCores/DaemonCores-VE.wiki.git"
             # Minimal landing page so the wiki has content to display.
-            echo "# Proxmox-Atomic wiki" > Home.md
+            echo "# DaemonCores-VE wiki" > Home.md
             git add Home.md
           else
             cd wiki-tmp

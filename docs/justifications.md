@@ -1,6 +1,6 @@
 # Justifications
 
-**Honest explanations for controversial or non-obvious design choices in Proxmox-Atomic.**
+**Honest explanations for controversial or non-obvious design choices in DaemonCores-VE.**
 
 This document follows the same transparency principle as debian-bootc: every decision that could be questioned is documented here with its rationale, its risks, and the alternatives.
 
@@ -40,7 +40,7 @@ This default is **identical to debian-bootc**. The root password is never meant 
 
 ## 2. Proxmox VE Web UI Fixes (repacked `pve-manager` and `libtemplate-perl`)
 
-Two web-UI defects are fixed by repacking an upstream package with a minimal overlay and republishing it (`+bootc1`) to the Proxmox-Atomic APT repository — the same mechanism used for `ifupdown2`, `chrony`, and `openipmi`. apt installs the patched packages at image-build time. There is no standalone script and no apt hook (this replaces the former `removepvepopup` script and its apt `Post-Invoke` hook, which are no longer shipped).
+Two web-UI defects are fixed by repacking an upstream package with a minimal overlay and republishing it (`+bootc1`) to the DaemonCores-VE APT repository — the same mechanism used for `ifupdown2`, `chrony`, and `openipmi`. apt installs the patched packages at image-build time. There is no standalone script and no apt hook (this replaces the former `removepvepopup` script and its apt `Post-Invoke` hook, which are no longer shipped).
 
 ### 2a. No-subscription popup (`pve-manager`)
 
@@ -90,7 +90,7 @@ Run the ISO build on a self-hosted runner with `/dev/loop*` pre-configured and p
 
 ### What we do
 
-Proxmox-Atomic is built on Debian 13 (Trixie), which is currently the **testing** distribution, not stable.
+DaemonCores-VE is built on Debian 13 (Trixie), which is currently the **testing** distribution, not stable.
 
 ### Why testing instead of stable
 

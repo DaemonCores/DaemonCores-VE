@@ -1,6 +1,6 @@
 [Unit]
 Description=powerctl — measured performance-per-watt operating point
-Documentation=https://github.com/DaemonCores/Proxmox-Atomic
+Documentation=https://github.com/DaemonCores/DaemonCores-VE
 # Only start when the kernel exposes cpufreq.
 ConditionPathExists=/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
 After=multi-user.target

@@ -8,7 +8,7 @@ STOPSIGNAL SIGRTMIN+3
 LABEL org.opencontainers.image.title="Proxmox VE Atomic"
 LABEL org.opencontainers.image.description="Proxmox VE 9 Atomic — Debian 13 Trixie"
 LABEL org.opencontainers.image.base.name="ghcr.io/daemoncores/debian-bootc:latest"
-LABEL org.opencontainers.image.source="https://github.com/DaemonCores/Proxmox-Atomic"
+LABEL org.opencontainers.image.source="https://github.com/DaemonCores/DaemonCores-VE"
 LABEL org.opencontainers.image.licenses="LGPL-2.1"
 LABEL containers.bootc=1
 LABEL ostree.bootable=1
@@ -25,9 +25,9 @@ SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 COPY ./src/pvepreinstall /
 RUN chmod +x /usr/sbin/policy-rc.d \
     && wget \
-        -O /usr/share/keyrings/proxmox-atomic-keyring.gpg \
-        https://daemoncores.github.io/Proxmox-Atomic/gpg.key \
-    && printf '%s  /usr/share/keyrings/proxmox-atomic-keyring.gpg\n' "${PROXMOX_ATOMIC_GPG_SHA256}" \
+        -O /usr/share/keyrings/daemoncores-ve-keyring.gpg \
+        https://daemoncores.github.io/DaemonCores-VE/gpg.key \
+    && printf '%s  /usr/share/keyrings/daemoncores-ve-keyring.gpg\n' "${PROXMOX_ATOMIC_GPG_SHA256}" \
         | sha256sum -c - \
     && wget \
         https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg \
