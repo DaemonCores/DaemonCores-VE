@@ -50,6 +50,7 @@ RUN chmod +x /usr/sbin/policy-rc.d \
         dnsmasq \
         fanctl \
         powerctl \
+        proxmox-firewall \
     && apt remove -y \
         linux-image-amd64 \
         os-prober \
@@ -74,6 +75,8 @@ RUN mkdir -p /etc/systemd/system/multi-user.target.wants \
         /etc/systemd/system/multi-user.target.wants/pve-domain-set.service \
     && ln -sf /etc/systemd/system/proxmox-firstboot.service \
         /etc/systemd/system/multi-user.target.wants/proxmox-firstboot.service \
+    && ln -sf /etc/systemd/system/dc-firewall-seed.service \
+        /etc/systemd/system/multi-user.target.wants/dc-firewall-seed.service \
     # Guard: abort if pve-manager is missing (proxmox-ve install failed earlier).
     && dpkg -s pve-manager >/dev/null 2>&1 \
         || { echo "ERROR: pve-manager not installed; proxmox-ve install failed." >&2; exit 1; } \
