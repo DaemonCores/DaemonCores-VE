@@ -204,7 +204,7 @@ Verify a pulled image:
 ```bash
 cosign verify ghcr.io/DaemonCores/DaemonCores-VE:latest \
   --certificate-identity-regexp \
-    "https://github.com/DaemonCores/DaemonCores-VE/.github/workflows/bootc-build.yml@refs/heads/main" \
+    "https://github.com/DaemonCores/DaemonCores-CI/.github/workflows/bootc-build.yml@refs/heads/main" \
   --certificate-oidc-issuer \
     "https://token.actions.githubusercontent.com"
 ```
