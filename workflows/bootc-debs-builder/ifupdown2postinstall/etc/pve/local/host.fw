@@ -1,0 +1,17 @@
+[OPTIONS]
+enable: 1
+nftables: 1
+
+[RULES]
+IN ACCEPT -source 10.10.10.0/24 -p udp -dport 67 -log nolog
+IN ACCEPT -source 10.10.10.0/24 -p udp -dport 53 -log nolog
+IN ACCEPT -source 10.10.10.0/24 -p tcp -dport 53 -log nolog
+IN ACCEPT -source 10.11.11.0/24 -p udp -dport 67 -log nolog
+IN ACCEPT -source 10.11.11.0/24 -p udp -dport 53 -log nolog
+IN ACCEPT -source 10.11.11.0/24 -p tcp -dport 53 -log nolog
+IN ACCEPT -source 10.100.100.0/24 -p udp -dport 67 -log nolog
+IN ACCEPT -source 10.100.100.0/24 -p udp -dport 53 -log nolog
+IN ACCEPT -source 10.100.100.0/24 -p tcp -dport 53 -log nolog
+IN ACCEPT -source 10.101.101.0/24 -p udp -dport 67 -log nolog
+IN ACCEPT -source 10.101.101.0/24 -p udp -dport 53 -log nolog
+IN ACCEPT -source 10.101.101.0/24 -p tcp -dport 53 -log nolog
