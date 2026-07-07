@@ -315,3 +315,4 @@ jobs:
       - uses: DaemonCores/DaemonCores-CI/bootc-debs-end@main
         with:
           repo_name: daemoncores-ve
+          apt_gpg_key: ${{ secrets.APT_GPG_KEY }}
