@@ -1,0 +1,14 @@
+[Unit]
+Description=compose2bootc 7-day rebuild timer for the %i stack
+
+[Timer]
+# Every 7 days, counted from the last run; Persistent catches up a rebuild that was
+# missed while the host was down. The randomized delay avoids a thundering herd when
+# several stacks share a rebuild day.
+OnBootSec=15min
+OnUnitActiveSec=7d
+Persistent=true
+RandomizedDelaySec=1h
+
+[Install]
+WantedBy=timers.target
