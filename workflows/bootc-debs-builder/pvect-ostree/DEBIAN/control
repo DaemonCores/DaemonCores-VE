@@ -6,7 +6,7 @@ Maintainer: Gabriel Guillou guillou.gabriel@gmail.com
 Homepage: https://github.com/DaemonCores/DaemonCores-VE
 Section: admin
 Priority: optional
-Depends: ostree, composefs, pve-container, libpve-storage-perl, util-linux, coreutils, {{ DEPS }}
+Depends: libcomposefs, libostree, util-linux, coreutils, {{ DEPS }}
 Description: run bootc/OCI images as unprivileged, immutable Proxmox LXC
  Deploys a bootc (OCI) image on the host as an ostree/composefs deployment and
  presents it as the rootfs of a standard, unprivileged Proxmox container.
