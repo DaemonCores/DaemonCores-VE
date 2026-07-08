@@ -36,13 +36,13 @@ jobs:
             > /output/ifupdown2/DEBIAN/md5sums
 
           # Preserve +pmx suffix for pve-manager version check
-          sed -i "s/^Version: .*/Version: 2:${ORIG_VER}+bootc4/" \
+          sed -i "s/^Version: .*/Version: 2:${ORIG_VER}+bootc5/" \
             /output/ifupdown2/DEBIAN/control
           chmod +x /output/ifupdown2/usr/sbin/ifupdown2-autoconf \
             /output/ifupdown2/usr/sbin/domain-set
 
           dpkg-deb --build /output/ifupdown2 \
-            /debs/ifupdown2_${ORIG_VER}+bootc4_all.deb
+            /debs/ifupdown2_${ORIG_VER}+bootc5_all.deb
 
       - name: Repack chrony with bootc fix
         shell: bash
@@ -298,6 +298,27 @@ jobs:
 
           dpkg-deb --build /output/powerctl \
             /debs/powerctl_${POWERCTL_VER}_all.deb
+
+      - name: Build dc-firewall-seed
+        shell: bash
+        env:
+          DC_FIREWALL_SEED_VER: "1.0.0"
+        run: |
+          SAVE_PWD=$(pwd)
+
+          mkdir -p /output/dc-firewall-seed
+          cp -r "${SAVE_PWD}"/workflows/bootc-debs-builder/dc-firewall-seed/* /output/dc-firewall-seed/
+
+          chmod 0755 /output/dc-firewall-seed/usr/sbin/dc-firewall-seed
+          chmod 0755 /output/dc-firewall-seed/DEBIAN/postinst
+
+          sed -i \
+            -e "s|{{ VER }}|${DC_FIREWALL_SEED_VER}|g" \
+            -e "s|, {{ DEPS }}||g" \
+            /output/dc-firewall-seed/DEBIAN/control
+
+          dpkg-deb --build /output/dc-firewall-seed \
+            /debs/dc-firewall-seed_${DC_FIREWALL_SEED_VER}_all.deb
 
       - name: Upload debs
         uses: actions/upload-artifact@v7

@@ -1,0 +1,17 @@
+[Unit]
+Description=Seed DaemonCores VE firewall config into pmxcfs on first boot
+Documentation=https://github.com/DaemonCores/DaemonCores-VE
+# Needs the pmxcfs cluster filesystem (/etc/pve) mounted by pve-cluster, and must
+# populate it before pve-firewall reads the rules.
+After=pve-cluster.service
+Wants=pve-cluster.service
+Before=pve-firewall.service
+ConditionPathExists=/usr/share/daemoncores-ve/firewall/cluster.fw.tpl
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/dc-firewall-seed
+
+[Install]
+WantedBy=multi-user.target
