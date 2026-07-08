@@ -4,7 +4,7 @@ Documentation=https://github.com/DaemonCores/DaemonCores-VE
 # The composefs view of each managed container is a runtime mount that does not
 # survive a reboot. Re-establish every managed rootfs before Proxmox starts the
 # guests, otherwise their subvol is empty and they fail to start.
-After=pve-cluster.service pve-storage.target
+After=pve-cluster.service
 Wants=pve-cluster.service
 Before=pve-guests.service
 ConditionPathExists=/var/lib/pvect-ostree/cts

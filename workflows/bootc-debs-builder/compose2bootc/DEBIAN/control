@@ -6,8 +6,8 @@ Maintainer: Gabriel Guillou guillou.gabriel@gmail.com
 Homepage: https://github.com/DaemonCores/DaemonCores-VE
 Section: admin
 Priority: optional
-Depends: podman, python3, python3-yaml, {{ DEPS }}
-Recommends: buildah
+Depends: python3, python3-yaml, {{ DEPS }}
+Recommends: podman, buildah
 Description: convert a docker-compose stack into a single bootc LXC OCI image
  Host-callable, daemonless converter that transposes a docker-compose stack into
  a self-contained bootc image whose services run under Podman + Quadlet (no
