@@ -1,0 +1,19 @@
+Source: dc-firewall-seed
+Package: dc-firewall-seed
+Version: {{ VER }}
+Architecture: all
+Maintainer: Gabriel Guillou guillou.gabriel@gmail.com
+Homepage: https://github.com/DaemonCores/DaemonCores-VE
+Section: admin
+Priority: optional
+Depends: iproute2, python3, util-linux, {{ DEPS }}
+Description: seed the DaemonCores VE firewall config into pmxcfs on first boot
+ A oneshot service that installs the cluster-wide and per-node firewall
+ templates into the Proxmox VE cluster filesystem (/etc/pve) once pmxcfs has
+ mounted it.
+ .
+ The templates are shipped under /usr/share on purpose: /etc/pve is a FUSE
+ mountpoint owned by pmxcfs, and any file placed there in the image makes the
+ mount fail ("fuse_mount error: File exists"), which cascades into every PVE
+ service failing. This service copies them in after the mount is up, resolving
+ the local management network for the cluster IPSET.
