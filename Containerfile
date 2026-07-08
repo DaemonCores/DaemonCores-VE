@@ -52,6 +52,8 @@ RUN chmod +x /usr/sbin/policy-rc.d \
         powerctl \
         dc-firewall-seed \
         proxmox-firewall \
+        pvect-ostree \
+        compose2bootc \
     && apt remove -y \
         linux-image-amd64 \
         os-prober \
