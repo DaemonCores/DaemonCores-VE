@@ -45,9 +45,7 @@ fi
 cp /etc/issue.tpl /etc/issue
 sed -i "s|{{ IP }}|${IP}|g" /etc/issue
 
-if grep -q "^# autoedit" /etc/pve/firewall/cluster.fw; then
+if grep -q "^# autoedit" /etc/pve/firewall/cluster.fw 2> /dev/null; then
   cp /etc/pve/firewall/cluster.fw.tpl /etc/pve/firewall/cluster.fw
   sed -i "s|{{ NETWORK }}|${NETWORK}|g" /etc/pve/firewall/cluster.fw
 fi
-
-pvecm updatecerts --force
