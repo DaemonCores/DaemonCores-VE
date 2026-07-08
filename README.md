@@ -254,14 +254,14 @@ Add to an existing Debian Trixie system:
 
 ```bash
 wget -O /usr/share/keyrings/daemoncores-ve-keyring.gpg \
-  https://daemoncores.github.io/daemoncores-ve/gpg.key
+  https://daemoncores.github.io/DaemonCores-VE/gpg.key
 
 # Optionally verify the key fingerprint before trusting it:
 sha256sum /usr/share/keyrings/daemoncores-ve-keyring.gpg
 
 cat > /etc/apt/sources.list.d/daemoncores-ve.sources << 'EOF'
 Types: deb
-URIs: https://daemoncores.github.io/daemoncores-ve/
+URIs: https://daemoncores.github.io/DaemonCores-VE/
 Suites: trixie
 Components: main
 Enabled: yes
