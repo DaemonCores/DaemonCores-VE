@@ -1,0 +1,40 @@
+#!/bin/bash
+#
+# dc-firewall-seed — seed the DaemonCores VE firewall configuration into the
+# pmxcfs cluster filesystem (/etc/pve) once it is mounted.
+#
+# /etc/pve is a FUSE mount provided by pve-cluster (pmxcfs). Files must never be
+# shipped there in the image: a non-empty mountpoint makes pmxcfs refuse to mount
+# ("fuse_mount error: File exists"), which cascades into every PVE service
+# failing. The firewall templates therefore live under
+# /usr/share/daemoncores-ve/firewall and are copied in here, after pmxcfs is up.
+set -euo pipefail
+
+SRC=/usr/share/daemoncores-ve/firewall
+
+# Only act on the mounted pmxcfs filesystem; writing to the bare mountpoint would
+# be exactly the bug this service exists to avoid.
+mountpoint -q /etc/pve || exit 0
+
+# Resolve the primary network (used by the cluster IPSET) from the default route.
+IFACE=$(ip route | awk '/^default/ {print $5; exit}')
+NETWORK=""
+if [[ -n "${IFACE}" ]]; then
+  NETWORK=$(python3 -c "import ipaddress,subprocess; cidr=subprocess.check_output(['ip','-o','-f','inet','addr','show','${IFACE}']).decode().split()[3]; print(ipaddress.ip_interface(cidr).network)" 2>/dev/null || true)
+fi
+
+# Cluster-wide firewall: seed when absent, or refresh while still auto-managed
+# (the template's leading "# autoedit" marker opts a file into auto-refresh).
+mkdir -p /etc/pve/firewall
+if [[ ! -f /etc/pve/firewall/cluster.fw ]] || grep -q "^# autoedit" /etc/pve/firewall/cluster.fw 2> /dev/null; then
+  cp "${SRC}/cluster.fw.tpl" /etc/pve/firewall/cluster.fw
+  if [[ -n "${NETWORK}" ]]; then
+    sed -i "s|{{ NETWORK }}|${NETWORK}|g" /etc/pve/firewall/cluster.fw
+  fi
+fi
+
+# Per-node host firewall: seed once. /etc/pve/local resolves to this node's
+# directory inside pmxcfs.
+if [[ ! -f /etc/pve/local/host.fw ]]; then
+  cp "${SRC}/host.fw" /etc/pve/local/host.fw
+fi
