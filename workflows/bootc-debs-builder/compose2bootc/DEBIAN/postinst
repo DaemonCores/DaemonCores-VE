@@ -1,0 +1,9 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    configure|triggered)
+        install -d -m 0755 /etc/compose2bootc /var/lib/compose2bootc
+        # Per-stack timers are enabled on demand by `compose2bootc install-timer`.
+        ;;
+esac

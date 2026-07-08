@@ -1,0 +1,16 @@
+[Unit]
+# Autonomous 7-day rebuild for one stack (%i). Mirrors the CI it replaces, but
+# runs locally on the Proxmox host: transpile -> build -> lint -> healthcheck test
+# -> promote. The registry ref the PVE plugin pulls is set in the EnvironmentFile.
+Description=compose2bootc rebuild for the %i stack
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/compose2bootc/%i.env
+# --promote retags to ${REGISTRY} only when the healthcheck smoke test passes, so a
+# failing rebuild never replaces the last-known-good image.
+ExecStart=/usr/sbin/compose2bootc convert ${COMPOSE} --name %i --base ${BASE} --registry ${REGISTRY} --promote
+Nice=10
+IOSchedulingClass=idle

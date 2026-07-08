@@ -1,0 +1,457 @@
+#!/bin/bash
+#
+# pvect-ostree — run bootc/OCI images as unprivileged, immutable Proxmox LXC.
+#
+# Usage:
+#   pvect-ostree deploy   <image-ref> [<stateroot>]
+#   pvect-ostree create   <vmid> <image-ref> [pct-option ...]
+#   pvect-ostree update   <vmid> [<image-ref>]
+#   pvect-ostree rollback <vmid>
+#   pvect-ostree remount-all
+#   pvect-ostree mount    <vmid>
+#   pvect-ostree list
+#   pvect-ostree destroy  <vmid>
+#
+# What it does:
+#   A bootc image is an OCI image carrying a whole OS. This tool deploys such an
+#   image on the host as an ostree/composefs deployment, then presents that
+#   deployment as the rootfs of a *standard, unprivileged* Proxmox container:
+#
+#     * The rootfs is the composefs view of the deployment, mounted with
+#       `mount.composefs -o idmap=<userns>` so a file owned by root on-disk
+#       shows up as the id-mapped range on the host and, through the container's
+#       own user namespace, as root inside — no chown of the read-only image and
+#       no idmapped-mount of the overlay (which the kernel refuses).
+#     * /usr stays read-only and fs-verity-checked (the image is immutable); the
+#       container cannot modify its own OS.
+#     * /etc and /var are writable per-container layers, attached as ordinary PVE
+#       mount points (mp0/mp1) because PVE stages the rootfs non-recursively and
+#       would otherwise drop sub-mounts.
+#     * The container is `unprivileged: 1` + `features: nesting=1` — exactly the
+#       posture of a normal PVE systemd guest, no extra privilege.
+#
+#   Updates are atomic and roll back: `update` deploys a new image revision and
+#   restarts the container onto it; `rollback` restarts onto the previous one.
+#   The read-only base means a bad update is undone by pointing back at the
+#   prior deployment, never by mutating a live root.
+#
+# Why the rootfs mount is re-established on boot:
+#   The composefs view is a runtime mount; it does not survive a host reboot.
+#   The pvect-ostree.service unit runs `remount-all` before pve-guests.service so
+#   every managed container finds its rootfs in place at start.
+#
+# Note on shell options: subcommands validate their own preconditions; we use a
+# strict mode but keep error messages actionable.
+
+set -uo pipefail
+
+readonly CONF=/etc/pvect-ostree/pvect-ostree.conf
+readonly PROG=${0##*/}
+
+# --- Defaults (overridden by CONF) ------------------------------------------
+SYSROOT=/var/lib/pvect-ostree/sysroot
+STATE_DIR=/var/lib/pvect-ostree/cts
+STORAGE=local
+UID_BASE=100000
+UID_RANGE=65536
+USERNS=/run/pvect-ostree/userns
+ALLOC_TEMPLATE_MATCH=alpine
+GUEST_MASK_UNITS=""
+PLUGIN_STORAGE=ostree      # storeid auto-registered for the pvect-ostree plugin
+
+# shellcheck source=/dev/null
+[[ -r $CONF ]] && . "$CONF"
+
+readonly REG_DIR="$STATE_DIR"          # per-CT registry: $REG_DIR/<vmid>.env
+
+die()  { echo "$PROG: $*" >&2; exit 1; }
+warn() { echo "$PROG: $*" >&2; }
+info() { echo "$PROG: $*"; }
+
+need_root() { [[ $(id -u) -eq 0 ]] || die "must run as root"; }
+
+need_tools() {
+    local t
+    for t in ostree mount.composefs pct pvesm unshare; do
+        command -v "$t" >/dev/null 2>&1 || die "missing required tool: $t"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# user namespace: pin a 0 -> UID_BASE mapping so mount.composefs can id-shift
+# the read-only image. Idempotent; re-pins after a reboot cleared /run.
+# ---------------------------------------------------------------------------
+pin_userns() {
+    mkdir -p "$(dirname "$USERNS")"
+    if mountpoint -q "$USERNS" 2>/dev/null; then
+        return 0
+    fi
+    local upid
+    unshare -U sleep infinity &
+    upid=$!
+    # Give the child a moment to enter the new user namespace.
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        [[ -e /proc/$upid/uid_map ]] && break
+        sleep 0.1
+    done
+    printf '0 %s %s\n' "$UID_BASE" "$UID_RANGE" > "/proc/$upid/uid_map" \
+        || { kill "$upid" 2>/dev/null; die "failed to write uid_map"; }
+    printf '0 %s %s\n' "$UID_BASE" "$UID_RANGE" > "/proc/$upid/gid_map" \
+        || { kill "$upid" 2>/dev/null; die "failed to write gid_map"; }
+    : > "$USERNS"
+    mount --bind "/proc/$upid/ns/user" "$USERNS" \
+        || { kill "$upid" 2>/dev/null; die "failed to pin userns"; }
+    # The pinned bind keeps the namespace alive; the holder process may exit.
+    kill "$upid" 2>/dev/null
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# ostree sysroot / deployment helpers
+# ---------------------------------------------------------------------------
+ensure_sysroot() {
+    if [[ ! -d "$SYSROOT/ostree" ]]; then
+        mkdir -p "$SYSROOT"
+        ostree admin init-fs --modern "$SYSROOT" \
+            || die "ostree admin init-fs failed"
+    fi
+    # Guarantee a .ostree.cfs is generated for every deployment.
+    ostree config --repo="$SYSROOT/ostree/repo" set ex-integrity.composefs true \
+        || die "ostree config ex-integrity.composefs failed"
+}
+
+# Print the newest deployment directory for a stateroot ('' if none).
+deploy_path() {
+    local stateroot=$1
+    find "$SYSROOT/ostree/deploy/$stateroot/deploy" -maxdepth 1 -type d -name '*.0' \
+        2>/dev/null | sort | tail -1
+}
+
+# Print the previous deployment directory ('' if only one exists).
+deploy_path_prev() {
+    local stateroot=$1
+    find "$SYSROOT/ostree/deploy/$stateroot/deploy" -maxdepth 1 -type d -name '*.0' \
+        2>/dev/null | sort | tail -2 | head -1
+}
+
+# ---------------------------------------------------------------------------
+# registry
+# ---------------------------------------------------------------------------
+reg_file()  { echo "$REG_DIR/$1.env"; }
+reg_load()  {
+    local f; f=$(reg_file "$1")
+    [[ -r $f ]] || die "container $1 is not managed by pvect-ostree ($f absent)"
+    # shellcheck source=/dev/null
+    . "$f"
+}
+reg_write() {
+    local vmid=$1 stateroot=$2 imgref=$3
+    mkdir -p "$REG_DIR"
+    cat > "$(reg_file "$vmid")" <<EOF
+VMID=$vmid
+STATEROOT=$stateroot
+IMGREF='$imgref'
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# rootfs subvol path allocated by PVE for a CT on the dir storage
+# ---------------------------------------------------------------------------
+subvol_path() {
+    local vmid=$1 base
+    base=$(pvesm path "$STORAGE:$vmid/subvol-$vmid-disk-0.subvol" 2>/dev/null)
+    if [[ -n $base ]]; then
+        echo "$base"; return 0
+    fi
+    # Fall back to the documented dir-storage layout.
+    local dir
+    dir=$(pvesm status -storage "$STORAGE" 2>/dev/null | awk 'NR==2{print $1}')
+    echo "/var/lib/vz/images/$vmid/subvol-$vmid-disk-0.subvol"
+}
+
+# writable per-CT /etc and /var directories (persist across reboot in /var)
+ct_etc() { echo "$STATE_DIR/$1/etc"; }
+ct_var() { echo "$STATE_DIR/$1/var"; }
+
+# Build the writable /etc from the deployment's default /usr/etc and mask the
+# host-only units so the guest boots clean. Idempotent-ish: only (re)builds
+# /etc when it is missing, to preserve local changes across updates.
+build_writable_layers() {
+    local vmid=$1 deploy=$2
+    local etc var u
+    etc=$(ct_etc "$vmid"); var=$(ct_var "$vmid")
+
+    mkdir -p "$var"
+    if [[ ! -d "$etc/systemd" ]]; then
+        mkdir -p "$etc/systemd/system"
+        cp -a "$deploy/usr/etc/." "$etc/" 2>/dev/null \
+            || die "cannot seed /etc from $deploy/usr/etc"
+        for u in $GUEST_MASK_UNITS; do
+            ln -sf /dev/null "$etc/systemd/system/$u"
+        done
+    fi
+    chown -R "$UID_BASE:$UID_BASE" "$etc" "$var"
+}
+
+# ---------------------------------------------------------------------------
+# mount the composefs view (id-shifted) onto the CT rootfs subvol
+# ---------------------------------------------------------------------------
+mount_rootfs() {
+    local vmid=$1
+    reg_load "$vmid"
+    pin_userns
+
+    local deploy root
+    deploy=$(deploy_path "$STATEROOT")
+    [[ -n $deploy ]] || die "no deployment for CT $vmid (stateroot $STATEROOT)"
+    root=$(subvol_path "$vmid")
+    [[ -d $root ]] || die "rootfs subvol missing: $root (was the CT created?)"
+
+    if mountpoint -q "$root"; then
+        return 0        # already mounted (e.g. CT already running)
+    fi
+
+    # The subvol PVE allocated may hold leftover template content; clear it so
+    # the composefs view is what the container sees.
+    find "$root" -mindepth 1 -delete 2>/dev/null || true
+
+    mount -t composefs "$deploy/.ostree.cfs" \
+        -o basedir="$SYSROOT/ostree/repo/objects",idmap="$USERNS" "$root" \
+        || die "mount.composefs failed for CT $vmid"
+
+    build_writable_layers "$vmid" "$root"
+}
+
+umount_rootfs() {
+    local vmid=$1 root
+    root=$(subvol_path "$vmid")
+    mountpoint -q "$root" 2>/dev/null && umount -R "$root" 2>/dev/null
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# CT config normalisation (sourced from the pve-container prestart-hook code):
+#   - no idmap= on rootfs   -> avoids the fatal mount_setattr on the overlay
+#   - ostype: unmanaged     -> PVE does not rewrite our /etc
+#   - apparmor param bind   -> apparmor.service skips instead of asserting
+#   - mp0=/etc mp1=/var     -> writable layers survive non-recursive staging
+# ---------------------------------------------------------------------------
+normalise_conf() {
+    local vmid=$1 conf="/etc/pve/lxc/$1.conf"
+    [[ -f $conf ]] || die "CT config not found: $conf"
+    local etc var
+    etc=$(ct_etc "$vmid"); var=$(ct_var "$vmid")
+
+    sed -i 's/,idmap=passthrough//; s/,idmap=[^, ]*//' "$conf"
+    sed -i 's/^ostype:.*/ostype: unmanaged/' "$conf"
+    grep -q '^ostype:' "$conf" || echo 'ostype: unmanaged' >> "$conf"
+    grep -q 'sys/module/apparmor/parameters/enabled' "$conf" \
+        || echo 'lxc.mount.entry: /dev/null sys/module/apparmor/parameters/enabled none bind 0 0' >> "$conf"
+    sed -i '/^mp[0-9]\+: .*mp=\/etc\b/d; /^mp[0-9]\+: .*mp=\/var\b/d' "$conf"
+    {
+        echo "mp0: $etc,mp=/etc"
+        echo "mp1: $var,mp=/var"
+    } >> "$conf"
+}
+
+# ---------------------------------------------------------------------------
+# subcommands
+# ---------------------------------------------------------------------------
+cmd_deploy() {
+    local imgref=${1:?usage: $PROG deploy <image-ref> [<stateroot>]}
+    local stateroot=${2:-default}
+    need_root; need_tools; ensure_sysroot
+
+    if [[ ! -d "$SYSROOT/ostree/deploy/$stateroot" ]]; then
+        ostree admin stateroot-init --sysroot "$SYSROOT" "$stateroot" \
+            || die "stateroot-init failed"
+    fi
+    info "deploying $imgref -> stateroot $stateroot"
+    ostree container image deploy \
+        --sysroot "$SYSROOT" --stateroot "$stateroot" --imgref "$imgref" \
+        || die "ostree container image deploy failed"
+    ostree admin status --sysroot "$SYSROOT"
+    info "deployment: $(deploy_path "$stateroot")"
+}
+
+# Allocate the rootfs subvol PVE-natively. A throwaway template is required only
+# so PVE creates the dir subvol; its content is replaced by the composefs view.
+alloc_template() {
+    local t
+    t=$(pveam list "$STORAGE" 2>/dev/null | awk -v m="$ALLOC_TEMPLATE_MATCH" \
+        '$1 ~ m {print $1}' | sed 's#.*/##' | tail -1)
+    if [[ -z $t ]]; then
+        pveam update >/dev/null 2>&1 || true
+        local avail
+        avail=$(pveam available --section system 2>/dev/null \
+            | awk -v m="$ALLOC_TEMPLATE_MATCH" '$2 ~ m {print $2}' | tail -1)
+        [[ -n $avail ]] || die "no '$ALLOC_TEMPLATE_MATCH' template available to allocate the rootfs"
+        pveam download "$STORAGE" "$avail" >/dev/null 2>&1 || die "template download failed"
+        t=$(pveam list "$STORAGE" 2>/dev/null | awk -v m="$ALLOC_TEMPLATE_MATCH" \
+            '$1 ~ m {print $1}' | sed 's#.*/##' | tail -1)
+    fi
+    [[ -n $t ]] || die "could not resolve an allocation template"
+    echo "$t"
+}
+
+cmd_create() {
+    local vmid=${1:?usage: $PROG create <vmid> <image-ref> [pct-option ...]}
+    local imgref=${2:?usage: $PROG create <vmid> <image-ref> [pct-option ...]}
+    shift 2
+    need_root; need_tools
+    [[ -f "/etc/pve/lxc/$vmid.conf" ]] && die "CT $vmid already exists"
+
+    local stateroot="ct$vmid"
+    cmd_deploy "$imgref" "$stateroot"
+    reg_write "$vmid" "$stateroot" "$imgref"
+
+    local tmpl; tmpl=$(alloc_template)
+    info "allocating rootfs subvol via pct create (template $tmpl, discarded)"
+    pct create "$vmid" "$STORAGE:vztmpl/$tmpl" \
+        --unprivileged 1 --features nesting=1 \
+        --hostname "ct$vmid" --rootfs "$STORAGE:0" \
+        --net0 name=eth0,bridge=vmbr0,ip=dhcp,type=veth,firewall=1 \
+        "$@" \
+        || die "pct create failed"
+
+    mount_rootfs "$vmid"
+    normalise_conf "$vmid"
+    info "CT $vmid created. Start it from the Web UI or: pct start $vmid"
+}
+
+cmd_update() {
+    local vmid=${1:?usage: $PROG update <vmid> [<image-ref>]}
+    reg_load "$vmid"
+    local imgref=${2:-$IMGREF}
+    need_root; need_tools
+
+    local running=0
+    [[ "$(pct status "$vmid" 2>/dev/null)" == *running* ]] && running=1
+    [[ $running -eq 1 ]] && pct shutdown "$vmid" --timeout 60 2>/dev/null
+
+    cmd_deploy "$imgref" "$STATEROOT"
+    reg_write "$vmid" "$STATEROOT" "$imgref"
+    umount_rootfs "$vmid"
+    mount_rootfs "$vmid"
+    [[ $running -eq 1 ]] && pct start "$vmid"
+    info "CT $vmid updated to $imgref (previous deployment kept for rollback)"
+}
+
+cmd_rollback() {
+    local vmid=${1:?usage: $PROG rollback <vmid>}
+    reg_load "$vmid"
+    need_root; need_tools
+
+    local prev; prev=$(deploy_path_prev "$STATEROOT")
+    [[ -n $prev ]] || die "no previous deployment to roll back to for CT $vmid"
+
+    local running=0
+    [[ "$(pct status "$vmid" 2>/dev/null)" == *running* ]] && running=1
+    [[ $running -eq 1 ]] && pct shutdown "$vmid" --timeout 60 2>/dev/null
+
+    # Undeploy the current (index 0) so the previous becomes current.
+    ostree admin undeploy --sysroot "$SYSROOT" --stateroot "$STATEROOT" 0 \
+        || warn "ostree undeploy reported an error; continuing"
+    umount_rootfs "$vmid"
+    mount_rootfs "$vmid"
+    [[ $running -eq 1 ]] && pct start "$vmid"
+    info "CT $vmid rolled back to previous deployment"
+}
+
+cmd_mount() {
+    local vmid=${1:?usage: $PROG mount <vmid>}
+    need_root; need_tools
+    mount_rootfs "$vmid"
+    info "rootfs mounted for CT $vmid"
+}
+
+cmd_umount() {
+    local vmid=${1:?usage: $PROG umount <vmid>}
+    need_root
+    umount_rootfs "$vmid"
+    info "rootfs unmounted for CT $vmid"
+}
+
+cmd_seed() {
+    need_root
+    command -v pvesm >/dev/null 2>&1 || return 0
+    # Register the pvect-ostree storage once, idempotently (writes to pmxcfs).
+    if ! pvesm status 2>/dev/null | awk '{print $1}' | grep -qx "$PLUGIN_STORAGE"; then
+        mountpoint -q /etc/pve 2>/dev/null || return 0    # pmxcfs not up yet; retry next boot
+        pvesm add pvect-ostree "$PLUGIN_STORAGE" --content rootdir \
+            --pvect-sysroot "$SYSROOT" 2>/dev/null \
+            && info "registered storage '$PLUGIN_STORAGE' (type pvect-ostree)" \
+            || warn "could not register storage '$PLUGIN_STORAGE' (plugin loaded?)"
+    fi
+}
+
+cmd_remount_all() {
+    need_root; need_tools
+    pin_userns
+    cmd_seed || true
+    local f vmid rc=0
+    shopt -s nullglob
+    for f in "$REG_DIR"/*.env; do
+        vmid=$(basename "$f" .env)
+        if [[ -f "/etc/pve/lxc/$vmid.conf" ]]; then
+            if mount_rootfs "$vmid"; then
+                info "remounted CT $vmid"
+            else
+                warn "failed to remount CT $vmid"; rc=1
+            fi
+        fi
+    done
+    return $rc
+}
+
+cmd_list() {
+    local f vmid
+    shopt -s nullglob
+    printf '%-8s %-14s %-8s %s\n' VMID STATEROOT STATUS IMAGE
+    for f in "$REG_DIR"/*.env; do
+        # shellcheck source=/dev/null
+        ( . "$f"
+          local st; st=$(pct status "$VMID" 2>/dev/null | awk '{print $2}')
+          printf '%-8s %-14s %-8s %s\n' "$VMID" "$STATEROOT" "${st:-none}" "$IMGREF" )
+    done
+}
+
+cmd_destroy() {
+    local vmid=${1:?usage: $PROG destroy <vmid>}
+    need_root; need_tools
+    pct stop "$vmid" 2>/dev/null
+    umount_rootfs "$vmid"
+    pct destroy "$vmid" --purge 2>/dev/null
+    rm -f "$(reg_file "$vmid")"
+    rm -rf "${STATE_DIR:?}/$vmid"
+    # Deployment left in the sysroot on purpose; remove with: ostree admin undeploy
+    info "CT $vmid destroyed (ostree deployment for ct$vmid retained)"
+}
+
+usage() {
+    sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//'
+    exit "${1:-0}"
+}
+
+main() {
+    local cmd=${1:-}
+    [[ -n $cmd ]] || usage 1
+    shift
+    case "$cmd" in
+        deploy)       cmd_deploy "$@" ;;
+        create)       cmd_create "$@" ;;
+        update)       cmd_update "$@" ;;
+        rollback)     cmd_rollback "$@" ;;
+        mount)        cmd_mount "$@" ;;
+        umount)       cmd_umount "$@" ;;
+        remount-all)  cmd_remount_all "$@" ;;
+        seed)         cmd_seed "$@" ;;
+        list)         cmd_list "$@" ;;
+        destroy)      cmd_destroy "$@" ;;
+        -h|--help|help) usage 0 ;;
+        *)            die "unknown command '$cmd' (try: $PROG --help)" ;;
+    esac
+}
+
+main "$@"

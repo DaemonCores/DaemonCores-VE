@@ -1,0 +1,21 @@
+Source: compose2bootc
+Package: compose2bootc
+Version: {{ VER }}
+Architecture: all
+Maintainer: Gabriel Guillou guillou.gabriel@gmail.com
+Homepage: https://github.com/DaemonCores/DaemonCores-VE
+Section: admin
+Priority: optional
+Depends: podman, python3, python3-yaml, {{ DEPS }}
+Recommends: buildah
+Description: convert a docker-compose stack into a single bootc LXC OCI image
+ Host-callable, daemonless converter that transposes a docker-compose stack into
+ a self-contained bootc image whose services run under Podman + Quadlet (no
+ Docker daemon, no Docker socket), following the same atomic/ostree model as the
+ DaemonCores-VE images. The produced image is what pvect-ostree deploys as an
+ immutable, unprivileged Proxmox container.
+ .
+ Every service becomes a Quadlet .container sharing one Quadlet .network, so
+ services still resolve each other by their compose service name. Persistent data
+ is relocated under /var/lib/compose2bootc (the only mutable location a bootc
+ image ships). Ships a 7-day healthcheck-gated rebuild timer per stack.

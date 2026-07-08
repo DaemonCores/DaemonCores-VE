@@ -320,6 +320,48 @@ jobs:
           dpkg-deb --build /output/dc-firewall-seed \
             /debs/dc-firewall-seed_${DC_FIREWALL_SEED_VER}_all.deb
 
+      - name: Build pvect-ostree
+        shell: bash
+        env:
+          PVECT_OSTREE_VER: "1.0.0"
+        run: |
+          SAVE_PWD=$(pwd)
+          
+          mkdir -p /output/pvect-ostree
+          cp -r "${SAVE_PWD}"/workflows/bootc-debs-builder/pvect-ostree/* /output/pvect-ostree/
+
+          chmod 0755 /output/pvect-ostree/usr/sbin/pvect-ostree
+          chmod 0755 /output/pvect-ostree/DEBIAN/postinst
+
+          sed -i \
+            -e "s|{{ VER }}|${PVECT_OSTREE_VER}|g" \
+            -e "s|, {{ DEPS }}||g" \
+            /output/pvect-ostree/DEBIAN/control
+          
+          dpkg-deb --build /output/pvect-ostree \
+            /debs/pvect-ostree_${PVECT_OSTREE_VER}_all.deb
+
+      - name: Build compose2bootc
+        shell: bash
+        env:
+          COMPOSE2BOOTC_VER: "0.1.0"
+        run: |
+          SAVE_PWD=$(pwd)
+
+          mkdir -p /output/compose2bootc
+          cp -r "${SAVE_PWD}"/workflows/bootc-debs-builder/compose2bootc/* /output/compose2bootc/
+
+          chmod 0755 /output/compose2bootc/usr/sbin/compose2bootc
+          chmod 0755 /output/compose2bootc/DEBIAN/postinst
+          
+          sed -i \
+            -e "s|{{ VER }}|${COMPOSE2BOOTC_VER}|g" \
+            -e "s|, {{ DEPS }}||g" \
+            /output/compose2bootc/DEBIAN/control
+          
+          dpkg-deb --build /output/compose2bootc \
+            /debs/compose2bootc_${COMPOSE2BOOTC_VER}_all.deb
+
       - name: Upload debs
         uses: actions/upload-artifact@v7
         with:

@@ -1,0 +1,18 @@
+[Unit]
+Description=Re-establish composefs rootfs for pvect-ostree containers
+Documentation=https://github.com/DaemonCores/DaemonCores-VE
+# The composefs view of each managed container is a runtime mount that does not
+# survive a reboot. Re-establish every managed rootfs before Proxmox starts the
+# guests, otherwise their subvol is empty and they fail to start.
+After=pve-cluster.service pve-storage.target
+Wants=pve-cluster.service
+Before=pve-guests.service
+ConditionPathExists=/var/lib/pvect-ostree/cts
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/pvect-ostree remount-all
+
+[Install]
+WantedBy=multi-user.target
