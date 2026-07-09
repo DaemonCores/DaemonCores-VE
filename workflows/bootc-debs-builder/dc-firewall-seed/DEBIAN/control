@@ -6,7 +6,7 @@ Maintainer: Gabriel Guillou guillou.gabriel@gmail.com
 Homepage: https://github.com/DaemonCores/DaemonCores-VE
 Section: admin
 Priority: optional
-Depends: iproute2, python3, util-linux, {{ DEPS }}
+Depends: iproute2, util-linux, {{ DEPS }}
 Description: seed the DaemonCores VE firewall config into pmxcfs on first boot
  A oneshot service that installs the cluster-wide and per-node firewall
  templates into the Proxmox VE cluster filesystem (/etc/pve) once pmxcfs has
