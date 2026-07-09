@@ -8,6 +8,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     container: debian:trixie
+    permissions:
+      contents: read
+      # Lets the guarded repack steps open/append a "patch drift" issue
+      # (notification) when an upstream refactor moves a patch anchor.
+      issues: write
 
     steps:
       - uses: DaemonCores/DaemonCores-CI/bootc-debs-start@main
@@ -149,10 +154,16 @@ jobs:
           dpkg-deb --build /output/libtemplate-perl \
             /debs/libtemplate-perl_${ORIG_VER}+bootc1_${ARCH}.deb
 
-      - name: Repack pve-manager without the subscription-notice popup
+      - name: Repack pve-manager (no-subscription popup + GUI VM defaults)
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          SAVE_PWD=$(pwd)
+
           apt update
+          # nodejs: the patch script runs `node --check` on the patched web UI JS.
+          apt install -y --no-install-recommends nodejs
           cd /tmp
           apt-get download pve-manager
 
@@ -162,19 +173,23 @@ jobs:
           ORIG_VER=$(dpkg-deb -f /tmp/pve-manager_*.deb Version)
           ARCH=$(dpkg-deb -f /tmp/pve-manager_*.deb Architecture)
 
-          # This image ships without a Proxmox VE Enterprise subscription, so the
-          # subscription API reports status "notfound" and the web UI shows a
-          # "No valid subscription" dialog on every login. Flip that single
-          # status field to "active" so the popup never appears. This folds the
-          # patch into the image build the same way as the other repacked
-          # packages, replacing the former removepvepopup script and its apt
-          # Post-Invoke hook. Buying a Proxmox VE Support Subscription is the
-          # supported alternative and also removes the popup; revert this if you
-          # switch to a paid subscription.
-          SUB=/output/pve-manager/usr/share/perl5/PVE/API2/Subscription.pm
-          grep -qF 'status => "notfound",' "$SUB" \
-            || { echo "ERROR: pve-manager Subscription.pm changed upstream; patch needs review." >&2; exit 1; }
-          sed -i 's/status => "notfound",/status => "active",/g' "$SUB"
+          # Guarded patches: suppress the no-subscription popup (Subscription.pm)
+          # and set the GUI create-wizard VM defaults (agent/OVMF/q35) to match the
+          # qemu-server backend. Exit 3 => a patch anchor drifted upstream: skip
+          # this deb (keep the last-good +bootc build, never ship the unpatched
+          # upstream) without failing the pipeline; the script already surfaced the
+          # reason in the step summary + a GitHub issue.
+          set +e
+          bash "${SAVE_PWD}/workflows/bootc-debs-builder/pve-manager/patch-defaults.sh" \
+            /output/pve-manager
+          rc=$?
+          set -e
+          if [ "$rc" -eq 3 ]; then
+            echo "pve-manager skipped (patch drift) — last-good version retained."
+            exit 0
+          elif [ "$rc" -ne 0 ]; then
+            exit "$rc"
+          fi
 
           # Regenerate md5sums after content modification
           find /output/pve-manager -not -path '*/DEBIAN/*' -type f \
@@ -187,6 +202,50 @@ jobs:
 
           dpkg-deb --build /output/pve-manager \
             /debs/pve-manager_${ORIG_VER}+bootc1_${ARCH}.deb
+
+      - name: Repack qemu-server with DaemonCores VM defaults
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SAVE_PWD=$(pwd)
+
+          apt update
+          cd /tmp
+          apt-get download qemu-server
+
+          O=/output/qemu-server
+          mkdir -p "$O"
+          dpkg-deb -R /tmp/qemu-server_*.deb "$O"
+
+          ORIG_VER=$(dpkg-deb -f /tmp/qemu-server_*.deb Version)
+          ARCH=$(dpkg-deb -f /tmp/qemu-server_*.deb Architecture)
+
+          # Guarded default patches. Exit 3 => an upstream refactor moved a patch
+          # anchor: skip this deb (keep the last-good +bootc build, never ship the
+          # unpatched upstream) without failing the pipeline; the script already
+          # surfaced the reason in the step summary + a GitHub issue.
+          set +e
+          bash "${SAVE_PWD}/workflows/bootc-debs-builder/qemu-server/patch-defaults.sh" "$O"
+          rc=$?
+          set -e
+          if [ "$rc" -eq 3 ]; then
+            echo "qemu-server skipped (patch drift) — last-good version retained."
+            exit 0
+          elif [ "$rc" -ne 0 ]; then
+            exit "$rc"
+          fi
+
+          # Regenerate md5sums after content modification
+          find "$O" -not -path '*/DEBIAN/*' -type f \
+            | xargs md5sum \
+            | sed "s|$O/||" \
+            > "$O/DEBIAN/md5sums"
+
+          sed -i "s/^Version: .*/Version: 1:${ORIG_VER}+bootc1/" "$O/DEBIAN/control"
+
+          dpkg-deb --build "$O" \
+            /debs/qemu-server_${ORIG_VER}+bootc1_${ARCH}.deb
 
       - name: Repack proxmox-kernel-helper without the bootc-hostile grub/boot handling
         shell: bash
@@ -340,6 +399,28 @@ jobs:
 
           dpkg-deb --build /output/dc-config-zfs \
             /debs/dc-config-zfs_${DC_CONFIG_ZFS_VER}_all.deb
+
+      - name: Build dc-zramctl
+        shell: bash
+        env:
+          DC_ZRAMCTL_VER: "1.0.0"
+        run: |
+          SAVE_PWD=$(pwd)
+
+          mkdir -p /output/dc-zramctl
+          cp -r "${SAVE_PWD}"/workflows/bootc-debs-builder/dc-zramctl/* /output/dc-zramctl/
+
+          chmod 0755 /output/dc-zramctl/usr/sbin/dc-zramctl
+          chmod 0755 /output/dc-zramctl/usr/lib/dc-zramctl/calibrate
+          chmod 0755 /output/dc-zramctl/DEBIAN/postinst
+
+          sed -i \
+            -e "s|{{ VER }}|${DC_ZRAMCTL_VER}|g" \
+            -e "s|, {{ DEPS }}||g" \
+            /output/dc-zramctl/DEBIAN/control
+
+          dpkg-deb --build /output/dc-zramctl \
+            /debs/dc-zramctl_${DC_ZRAMCTL_VER}_all.deb
 
       - name: Build pvect-ostree
         shell: bash

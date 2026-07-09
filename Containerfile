@@ -46,7 +46,8 @@ RUN chmod +x /usr/sbin/policy-rc.d \
         postfix \
         open-iscsi \
         chrony \
-        systemd-zram-generator \
+        ksmtuned \
+        dc-zramctl \
         dnsmasq \
         fanctl \
         powerctl \
@@ -86,6 +87,9 @@ RUN mkdir -p /etc/systemd/system/multi-user.target.wants \
         /tmp/* \
         /var/tmp/* \
         /usr/sbin/policy-rc.d \
+    # Enable KSM adaptive tuning (dedup guest memory under pressure) via symlink
+    && ln -sf /usr/lib/systemd/system/ksmtuned.service \
+        /etc/systemd/system/multi-user.target.wants/ksmtuned.service \
     # Enable chrony via symlink (bootc-compatible, avoids systemctl enable)
     && ln -sf /lib/systemd/system/chrony.service \
         /etc/systemd/system/multi-user.target.wants/chrony.service \

@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+"""Calibrate zram for dc-zramctl.
+
+Measure this host's zram compression ratio and CPU cost on a throwaway
+device, then write the profitability curve consumed by the ``dc-zramctl``
+bash daemon: the per-device increment (the "block quantity" added under
+pressure) and the expected compression ratio.
+
+This runs occasionally (first boot and on drift), never in the 24/7 loop,
+so Python's weight here does not matter.
+"""
+
+import os
+import sys
+import time
+
+CONTROL = "/sys/class/zram-control"
+MIB = 1 << 20
+BLOCK = 1 << 20
+
+# Sample composition: COMPRESSIBLE_PARTS of every TOTAL_PARTS 1 MiB blocks are
+# compressible; the rest are random.
+TOTAL_PARTS = 5
+COMPRESSIBLE_PARTS = 3
+
+# CPU write-throughput thresholds (MiB/s) that scale the device increment.
+FAST_MIB_S = 800
+SLOW_MIB_S = 200
+
+
+def read_total_ram_kb():
+    """Return total physical RAM in KiB.
+
+    Returns:
+        int: Total RAM in KiB from ``/proc/meminfo``, or 0 if unreadable.
+    """
+    with open("/proc/meminfo", encoding="ascii") as meminfo:
+        for line in meminfo:
+            if line.startswith("MemTotal:"):
+                return int(line.split()[1])
+    return 0
+
+
+def _write(path, value):
+    """Write a value to a sysfs attribute.
+
+    Args:
+        path: Absolute path of the sysfs file.
+        value: Value to write; coerced to ``str``.
+    """
+    with open(path, "w", encoding="ascii") as handle:
+        handle.write(str(value))
+
+
+def build_sample(size_bytes):
+    """Build a dataset approximating anonymous guest memory.
+
+    Roughly 60% is compressible (zeros plus repeated text) and 40% is
+    incompressible (random). It is only a starting point; the daemon's
+    drift detection recalibrates against the real production ratio.
+
+    Args:
+        size_bytes: Approximate dataset size in bytes.
+
+    Returns:
+        bytes: The generated sample.
+    """
+    filler = b"DaemonCores-VE zram calibration sample "
+    pattern = (b"\x00" * (BLOCK // 2)) + (filler * (BLOCK // 80))
+    pattern = pattern[:BLOCK]
+    chunks = []
+    for index in range(size_bytes // BLOCK):
+        compressible = index % TOTAL_PARTS < COMPRESSIBLE_PARTS
+        chunks.append(pattern if compressible else os.urandom(BLOCK))
+    return b"".join(chunks)
+
+
+def _hot_add():
+    """Create a new zram device and return its numeric id."""
+    with open(f"{CONTROL}/hot_add", encoding="ascii") as control:
+        return control.read().strip()
+
+
+def _hot_remove(dev):
+    """Reset and release a zram device, ignoring errors.
+
+    Args:
+        dev: zram device id.
+    """
+    resets = (
+        (f"/sys/block/zram{dev}/disksize", 0),
+        (f"{CONTROL}/hot_remove", dev),
+    )
+    for path, value in resets:
+        try:
+            _write(path, value)
+        except OSError:
+            pass
+
+
+def _time_write(dev, data):
+    """Write a payload to a zram device and time it.
+
+    Args:
+        dev: zram device id.
+        data: Payload to write and flush.
+
+    Returns:
+        float: Elapsed wall-clock seconds.
+    """
+    start = time.monotonic()
+    with open(f"/dev/zram{dev}", "wb") as device:
+        device.write(data)
+        device.flush()
+        os.fsync(device.fileno())
+    return time.monotonic() - start
+
+
+def _read_ratio_x100(dev):
+    """Read the compression ratio (scaled by 100) from ``mm_stat``.
+
+    Args:
+        dev: zram device id.
+
+    Returns:
+        int: ``orig / mem_used`` scaled by 100, at least 100.
+    """
+    with open(f"/sys/block/zram{dev}/mm_stat", encoding="ascii") as stat:
+        fields = stat.read().split()
+    orig, mem_used = int(fields[0]), int(fields[2])
+    if mem_used <= 0:
+        return 100
+    return max(orig * 100 // mem_used, 100)
+
+
+def measure(total_ram_kb):
+    """Measure compression ratio and throughput on a throwaway device.
+
+    Args:
+        total_ram_kb: Total physical RAM in KiB.
+
+    Returns:
+        tuple[int, float]: ``(ratio_x100, throughput_mib_s)``.
+    """
+    test_kb = min(max(total_ram_kb // 100, 128 * 1024), 1024 * 1024)
+    test_bytes = test_kb * 1024
+    dev = _hot_add()
+    try:
+        _write(f"/sys/block/zram{dev}/comp_algorithm", "zstd")
+        _write(f"/sys/block/zram{dev}/disksize", test_bytes * 3)
+        data = build_sample(test_bytes)
+        elapsed = _time_write(dev, data)
+        ratio_x100 = _read_ratio_x100(dev)
+    finally:
+        _hot_remove(dev)
+    mib = len(data) / MIB
+    throughput = mib / elapsed if elapsed > 0 else mib
+    return ratio_x100, throughput
+
+
+def compute_increment_kb(total_ram_kb, throughput):
+    """Compute the per-device increment (block quantity) in KiB.
+
+    The increment is 5% of RAM, scaled by CPU throughput: fast cores
+    afford bigger devices (less add/remove churn), slow or thermally
+    throttled cores get smaller devices for a smoother response. It is
+    bounded to 64 MiB .. 10% of RAM.
+
+    Args:
+        total_ram_kb: Total physical RAM in KiB.
+        throughput: Measured write throughput in MiB/s.
+
+    Returns:
+        int: Increment size in KiB.
+    """
+    base_kb = total_ram_kb * 5 // 100
+    if throughput >= FAST_MIB_S:
+        base_kb = base_kb * 3 // 2
+    elif throughput < SLOW_MIB_S:
+        base_kb = base_kb * 3 // 4
+    floor_kb = 64 * 1024
+    ceil_kb = total_ram_kb * 10 // 100
+    return min(max(base_kb, floor_kb), ceil_kb)
+
+
+def write_calibration(path, increment_kb, ratio_x100, throughput):
+    """Atomically write the calibration file read by the daemon.
+
+    Args:
+        path: Destination path.
+        increment_kb: Per-device increment in KiB.
+        ratio_x100: Expected compression ratio scaled by 100.
+        throughput: Measured throughput in MiB/s.
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    lines = (
+        "# dc-zramctl calibration - auto-generated; do not edit.",
+        f"increment_kb={increment_kb}",
+        f"ratio_x100={ratio_x100}",
+        f"throughput_mibs={int(throughput)}",
+        f"epoch={int(time.time())}",
+    )
+    tmp = f"{path}.new"
+    with open(tmp, "w", encoding="ascii") as handle:
+        handle.write("\n".join(lines) + "\n")
+    os.replace(tmp, path)
+
+
+def main():
+    """Calibrate and write the profitability curve.
+
+    The output path is ``argv[1]`` and defaults to
+    ``/var/lib/dc-zramctl/calibration``.
+    """
+    default_path = "/var/lib/dc-zramctl/calibration"
+    out_path = sys.argv[1] if len(sys.argv) > 1 else default_path
+    total_ram_kb = read_total_ram_kb()
+    if total_ram_kb == 0:
+        sys.exit("dc-zramctl: no MemTotal")
+    ratio_x100, throughput = measure(total_ram_kb)
+    increment_kb = compute_increment_kb(total_ram_kb, throughput)
+    write_calibration(out_path, increment_kb, ratio_x100, throughput)
+    sys.stderr.write(
+        f"dc-zramctl: calibrated ratio={ratio_x100 / 100:.2f}x "
+        f"throughput={int(throughput)}MiB/s "
+        f"increment={increment_kb // 1024}MiB\n"
+    )
+
+
+if __name__ == "__main__":
+    main()
