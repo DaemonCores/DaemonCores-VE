@@ -1,0 +1,19 @@
+Source: dc-config-zfs
+Package: dc-config-zfs
+Version: {{ VER }}
+Architecture: all
+Maintainer: Gabriel Guillou guillou.gabriel@gmail.com
+Homepage: https://github.com/DaemonCores/DaemonCores-VE
+Section: admin
+Priority: optional
+Depends: zfsutils-linux, coreutils, util-linux, {{ DEPS }}
+Description: persist the Proxmox VE cluster config (pmxcfs) on a ZFS dataset
+ The pmxcfs database (/var/lib/pve-cluster/config.db, which backs /etc/pve) holds
+ the node's Proxmox VE configuration. On the single OS disk (btrfs) it is lost if
+ that disk dies or is reinstalled. This tool relocates it onto a ZFS dataset — on
+ redundant data storage that the installer never touches — and re-mounts it there
+ before pve-cluster starts, so the configuration survives disk failure and OS
+ reinstalls.
+ .
+ Opt-in: set the target dataset in /etc/dc-config-zfs/dc-config-zfs.conf (empty by
+ default = disabled, the service is then a no-op).
