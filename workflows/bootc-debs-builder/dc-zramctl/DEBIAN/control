@@ -1,0 +1,25 @@
+Source: dc-zramctl
+Package: dc-zramctl
+Version: {{ VER }}
+Architecture: all
+Maintainer: Gabriel Guillou guillou.gabriel@gmail.com
+Homepage: https://github.com/DaemonCores/DaemonCores-VE
+Section: admin
+Priority: optional
+Depends: python3, util-linux, kmod, systemd, {{ DEPS }}
+Provides: systemd-zram-generator
+Conflicts: systemd-zram-generator
+Replaces: systemd-zram-generator
+Description: adaptive, calibrated zram-only swap manager
+ Replaces systemd-zram-generator with a self-calibrating zram swap that scales in
+ real time. A light bash daemon watches memory pressure (PSI) and hot-adds/removes
+ whole zram devices (a live device cannot be resized) to grow and shrink swap
+ without losing data — a device is only removed once its pages can migrate back.
+ .
+ The physical RAM a device may use is a percentage of the machine's real RAM
+ (never a generic absolute value), enforced by the kernel's per-device mem_limit,
+ so total zram use can never exceed the cap — worst case a write fails and the
+ normal OOM path runs, never worse than a host with no zram. A Python calibrator
+ measures this host's compression ratio and CPU cost to size the devices, and the
+ daemon recalibrates when the live ratio drifts (e.g. a heatwave throttling the
+ cores and slowing compression).

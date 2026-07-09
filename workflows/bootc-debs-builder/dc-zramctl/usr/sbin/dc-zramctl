@@ -1,0 +1,441 @@
+#!/bin/bash
+#
+# dc-zramctl - adaptive, calibrated zram-swap manager (host-only).
+#
+# The 24/7 loop is deliberately light: it reads PSI and the zram sysfs stats,
+# does a little awk arithmetic, and adds/removes whole zram devices. The heavy
+# work - measuring this host's compression ratio and CPU cost for the
+# profitability curve - lives in the Python calibrator (occasional, not in the
+# loop).
+#
+# A live zram device cannot be shrunk, so scaling adds zram0, zram1, ... under
+# pressure and removes them once their pages can migrate back (no data lost:
+# swapoff only succeeds when the pages fit elsewhere).
+#
+# Every physical limit is a percentage of the machine's real RAM, enforced per
+# device by the kernel mem_limit, so total zram use can never exceed the cap -
+# worst case a zram write fails and the normal OOM path runs.
+#
+# Usage:
+#   dc-zramctl daemon      run the adaptive loop (the service)
+#   dc-zramctl calibrate   (re)build the profitability curve, then exit
+#   dc-zramctl stop        swapoff + remove every zram device (ExecStopPost)
+set -uo pipefail
+
+readonly CONF=/etc/dc-zramctl/dc-zramctl.conf
+readonly STATE_DIR=/var/lib/dc-zramctl
+readonly CALIB="${STATE_DIR}/calibration"
+readonly CALIBRATOR=/usr/lib/dc-zramctl/calibrate
+readonly CONTROL=/sys/class/zram-control
+readonly PRIO=100
+readonly MIN_DEVICE_KB=65536 # do not bother with a device smaller than 64 MiB
+
+# Tunables (percentages of RAM / PSI thresholds / seconds); overridden by CONF.
+physical_cap_percent=25
+pressure_high=15
+pressure_low=1
+interval=5
+hysteresis=10
+cooldown=30
+max_devices=16
+drift_percent=25
+recal_min_gap=3600
+
+# Calibration outputs (from CALIB) and derived budget, filled at startup.
+increment_kb=262144
+ratio_x100=250
+cap_kb=0
+
+# Loop state shared across the maybe_* helpers.
+high_since=0
+low_since=0
+drift_since=0
+last_action=0
+last_recal=0
+
+#######################################
+# Write a namespaced message to stderr.
+# Arguments:
+#   $* - message
+# Outputs:
+#   Writes the message to stderr.
+#######################################
+log() {
+  echo "dc-zramctl: $*" >&2
+}
+
+#######################################
+# Report whether zram can be managed here.
+# zram is a host-kernel resource: an unprivileged container cannot manage it and
+# we must never touch the host's devices from inside one.
+# Globals:
+#   CONTROL
+# Returns:
+#   0 if this host can manage zram, 1 otherwise.
+#######################################
+host_capable() {
+  if systemd-detect-virt --container --quiet 2>/dev/null; then
+    return 1
+  fi
+  modprobe zram 2>/dev/null || true
+  [[ -e "${CONTROL}/hot_add" ]]
+}
+
+#######################################
+# Load the tunables from CONF, if present.
+# Globals:
+#   CONF (read); all tunables (written)
+#######################################
+load_conf() {
+  # shellcheck source=/dev/null
+  [[ -r "${CONF}" ]] && . "${CONF}"
+}
+
+#######################################
+# Run the Python calibrator to (re)build the profitability curve.
+# Globals:
+#   STATE_DIR, CALIBRATOR, CALIB
+#######################################
+calibrate() {
+  mkdir -p "${STATE_DIR}"
+  [[ -x "${CALIBRATOR}" ]] || return 0
+  "${CALIBRATOR}" "${CALIB}" || log "calibration failed"
+}
+
+#######################################
+# Load the calibration outputs into globals, with safe fallbacks.
+# Globals:
+#   CALIB (read); increment_kb, ratio_x100 (written)
+#######################################
+load_calibration() {
+  # shellcheck source=/dev/null
+  [[ -r "${CALIB}" ]] && . "${CALIB}"
+  ((increment_kb > 0)) || increment_kb=262144
+  ((ratio_x100 >= 100)) || ratio_x100=250
+}
+
+#######################################
+# Print the current uptime in whole seconds (a monotonic clock).
+# Outputs:
+#   Writes the integer seconds to stdout.
+#######################################
+uptime_secs() {
+  awk '{ print int($1) }' /proc/uptime
+}
+
+#######################################
+# Print total physical RAM in KiB.
+# Outputs:
+#   Writes the integer KiB to stdout.
+#######################################
+ram_kb() {
+  awk '/^MemTotal:/ { print $2 }' /proc/meminfo
+}
+
+#######################################
+# Print the memory pressure (PSI "some" avg10, a 0-100 percentage).
+# Outputs:
+#   Writes the value to stdout, or 0 when PSI is unavailable.
+#######################################
+psi_pressure() {
+  awk '
+    /^some / {
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^avg10=/) {
+          sub(/avg10=/, "", $i)
+          print $i
+          exit
+        }
+      }
+    }
+  ' /proc/pressure/memory 2>/dev/null || echo 0
+}
+
+#######################################
+# Print the number of existing zram devices.
+# Outputs:
+#   Writes the integer count to stdout.
+#######################################
+zram_count() {
+  local dev count=0
+  for dev in /sys/block/zram*; do
+    [[ -e "${dev}" ]] && count=$((count + 1))
+  done
+  echo "${count}"
+}
+
+#######################################
+# Print the physical RAM (KiB) currently used by all zram devices.
+# mm_stat fields: orig compr mem_used_total mem_limit mem_used_max ...
+# Outputs:
+#   Writes the integer KiB to stdout.
+#######################################
+zram_phys_used_kb() {
+  awk 'FNR == 1 { total += int($3 / 1024) } END { print total + 0 }' \
+    /sys/block/zram*/mm_stat 2>/dev/null || echo 0
+}
+
+#######################################
+# Print the committed physical budget (KiB): the sum of every mem_limit.
+# Outputs:
+#   Writes the integer KiB to stdout.
+#######################################
+zram_memlimit_kb() {
+  awk 'FNR == 1 { total += int($1 / 1024) } END { print total + 0 }' \
+    /sys/block/zram*/mem_limit 2>/dev/null || echo 0
+}
+
+#######################################
+# Print the live compression ratio (scaled by 100) across all devices.
+# Outputs:
+#   Writes orig*100/mem_used to stdout, or 0 when nothing is used.
+#######################################
+zram_ratio_x100() {
+  awk 'FNR == 1 { o += $1; u += $3 }
+       END { if (u > 0) printf "%d", o * 100 / u; else print 0 }' \
+    /sys/block/zram*/mm_stat 2>/dev/null || echo 0
+}
+
+#######################################
+# Report whether a pressure value is at least a threshold (float compare).
+# Arguments:
+#   $1 - pressure value
+#   $2 - threshold
+# Returns:
+#   0 if value >= threshold, 1 otherwise.
+#######################################
+pressure_at_least() {
+  awk -v p="$1" -v t="$2" 'BEGIN { exit !(p >= t) }'
+}
+
+#######################################
+# Report whether a pressure value is at most a threshold (float compare).
+# Arguments:
+#   $1 - pressure value
+#   $2 - threshold
+# Returns:
+#   0 if value <= threshold, 1 otherwise.
+#######################################
+pressure_at_most() {
+  awk -v p="$1" -v t="$2" 'BEGIN { exit !(p <= t) }'
+}
+
+#######################################
+# Report whether the live ratio drifts from the calibrated one beyond the
+# configured percentage.
+# Globals:
+#   drift_percent
+# Arguments:
+#   $1 - live ratio (x100)
+#   $2 - expected ratio (x100)
+# Returns:
+#   0 if the deviation is at least drift_percent, 1 otherwise.
+#######################################
+ratio_drifted() {
+  awk -v l="$1" -v e="$2" -v d="${drift_percent}" '
+    BEGIN {
+      if (e <= 0) exit 1
+      dev = (l > e ? l - e : e - l) * 100 / e
+      exit !(dev >= d)
+    }'
+}
+
+#######################################
+# Add one calibrated zram device, capped so the committed physical budget stays
+# within cap_kb. Sets comp before disksize; the per-device mem_limit is the hard
+# physical ceiling the kernel enforces.
+# Globals:
+#   increment_kb, ratio_x100, cap_kb, CONTROL, PRIO, MIN_DEVICE_KB
+# Returns:
+#   0 if a device was added, 1 otherwise.
+#######################################
+add_device() {
+  local committed_kb remaining_kb ml_kb id disksize_b memlimit_b
+  committed_kb=$(zram_memlimit_kb)
+  remaining_kb=$((cap_kb - committed_kb))
+  ((remaining_kb >= MIN_DEVICE_KB)) || return 1
+  ml_kb=$((increment_kb < remaining_kb ? increment_kb : remaining_kb))
+  id=$(cat "${CONTROL}/hot_add") || return 1
+  echo zstd >"/sys/block/zram${id}/comp_algorithm" 2>/dev/null || true
+  disksize_b=$((ml_kb * 1024 * ratio_x100 / 100))
+  memlimit_b=$((ml_kb * 1024))
+  echo "${disksize_b}" >"/sys/block/zram${id}/disksize"
+  echo "${memlimit_b}" >"/sys/block/zram${id}/mem_limit"
+  mkswap "/dev/zram${id}" >/dev/null 2>&1
+  if ! swapon -p "${PRIO}" "/dev/zram${id}" 2>/dev/null; then
+    echo "${id}" >"${CONTROL}/hot_remove" 2>/dev/null || true
+    return 1
+  fi
+  log "added zram${id} (mem_limit $((ml_kb / 1024)) MiB)"
+}
+
+#######################################
+# Print the highest existing zram device id.
+# Outputs:
+#   Writes the id to stdout, empty when there are none.
+#######################################
+top_device_id() {
+  local dev ids=()
+  for dev in /sys/block/zram*; do
+    [[ -e "${dev}" ]] && ids+=("$(basename "${dev}" | tr -dc 0-9)")
+  done
+  printf '%s\n' "${ids[@]}" | sort -n | tail -1
+}
+
+#######################################
+# Remove the top device, but only if its pages can migrate out so no swapped
+# data is lost (swapoff fails with ENOMEM otherwise, and we keep the device).
+# Globals:
+#   CONTROL
+# Returns:
+#   0 if a device was removed, 1 otherwise.
+#######################################
+remove_device() {
+  local id
+  id=$(top_device_id)
+  [[ -n "${id}" ]] || return 1
+  swapoff "/dev/zram${id}" 2>/dev/null || return 1
+  echo "${id}" >"${CONTROL}/hot_remove" 2>/dev/null || true
+  log "removed zram${id}"
+}
+
+#######################################
+# swapoff and remove every zram device (used on shutdown).
+# Globals:
+#   CONTROL
+#######################################
+cleanup_all() {
+  local dev id
+  for dev in /sys/block/zram*; do
+    [[ -e "${dev}" ]] || continue
+    id=$(basename "${dev}" | tr -dc 0-9)
+    swapoff "/dev/zram${id}" 2>/dev/null || true
+    echo "${id}" >"${CONTROL}/hot_remove" 2>/dev/null || true
+  done
+}
+
+#######################################
+# Grow by one device when high pressure has persisted past the hysteresis and
+# cooldown windows and the device budget allows.
+# Globals:
+#   high_since, low_since, last_action, hysteresis, cooldown, max_devices
+# Arguments:
+#   $1 - current uptime seconds
+#######################################
+maybe_grow() {
+  local now="$1"
+  ((high_since == 0)) && high_since="${now}"
+  low_since=0
+  ((now - high_since >= hysteresis)) || return 0
+  ((now - last_action >= cooldown)) || return 0
+  (($(zram_count) < max_devices)) || return 0
+  add_device && last_action="${now}"
+}
+
+#######################################
+# Shrink by one device when low pressure has persisted, keeping at least one.
+# Globals:
+#   low_since, high_since, last_action, hysteresis, cooldown
+# Arguments:
+#   $1 - current uptime seconds
+#######################################
+maybe_shrink() {
+  local now="$1"
+  ((low_since == 0)) && low_since="${now}"
+  high_since=0
+  ((now - low_since >= hysteresis)) || return 0
+  ((now - last_action >= cooldown)) || return 0
+  (($(zram_count) > 1)) || return 0
+  remove_device && last_action="${now}"
+}
+
+#######################################
+# Recalibrate when the live ratio drifts from the calibrated one for long
+# enough, rate-limited by recal_min_gap (catches CPU thermal drift).
+# Globals:
+#   drift_since, last_recal, hysteresis, recal_min_gap, ratio_x100
+# Arguments:
+#   $1 - current uptime seconds
+#######################################
+maybe_recalibrate() {
+  local now="$1" phys live
+  phys=$(zram_phys_used_kb)
+  ((phys > 0)) || {
+    drift_since=0
+    return 0
+  }
+  live=$(zram_ratio_x100)
+  ratio_drifted "${live}" "${ratio_x100}" || {
+    drift_since=0
+    return 0
+  }
+  ((drift_since == 0)) && drift_since="${now}"
+  ((now - drift_since >= hysteresis)) || return 0
+  ((now - last_recal >= recal_min_gap)) || return 0
+  log "ratio drifted (${live} vs ${ratio_x100}); recalibrating"
+  calibrate
+  load_calibration
+  last_recal="${now}"
+  drift_since=0
+}
+
+#######################################
+# The adaptive loop: poll pressure, grow/shrink, and watch for drift.
+# Globals:
+#   interval, high_since, low_since, pressure_high, pressure_low
+#######################################
+run_loop() {
+  local now pressure
+  while :; do
+    sleep "${interval}"
+    now=$(uptime_secs)
+    pressure=$(psi_pressure)
+    if pressure_at_least "${pressure}" "${pressure_high}"; then
+      maybe_grow "${now}"
+    elif pressure_at_most "${pressure}" "${pressure_low}"; then
+      maybe_shrink "${now}"
+    else
+      high_since=0
+      low_since=0
+    fi
+    maybe_recalibrate "${now}"
+  done
+}
+
+#######################################
+# Entry point for the daemon subcommand: prepare state, seed one device, loop.
+# Globals:
+#   many (see the helpers)
+#######################################
+run_daemon() {
+  if ! host_capable; then
+    log "not host-capable (container or no zram); nothing to do."
+    exit 0
+  fi
+  trap 'cleanup_all; exit 0' INT TERM
+  [[ -r "${CALIB}" ]] || calibrate
+  load_calibration
+  cap_kb=$(($(ram_kb) * physical_cap_percent / 100))
+  (($(zram_count) == 0)) && add_device
+  run_loop
+}
+
+#######################################
+# Dispatch the requested subcommand.
+# Arguments:
+#   $1 - daemon | calibrate | stop (default: daemon)
+#######################################
+main() {
+  load_conf
+  case "${1:-daemon}" in
+    daemon) run_daemon ;;
+    calibrate) host_capable && calibrate ;;
+    stop) cleanup_all ;;
+    *)
+      echo "usage: dc-zramctl {daemon|calibrate|stop}" >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
