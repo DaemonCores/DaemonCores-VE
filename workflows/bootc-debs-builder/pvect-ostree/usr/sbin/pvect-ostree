@@ -86,15 +86,20 @@ pin_userns() {
     if mountpoint -q "$USERNS" 2>/dev/null; then
         return 0
     fi
-    local upid
+    local upid self_ns cur_ns i
     unshare -U sleep infinity &
     upid=$!
-    # Give the child a moment to enter the new user namespace.
-    local i
-    for i in 1 2 3 4 5 6 7 8 9 10; do
-        [[ -e /proc/$upid/uid_map ]] && break
-        sleep 0.1
+    # /proc/PID/uid_map always exists (even in the initial userns), so wait until
+    # the child is actually in a NEW user namespace before writing the map,
+    # otherwise the write targets the initial namespace and fails with EPERM.
+    self_ns=$(readlink /proc/self/ns/user)
+    for i in $(seq 1 100); do
+        cur_ns=$(readlink "/proc/$upid/ns/user" 2>/dev/null) || { sleep 0.02; continue; }
+        [[ -n $cur_ns && $cur_ns != "$self_ns" ]] && break
+        sleep 0.02
     done
+    [[ -n ${cur_ns:-} && $cur_ns != "$self_ns" ]] \
+        || { kill "$upid" 2>/dev/null; die "user namespace did not initialise"; }
     printf '0 %s %s\n' "$UID_BASE" "$UID_RANGE" > "/proc/$upid/uid_map" \
         || { kill "$upid" 2>/dev/null; die "failed to write uid_map"; }
     printf '0 %s %s\n' "$UID_BASE" "$UID_RANGE" > "/proc/$upid/gid_map" \
