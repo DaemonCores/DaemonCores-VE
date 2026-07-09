@@ -2,7 +2,7 @@
 set -e
 
 case "$1" in
-    configure|triggered)
-        deb-systemd-helper enable fanctl.service
-        ;;
+  configure | triggered)
+    deb-systemd-helper enable fanctl.service
+    ;;
 esac
