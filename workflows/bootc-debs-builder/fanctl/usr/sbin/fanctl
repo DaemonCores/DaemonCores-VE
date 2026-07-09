@@ -15,18 +15,20 @@
 #   enough (CONTROL_UCR_MIN) are the controlling (CPU-class) sensors; the daemon
 #   holds the hottest of them near TARGET_TEMP.
 #
-#   Calibration measures the real thermal response of THIS machine: it converges
-#   the fan speed to the quiet operating point that holds the target, and records
-#   the fan/temperature slope. The result (CAL_PCT, CAL_SLOPE, CAL_INLET) is
-#   persisted so it survives restarts. In normal operation the daemon applies a
-#   proportional correction around the calibrated point, and recalibrates by
-#   itself when the error stays large (too hot, or fans running harder than the
-#   temperature warrants) or when the inlet air temperature drifts.
+#   Calibration measures the real thermal response of THIS machine: it
+#   converges the fan speed to the quiet operating point that holds the
+#   target, and records the fan/temperature slope. The result (CAL_PCT,
+#   CAL_SLOPE, CAL_INLET) is persisted so it survives restarts. In normal
+#   operation the daemon applies a proportional correction around the
+#   calibrated point, and recalibrates by itself when the error stays large
+#   (too hot, or fans running harder than the temperature warrants) or when
+#   the inlet air temperature drifts.
 #
-#   Safety is temperature-based, never fan-count-based: a single failed fan among
-#   many has no special handling; only an over-temperature (near Upper-Critical)
-#   forces maximum cooling. Writing the fan speed uses an auto-detected vendor
-#   profile (ipmitool mc info); an unknown vendor stays in read-only monitor mode.
+#   Safety is temperature-based, never fan-count-based: a single failed fan
+#   among many has no special handling; only an over-temperature (near
+#   Upper-Critical) forces maximum cooling. Writing the fan speed uses an
+#   auto-detected vendor profile (ipmitool mc info); an unknown vendor stays
+#   in read-only monitor mode.
 #
 # Note on shell options: the daemon deliberately does not use "set -e"; a
 # transient ipmitool failure must not kill the control loop.
@@ -38,60 +40,60 @@ readonly STATE_DIR=/var/lib/fanctl
 readonly STATE_FILE="${STATE_DIR}/calibration.conf"
 
 # --- Defaults (overridden by CONF) ------------------------------------------
-IPMITOOL=ipmitool         # ipmitool binary; local IPMI via /dev/ipmi0.
-POLL_INTERVAL=20          # Seconds between control cycles.
-MIN_PCT=10                # Fan speed floor, percent (keeps baseline airflow).
-MAX_PCT=100               # Fan speed ceiling, percent.
-TARGET_TEMP=60            # Target for the hottest controlling sensor, deg C.
-HARD_MARGIN=10            # Emergency: force max at Upper-Critical minus this.
-CONTROL_UCR_MIN=80        # A sensor with Upper-Critical >= this is CPU-class.
-HWMON_CPU_CRIT=95         # Fallback critical temp for hwmon sensors lacking one.
-AMBIENT_MATCH='Inlet|Ambient'  # Regex for the inlet-air sensor.
-HYST_PCT=3                # Minimum percent change before issuing a command.
-TRIM_MAX=4                # Max fan change per cycle while holding, percent.
-MAX_FAIL=3                # Consecutive IPMI read errors before failsafe.
-REQUIRE_KNOWN_VENDOR=0    # 1 = exit on unknown vendor; 0 = monitor mode.
+IPMITOOL=ipmitool             # ipmitool binary; local IPMI via /dev/ipmi0.
+POLL_INTERVAL=20              # Seconds between control cycles.
+MIN_PCT=10                    # Fan speed floor, percent (baseline airflow).
+MAX_PCT=100                   # Fan speed ceiling, percent.
+TARGET_TEMP=60                # Target for hottest controlling sensor, deg C.
+HARD_MARGIN=10                # Emergency: force max at Upper-Crit minus this.
+CONTROL_UCR_MIN=80            # Upper-Critical >= this marks a CPU sensor.
+HWMON_CPU_CRIT=95             # Fallback crit temp for hwmon sensors.
+AMBIENT_MATCH='Inlet|Ambient' # Regex for the inlet-air sensor.
+HYST_PCT=3                    # Minimum percent change before issuing a command.
+TRIM_MAX=4                    # Max fan change per cycle while holding, percent.
+MAX_FAIL=3                    # Consecutive IPMI read errors before failsafe.
+REQUIRE_KNOWN_VENDOR=0        # 1 = exit on unknown vendor; 0 = monitor mode.
 
 # Calibration and drift tuning.
-DEADBAND=3                # Convergence tolerance during calibration, deg C.
-DRIFT=8                   # Sustained |error| that triggers recalibration, deg C.
-DRIFT_CYCLES=5            # Cycles the drift must persist before recalibrating.
-INLET_DRIFT=5            # Inlet change vs calibration that triggers recal, deg C.
-STABILIZE_SECS=40         # Settle time after a fan change while calibrating.
-MAX_CAL_STEPS=10          # Maximum convergence steps per calibration.
-CAL_STEP_MIN=2            # Minimum per-step fan change while calibrating, pct.
-CAL_STEP_MAX=12           # Maximum per-step fan change while calibrating, pct.
-DEFAULT_GAIN=3            # Fallback proportional gain, percent per deg C.
+DEADBAND=3        # Convergence tolerance during calibration, deg C.
+DRIFT=8           # Sustained |error| that triggers recalibration, deg C.
+DRIFT_CYCLES=5    # Cycles the drift must persist before recalibrating.
+INLET_DRIFT=5     # Inlet change vs calibration that triggers recal, deg C.
+STABILIZE_SECS=40 # Settle time after a fan change while calibrating.
+MAX_CAL_STEPS=10  # Maximum convergence steps per calibration.
+CAL_STEP_MIN=2    # Minimum per-step fan change while calibrating, pct.
+CAL_STEP_MAX=12   # Maximum per-step fan change while calibrating, pct.
+DEFAULT_GAIN=3    # Fallback proportional gain, percent per deg C.
 
 # shellcheck source=/dev/null
 [[ -r "$CONF" ]] && . "$CONF"
 
 # --- Runtime state ----------------------------------------------------------
-BACKEND=none              # Fan-control backend: ipmi | hwmon | none.
+BACKEND=none # Fan-control backend: ipmi | hwmon | none.
 # IPMI backend: detected vendor and its manual/auto raw commands.
 IPMI_VENDOR=unknown
 RAW_MANUAL=''
 RAW_AUTO=''
 # hwmon backend: parallel arrays of controllable PWM channels.
-HWMON_PWM=()              # Paths to writable pwmN files.
-HWMON_EN=()               # Matching pwmN_enable paths.
-HWMON_EN_ORIG=()          # Their original enable values (restored on stop).
-MODE=auto                 # Current control mode: auto | manual.
-LAST_PCT=-1               # Last applied speed, percent (-1 = unknown).
-FAIL_COUNT=0              # Consecutive IPMI read failures.
-DRIFT_COUNT=0             # Consecutive cycles with |error| > DRIFT.
-EMERG_COUNT=0             # Consecutive over-temperature cycles.
+HWMON_PWM=()     # Paths to writable pwmN files.
+HWMON_EN=()      # Matching pwmN_enable paths.
+HWMON_EN_ORIG=() # Their original enable values (restored on stop).
+MODE=auto        # Current control mode: auto | manual.
+LAST_PCT=-1      # Last applied speed, percent (-1 = unknown).
+FAIL_COUNT=0     # Consecutive IPMI read failures.
+DRIFT_COUNT=0    # Consecutive cycles with |error| > DRIFT.
+EMERG_COUNT=0    # Consecutive over-temperature cycles.
 
 # Persisted calibration (loaded from STATE_FILE).
-CAL_PCT=0                 # Calibrated operating fan speed, percent.
-CAL_SLOPE=0               # Measured response, deg C per percent (negative).
-CAL_INLET=0               # Inlet temperature at calibration time, deg C.
+CAL_PCT=0   # Calibrated operating fan speed, percent.
+CAL_SLOPE=0 # Measured response, deg C per percent (negative).
+CAL_INLET=0 # Inlet temperature at calibration time, deg C.
 
 # Metrics from the last read (set by eval of read_metrics).
-T=0                       # Hottest controlling sensor, deg C.
-CRITMIN=0                 # Lowest Upper-Critical among controlling sensors.
-INLET=0                   # Inlet-air temperature, deg C.
-NCTRL=0                   # Number of controlling sensors seen.
+T=0       # Hottest controlling sensor, deg C.
+CRITMIN=0 # Lowest Upper-Critical among controlling sensors.
+INLET=0   # Inlet-air temperature, deg C.
+NCTRL=0   # Number of controlling sensors seen.
 
 log() {
   printf '%s fanctl: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"
@@ -107,7 +109,7 @@ log() {
 detect_hwmon() {
   local pwm en
   for pwm in /sys/class/hwmon/hwmon*/pwm[0-9]*; do
-    [[ "$pwm" =~ /pwm[0-9]+$ ]] || continue   # skip pwmN_enable, pwmN_auto_*
+    [[ "$pwm" =~ /pwm[0-9]+$ ]] || continue # skip pwmN_enable, pwmN_auto_*
     en="${pwm}_enable"
     [[ -w "$pwm" && -e "$en" ]] || continue
     HWMON_PWM+=("$pwm")
@@ -130,12 +132,12 @@ detect_hwmon() {
 #######################################
 ipmi_profile() {
   case "$1" in
-    674)    # Dell (iDRAC 7/8/9) — verified.
+    674) # Dell (iDRAC 7/8/9) — verified.
       IPMI_VENDOR=dell
       RAW_MANUAL='0x30 0x30 0x01 0x00'
       RAW_AUTO='0x30 0x30 0x01 0x01'
       ;;
-    10876)  # Supermicro (X9/X10/X11) — from documentation; zone-based speed.
+    10876) # Supermicro (X9/X10/X11) — from documentation; zone-based speed.
       IPMI_VENDOR=supermicro
       RAW_MANUAL='0x30 0x45 0x01 0x01'
       RAW_AUTO='0x30 0x45 0x01 0x00'
@@ -182,22 +184,34 @@ can_control() {
 
 fan_auto() {
   case "$BACKEND" in
-    ipmi) "$IPMITOOL" raw $RAW_AUTO >/dev/null 2>&1 ;;
+    ipmi)
+      # RAW_AUTO holds several space-separated hex bytes that must reach
+      # ipmitool as separate arguments; the word-splitting is intentional.
+      # shellcheck disable=SC2086
+      "$IPMITOOL" raw $RAW_AUTO >/dev/null 2>&1
+      ;;
     hwmon)
       local i
       for i in "${!HWMON_EN[@]}"; do
-        echo "${HWMON_EN_ORIG[$i]}" > "${HWMON_EN[$i]}" 2>/dev/null
-      done ;;
+        echo "${HWMON_EN_ORIG[$i]}" >"${HWMON_EN[$i]}" 2>/dev/null
+      done
+      ;;
     *) return 0 ;;
   esac
 }
 
 fan_manual() {
   case "$BACKEND" in
-    ipmi) "$IPMITOOL" raw $RAW_MANUAL >/dev/null 2>&1 ;;
+    ipmi)
+      # RAW_MANUAL holds several space-separated hex bytes that must reach
+      # ipmitool as separate arguments; the word-splitting is intentional.
+      # shellcheck disable=SC2086
+      "$IPMITOOL" raw $RAW_MANUAL >/dev/null 2>&1
+      ;;
     hwmon)
       local en
-      for en in "${HWMON_EN[@]}"; do echo 1 > "$en" 2>/dev/null; done ;;
+      for en in "${HWMON_EN[@]}"; do echo 1 >"$en" 2>/dev/null; done
+      ;;
     *) return 0 ;;
   esac
 }
@@ -215,7 +229,8 @@ fan_manual() {
 fan_set() {
   case "$BACKEND" in
     ipmi)
-      local hex; hex=$(printf '0x%02x' "$1")
+      local hex
+      hex=$(printf '0x%02x' "$1")
       case "$IPMI_VENDOR" in
         dell)
           "$IPMITOOL" raw 0x30 0x30 0x02 0xff "$hex" >/dev/null 2>&1 || return 1
@@ -231,10 +246,11 @@ fan_set() {
       esac
       ;;
     hwmon)
-      local pwmval p; pwmval=$(( $1 * 255 / 100 ))
-      (( pwmval > 255 )) && pwmval=255
+      local pwmval p
+      pwmval=$(($1 * 255 / 100))
+      ((pwmval > 255)) && pwmval=255
       for p in "${HWMON_PWM[@]}"; do
-        echo "$pwmval" > "$p" 2>/dev/null || return 1
+        echo "$pwmval" >"$p" 2>/dev/null || return 1
       done
       ;;
     *) return 1 ;;
@@ -263,11 +279,11 @@ to_manual() {
 #######################################
 apply_pct() {
   local pct="$1" delta
-  (( pct < MIN_PCT )) && pct="$MIN_PCT"
-  (( pct > MAX_PCT )) && pct="$MAX_PCT"
+  ((pct < MIN_PCT)) && pct="$MIN_PCT"
+  ((pct > MAX_PCT)) && pct="$MAX_PCT"
   to_manual
-  delta=$(( pct > LAST_PCT ? pct - LAST_PCT : LAST_PCT - pct ))
-  if (( LAST_PCT < 0 || delta >= HYST_PCT )); then
+  delta=$((pct > LAST_PCT ? pct - LAST_PCT : LAST_PCT - pct))
+  if ((LAST_PCT < 0 || delta >= HYST_PCT)); then
     if fan_set "$pct"; then
       log "fans -> ${pct}% (T=${T}C target=$(effective_target)C)"
     else
@@ -325,26 +341,27 @@ read_metrics_hwmon() {
   local hottest=0 critmin=0 inlet=0 nctrl=0 any=0 tdeg cdeg
   for ti in /sys/class/hwmon/hwmon*/temp[0-9]*_input; do
     [[ -r "$ti" ]] || continue
-    val=$(cat "$ti" 2>/dev/null); [[ "$val" =~ ^[0-9]+$ ]] || continue
+    val=$(cat "$ti" 2>/dev/null)
+    [[ "$val" =~ ^[0-9]+$ ]] || continue
     any=1
-    tdeg=$(( val / 1000 ))
+    tdeg=$((val / 1000))
     base="${ti%_input}"
     label=$(cat "${base}_label" 2>/dev/null || echo "")
     [[ "$label" =~ $AMBIENT_MATCH ]] && inlet=$tdeg
     crit=$(cat "${base}_crit" 2>/dev/null || echo "")
-    if [[ "$crit" =~ ^[0-9]+$ ]]; then cdeg=$(( crit / 1000 )); else cdeg=0; fi
-    if (( cdeg >= CONTROL_UCR_MIN )); then
+    if [[ "$crit" =~ ^[0-9]+$ ]]; then cdeg=$((crit / 1000)); else cdeg=0; fi
+    if ((cdeg >= CONTROL_UCR_MIN)); then
       :
     elif [[ "$label" =~ (Package|Tctl|Tdie|Core|CPU) ]]; then
       cdeg=$HWMON_CPU_CRIT
     else
       continue
     fi
-    (( nctrl++ ))
-    (( tdeg > hottest )) && hottest=$tdeg
-    (( critmin == 0 || cdeg < critmin )) && critmin=$cdeg
+    ((nctrl++))
+    ((tdeg > hottest)) && hottest=$tdeg
+    ((critmin == 0 || cdeg < critmin)) && critmin=$cdeg
   done
-  (( any == 0 )) && return 1
+  ((any == 0)) && return 1
   printf "T=%d CRITMIN=%d INLET=%d NCTRL=%d\n" \
     "$hottest" "$critmin" "$inlet" "$nctrl"
 }
@@ -371,8 +388,8 @@ read_metrics() {
 #   The effective target temperature to stdout.
 #######################################
 effective_target() {
-  local ceiling=$(( CRITMIN - HARD_MARGIN - 5 ))
-  if (( CRITMIN > 0 && TARGET_TEMP > ceiling )); then
+  local ceiling=$((CRITMIN - HARD_MARGIN - 5))
+  if ((CRITMIN > 0 && TARGET_TEMP > ceiling)); then
     echo "$ceiling"
   else
     echo "$TARGET_TEMP"
@@ -402,7 +419,8 @@ load_calibration() {
   if [[ -r "$STATE_FILE" ]]; then
     # shellcheck source=/dev/null
     . "$STATE_FILE"
-    log "loaded calibration: pct=${CAL_PCT}% slope=${CAL_SLOPE}C/% inlet=${CAL_INLET}C"
+    log "loaded calibration:" \
+      "pct=${CAL_PCT}% slope=${CAL_SLOPE}C/% inlet=${CAL_INLET}C"
     return 0
   fi
   return 1
@@ -410,7 +428,7 @@ load_calibration() {
 
 save_calibration() {
   mkdir -p "$STATE_DIR"
-  cat > "$STATE_FILE" <<EOF
+  cat >"$STATE_FILE" <<EOF
 # Written by fanctl --calibrate. Do not edit by hand.
 CAL_PCT=${CAL_PCT}
 CAL_SLOPE=${CAL_SLOPE}
@@ -430,44 +448,48 @@ EOF
 calibrate() {
   can_control || return 0
   read_metrics_into || return 1
-  local target; target=$(effective_target)
+  local target
+  target=$(effective_target)
   log "calibrating toward ${target}C (inlet=${INLET}C, ${NCTRL} sensors)..."
   to_manual
 
   local pct prev_pct=-1 prev_t=-1 step err
-  pct=$(( CAL_PCT > 0 ? CAL_PCT : (MIN_PCT + MAX_PCT) / 2 ))
+  pct=$((CAL_PCT > 0 ? CAL_PCT : (MIN_PCT + MAX_PCT) / 2))
   local i
-  for (( i = 0; i < MAX_CAL_STEPS; i++ )); do
-    (( pct < MIN_PCT )) && pct="$MIN_PCT"
-    (( pct > MAX_PCT )) && pct="$MAX_PCT"
+  for ((i = 0; i < MAX_CAL_STEPS; i++)); do
+    ((pct < MIN_PCT)) && pct="$MIN_PCT"
+    ((pct > MAX_PCT)) && pct="$MAX_PCT"
     fan_set "$pct"
     sleep "$STABILIZE_SECS"
     read_metrics_into || return 1
-    err=$(( T - target ))
+    err=$((T - target))
     log "  step ${i}: ${pct}% -> ${T}C (err=${err})"
 
     # Derive the slope from the last two distinct operating points.
-    if (( prev_pct >= 0 && pct != prev_pct )); then
-      CAL_SLOPE=$(awk -v t1="$prev_t" -v t2="$T" -v p1="$prev_pct" -v p2="$pct" \
+    if ((prev_pct >= 0 && pct != prev_pct)); then
+      CAL_SLOPE=$(awk \
+        -v t1="$prev_t" -v t2="$T" -v p1="$prev_pct" -v p2="$pct" \
         'BEGIN { printf "%.3f", (t2 - t1) / (p2 - p1) }')
     fi
 
-    if (( err <= DEADBAND && err >= -DEADBAND )); then break; fi
-    if (( pct <= MIN_PCT && err < 0 )); then break; fi   # As quiet as allowed.
-    if (( pct >= MAX_PCT && err > 0 )); then break; fi   # As loud as allowed.
+    if ((err <= DEADBAND && err >= -DEADBAND)); then break; fi
+    if ((pct <= MIN_PCT && err < 0)); then break; fi # As quiet as allowed.
+    if ((pct >= MAX_PCT && err > 0)); then break; fi # As loud as allowed.
 
-    prev_pct="$pct"; prev_t="$T"
-    step=$(( err >= 0 ? err : -err ))
-    (( step < CAL_STEP_MIN )) && step="$CAL_STEP_MIN"
-    (( step > CAL_STEP_MAX )) && step="$CAL_STEP_MAX"
-    (( pct += (err > 0 ? step : -step) ))
+    prev_pct="$pct"
+    prev_t="$T"
+    step=$((err >= 0 ? err : -err))
+    ((step < CAL_STEP_MIN)) && step="$CAL_STEP_MIN"
+    ((step > CAL_STEP_MAX)) && step="$CAL_STEP_MAX"
+    ((pct += (err > 0 ? step : -step)))
   done
 
   CAL_PCT="$pct"
   CAL_INLET="$INLET"
   save_calibration
   DRIFT_COUNT=0
-  log "calibrated: pct=${CAL_PCT}% slope=${CAL_SLOPE}C/% (gain=$(current_gain)%/C)"
+  log "calibrated:" \
+    "pct=${CAL_PCT}% slope=${CAL_SLOPE}C/% (gain=$(current_gain)%/C)"
 }
 
 # read_metrics wrapper that assigns the T/CRITMIN/INLET/NCTRL globals.
@@ -494,15 +516,16 @@ do_check() {
       b="${ti%_input}"
       printf "  %-24s reading=%sC crit=%sC\n" \
         "$(cat "${b}_label" 2>/dev/null || basename "$b")" \
-        "$(( $(cat "$ti") / 1000 ))" \
-        "$(( $(cat "${b}_crit" 2>/dev/null || echo 0) / 1000 ))"
+        "$(($(cat "$ti") / 1000))" \
+        "$(($(cat "${b}_crit" 2>/dev/null || echo 0) / 1000))"
     done
   else
     "$IPMITOOL" sensor 2>/dev/null | awk -F'|' '
       function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
       { u = trim($3) }
       u ~ /degrees C/ {
-        printf "  %-22s reading=%-8s upper-crit=%s\n", trim($1), trim($2), trim($9)
+        printf "  %-22s reading=%-8s upper-crit=%s\n", \
+          trim($1), trim($2), trim($9)
       }'
   fi
   echo "--- Fans ---"
@@ -526,7 +549,8 @@ do_check() {
   if load_calibration; then :; else echo "  (not calibrated yet)"; fi
   echo "--- Active control available? ---"
   if can_control; then echo "  yes (backend=${BACKEND})"; else
-    echo "  no -> monitor mode (backend=${BACKEND})"; fi
+    echo "  no -> monitor mode (backend=${BACKEND})"
+  fi
 }
 
 do_restore() {
@@ -548,11 +572,11 @@ regulate() {
 
   # Temperature-based emergency: force max cooling. Repeated emergencies mean
   # the calibration is badly wrong, so escalate to a recalibration.
-  if (( T >= CRITMIN - HARD_MARGIN )); then
+  if ((T >= CRITMIN - HARD_MARGIN)); then
     apply_pct "$MAX_PCT"
-    (( EMERG_COUNT++ ))
+    ((EMERG_COUNT++))
     log "over-temperature (${T}C, crit ${CRITMIN}C) -> max cooling"
-    if (( EMERG_COUNT >= DRIFT_CYCLES )); then
+    if ((EMERG_COUNT >= DRIFT_CYCLES)); then
       log "repeated over-temperature -> recalibrate"
       calibrate
       EMERG_COUNT=0
@@ -562,25 +586,25 @@ regulate() {
   EMERG_COUNT=0
 
   target=$(effective_target)
-  err=$(( T - target ))
+  err=$((T - target))
 
   # Gentle incremental (integral) tracking: nudge the current speed toward the
   # target by a bounded step. Bounding the per-cycle change keeps it stable and
   # free of the oscillation an unbounded proportional term would cause.
   gain=$(current_gain)
-  step=$(( err * gain ))
-  (( step > TRIM_MAX )) && step="$TRIM_MAX"
-  (( step < -TRIM_MAX )) && step=$(( -TRIM_MAX ))
-  if (( step == 0 )); then
-    (( err > DEADBAND )) && step=1
-    (( err < -DEADBAND )) && step=-1
+  step=$((err * gain))
+  ((step > TRIM_MAX)) && step="$TRIM_MAX"
+  ((step < -TRIM_MAX)) && step=$((-TRIM_MAX))
+  if ((step == 0)); then
+    ((err > DEADBAND)) && step=1
+    ((err < -DEADBAND)) && step=-1
   fi
-  base=$(( LAST_PCT >= 0 ? LAST_PCT : CAL_PCT ))
-  pct=$(( base + step ))
+  base=$((LAST_PCT >= 0 ? LAST_PCT : CAL_PCT))
+  pct=$((base + step))
   apply_pct "$pct"
 
   # Keep the persisted operating point fresh while sitting on target.
-  if (( err <= DEADBAND && err >= -DEADBAND && LAST_PCT != CAL_PCT )); then
+  if ((err <= DEADBAND && err >= -DEADBAND && LAST_PCT != CAL_PCT)); then
     CAL_PCT="$LAST_PCT"
     CAL_INLET="$INLET"
     save_calibration
@@ -588,16 +612,16 @@ regulate() {
 
   # A large error the gentle tracking cannot absorb, or a shifted inlet, means
   # the operating point moved a lot: run a fast full recalibration.
-  inlet_delta=$(( INLET > CAL_INLET ? INLET - CAL_INLET : CAL_INLET - INLET ))
-  if (( err > DRIFT || err < -DRIFT )); then
-    (( DRIFT_COUNT++ ))
+  inlet_delta=$((INLET > CAL_INLET ? INLET - CAL_INLET : CAL_INLET - INLET))
+  if ((err > DRIFT || err < -DRIFT)); then
+    ((DRIFT_COUNT++))
   else
     DRIFT_COUNT=0
   fi
-  if (( DRIFT_COUNT >= DRIFT_CYCLES )); then
+  if ((DRIFT_COUNT >= DRIFT_CYCLES)); then
     log "sustained drift (err=${err}C) -> recalibrate"
     calibrate
-  elif (( inlet_delta > INLET_DRIFT )); then
+  elif ((inlet_delta > INLET_DRIFT)); then
     log "inlet shifted (${CAL_INLET}C -> ${INLET}C) -> recalibrate"
     calibrate
   fi
@@ -627,7 +651,7 @@ run_daemon() {
     if ! read_metrics_into; then
       FAIL_COUNT=$((FAIL_COUNT + 1))
       log "IPMI read failed (${FAIL_COUNT}/${MAX_FAIL})"
-      (( FAIL_COUNT >= MAX_FAIL )) && can_control && to_auto
+      ((FAIL_COUNT >= MAX_FAIL)) && can_control && to_auto
       sleep "$POLL_INTERVAL"
       continue
     fi
@@ -638,7 +662,7 @@ run_daemon() {
       sleep "$POLL_INTERVAL"
       continue
     fi
-    if (( NCTRL == 0 )); then
+    if ((NCTRL == 0)); then
       log "no controlling sensor readable -> automatic fan control (safety)"
       to_auto
       sleep "$POLL_INTERVAL"
@@ -661,7 +685,10 @@ main() {
       calibrate
       cleanup
       ;;
-    --once) detect_backend; read_metrics ;;
+    --once)
+      detect_backend
+      read_metrics
+      ;;
     --daemon) run_daemon ;;
     *)
       echo "usage: fanctl [--daemon|--check|--calibrate|--restore|--once]" >&2

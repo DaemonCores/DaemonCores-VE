@@ -1,35 +1,41 @@
 #!/bin/bash
-#####################################################################################
-# compose2bootc — convert a docker-compose stack into a bootc LXC OCI image
-#####################################################################################
-# A single, host-callable binary for Proxmox. It transposes a docker-compose stack
-# into a self-contained bootc image whose services run under Podman + Quadlet (no
-# Docker daemon, no Docker socket), following the same atomic/OSTree model as the
-# DaemonCores-VE images. The produced image is what the PVE plugin pulls to init the
-# LXC; the plugin, the Forgejo CI path and physically-bound embedding are documented
-# as future modes and are intentionally out of scope for this first version.
+######################################################################
+# compose2bootc — convert a docker-compose stack into a bootc LXC OCI
+# image.
+#
+# A single, host-callable binary for Proxmox. It transposes a
+# docker-compose stack into a self-contained bootc image whose
+# services run under Podman + Quadlet (no Docker daemon, no Docker
+# socket), following the same atomic/OSTree model as the
+# DaemonCores-VE images. The produced image is what the PVE plugin
+# pulls to init the LXC; the plugin, the Forgejo CI path and
+# physically-bound embedding are documented as future modes and are
+# intentionally out of scope for this first version.
 #
 # Pipeline (mirrors the CI it replaces, but runs locally):
-#   compose.yml --[transpile]--> build context --[podman build]--> OCI image
+#   compose.yml --[transpile]--> build context --[podman build]--> OCI
 #                                                     |
 #                                              [bootc container lint]
 #                                                     |
-#                                    --[healthcheck smoke test]--> promote (retag)
+#                                --[healthcheck smoke test]--> promote
 #
-# Design notes are in docs/architecture.md. British spelling throughout, to match
-# the DaemonCores house style.
-#####################################################################################
+# Design notes are in docs/architecture.md. British spelling
+# throughout, to match the DaemonCores house style.
+######################################################################
 set -euo pipefail
 
-#####################################################################################
+######################################################################
 # Constants and defaults
-#####################################################################################
+######################################################################
 readonly PROG="compose2bootc"
 readonly VERSION="0.1.0"
 readonly DEFAULT_BASE="ghcr.io/daemoncores/debian-bootc:latest"
-readonly STATE_ROOT="/var/lib/${PROG}"      # host-side stack data and build contexts
-readonly CONF_ROOT="/etc/${PROG}"           # per-stack rebuild configuration
-readonly FHS_VAR_PREFIX="/var/lib/${PROG}"  # where non-FHS container data is relocated
+# host-side stack data and build contexts
+readonly STATE_ROOT="/var/lib/${PROG}"
+# per-stack rebuild configuration
+readonly CONF_ROOT="/etc/${PROG}"
+# where non-FHS container data is relocated
+readonly FHS_VAR_PREFIX="/var/lib/${PROG}"
 
 # Runtime options (overridable by flags).
 VERBOSE=0
@@ -41,15 +47,73 @@ REGISTRY=""
 WORKDIR=""
 PROMOTE=0
 
-#####################################################################################
+######################################################################
 # Logging helpers
-#####################################################################################
-log()  { printf '[%s] %s\n' "${PROG}" "$*" >&2; }
-info() { log "$*"; }
-warn() { log "WARN: $*"; }
-die()  { log "ERROR: $*"; exit 1; }
-dbg()  { [ "${VERBOSE}" -eq 1 ] && log "DEBUG: $*" || true; }
+######################################################################
 
+#######################################
+# Print a namespaced message to stderr.
+# Globals:
+#   PROG
+# Arguments:
+#   $* - message text
+# Outputs:
+#   Writes the formatted message to stderr.
+#######################################
+log() { printf '[%s] %s\n' "${PROG}" "$*" >&2; }
+
+#######################################
+# Print an informational message.
+# Arguments:
+#   $* - message text
+# Outputs:
+#   Writes the message to stderr via log().
+#######################################
+info() { log "$*"; }
+
+#######################################
+# Print a warning message.
+# Arguments:
+#   $* - message text
+# Outputs:
+#   Writes a WARN-prefixed message to stderr.
+#######################################
+warn() { log "WARN: $*"; }
+
+#######################################
+# Print an error message and exit.
+# Arguments:
+#   $* - message text
+# Outputs:
+#   Writes an ERROR-prefixed message to stderr.
+# Returns:
+#   Exits 1.
+#######################################
+die() {
+  log "ERROR: $*"
+  exit 1
+}
+
+#######################################
+# Print a debug message when verbose logging is enabled.
+# Globals:
+#   VERBOSE
+# Arguments:
+#   $* - message text
+# Outputs:
+#   Writes a DEBUG-prefixed message to stderr when VERBOSE=1.
+#######################################
+# shellcheck disable=SC2015  # `|| true` is an intentional set -e guard,
+# not an if-then-else; dbg must always succeed regardless of VERBOSE.
+dbg() { [ "${VERBOSE}" -eq 1 ] && log "DEBUG: $*" || true; }
+
+#######################################
+# Print the usage/help text.
+# Globals:
+#   PROG, VERSION, DEFAULT_BASE, STATE_ROOT, FHS_VAR_PREFIX
+# Outputs:
+#   Writes the help text to stderr.
+#######################################
 usage() {
   cat >&2 <<EOF
 ${PROG} ${VERSION} — convert a docker-compose stack into a bootc LXC OCI image
@@ -82,30 +146,81 @@ target is preserved. Non-FHS targets such as /config are detected and reported.
 EOF
 }
 
-#####################################################################################
+######################################################################
 # Dependency checks
-#####################################################################################
-need() { command -v "$1" >/dev/null 2>&1 || die "missing dependency '$1'. Install with: apt install -y $2"; }
+######################################################################
 
-require_python() { need python3 python3; python3 -c 'import yaml' 2>/dev/null || die "python3 PyYAML missing. Install with: apt install -y python3-yaml"; }
+#######################################
+# Verify a command exists or exit with an install hint.
+# Arguments:
+#   $1 - command name to look up
+#   $2 - apt package to suggest when missing
+# Returns:
+#   Exits 1 (via die) when the command is not found.
+#######################################
+need() {
+  command -v "$1" >/dev/null 2>&1 \
+    || die "missing dependency '$1'. Install with: apt install -y $2"
+}
+
+#######################################
+# Ensure python3 and PyYAML are available.
+# Returns:
+#   Exits 1 (via die) when python3 or PyYAML is missing.
+#######################################
+require_python() {
+  need python3 python3
+  python3 -c 'import yaml' 2>/dev/null \
+    || die "python3 PyYAML missing. Install with: apt install -y python3-yaml"
+}
+
+#######################################
+# Select an OCI image builder (podman or buildah).
+# Globals:
+#   BUILDER (set)
+# Outputs:
+#   Debug line naming the chosen builder.
+# Returns:
+#   Exits 1 (via die) when no builder is found.
+#######################################
 require_builder() {
-  if command -v podman >/dev/null 2>&1; then BUILDER=podman
-  elif command -v buildah >/dev/null 2>&1; then BUILDER=buildah
-  else die "neither podman nor buildah found. Install with: apt install -y podman"; fi
+  if command -v podman >/dev/null 2>&1; then
+    BUILDER=podman
+  elif command -v buildah >/dev/null 2>&1; then
+    BUILDER=buildah
+  else
+    die "neither podman nor buildah found. Install with: apt install -y podman"
+  fi
   dbg "using builder: ${BUILDER}"
 }
 
-#####################################################################################
+######################################################################
 # The transpiler (embedded python3)
-#####################################################################################
-# Written to a temp file at call time so the orchestration stays in bash while YAML
-# parsing uses the correct tool. It renders the full build context into $CTX.
+######################################################################
+
+#######################################
+# Render the full build context from a compose file.
+#
+# Written to a temp file at call time so the orchestration stays in
+# bash while YAML parsing uses the correct tool. It renders the full
+# build context into the context directory.
+# Globals:
+#   PROG, FHS_VAR_PREFIX
+# Arguments:
+#   $1 - compose file path
+#   $2 - stack name
+#   $3 - base image
+#   $4 - context output directory
+# Outputs:
+#   A JSON summary on stdout; writes the build context to $4.
+#######################################
 render_context() {
   local compose="$1" stack="$2" base="$3" ctx="$4"
-  local py; py="$(mktemp /tmp/${PROG}.transpile.XXXXXX.py)"
+  local py
+  py="$(mktemp /tmp/${PROG}.transpile.XXXXXX.py)"
   # shellcheck disable=SC2064
   trap "rm -f '${py}'" RETURN
-  cat > "${py}" <<'PYEOF'
+  cat >"${py}" <<'PYEOF'
 import json, os, re, sys
 import yaml
 
@@ -317,37 +432,84 @@ print(json.dumps({"stack": stack, "network": network,
                   "services": summary, "images": images,
                   "relocations": len(relocations)}))
 PYEOF
-  python3 "${py}" "${compose}" "${stack}" "${base}" "${ctx}" "${FHS_VAR_PREFIX}"
+  python3 "${py}" "${compose}" "${stack}" "${base}" "${ctx}" \
+    "${FHS_VAR_PREFIX}"
 }
 
-#####################################################################################
+######################################################################
 # Subcommand: generate / convert
-#####################################################################################
+######################################################################
+
+#######################################
+# Resolve the stack name from --name or the compose directory.
+# Globals:
+#   NAME
+# Arguments:
+#   $1 - compose file path
+# Outputs:
+#   The resolved stack name on stdout.
+#######################################
 resolve_name() {
   local compose="$1"
-  if [ -n "${NAME}" ]; then printf '%s' "${NAME}"; return; fi
-  local dir; dir="$(cd "$(dirname "${compose}")" && pwd)"
-  printf '%s' "$(basename "${dir}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | sed 's/^-*//;s/-*$//')"
+  if [ -n "${NAME}" ]; then
+    printf '%s' "${NAME}"
+    return
+  fi
+  local dir
+  dir="$(cd "$(dirname "${compose}")" && pwd)"
+  printf '%s' "$(basename "${dir}" | tr '[:upper:]' '[:lower:]' \
+    | tr -c 'a-z0-9-' '-' | sed 's/^-*//;s/-*$//')"
 }
 
+#######################################
+# Transpile a compose file into a build context.
+# Globals:
+#   STATE_ROOT, WORKDIR, BASE, CTX_OUT (set), STACK_OUT (set)
+# Arguments:
+#   $1 - compose file path
+# Outputs:
+#   Progress messages on stderr; sets CTX_OUT and STACK_OUT.
+# Returns:
+#   Exits 1 (via die) on a missing file or unresolved name.
+#######################################
 do_generate() {
   local compose="$1"
   [ -f "${compose}" ] || die "compose file not found: ${compose}"
   require_python
-  local stack; stack="$(resolve_name "${compose}")"
+  local stack
+  stack="$(resolve_name "${compose}")"
   [ -n "${stack}" ] || die "could not derive a stack name; pass --name"
   local ctx="${WORKDIR:-${STATE_ROOT}/${stack}/context}"
-  rm -rf "${ctx}"; mkdir -p "${ctx}"
+  rm -rf "${ctx}"
+  mkdir -p "${ctx}"
   info "transpiling '${compose}' -> ${ctx} (stack: ${stack})"
-  local summary; summary="$(render_context "${compose}" "${stack}" "${BASE}" "${ctx}")"
+  local summary
+  summary="$(render_context "${compose}" "${stack}" "${BASE}" "${ctx}")"
   dbg "summary: ${summary}"
   local nsvc nreloc
-  nsvc="$(printf '%s' "${summary}" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["services"]))')"
-  nreloc="$(printf '%s' "${summary}" | python3 -c 'import json,sys;print(json.load(sys.stdin)["relocations"])')"
-  info "generated ${nsvc} service unit(s); ${nreloc} non-FHS path(s) relocated (see RELOCATIONS.txt)"
-  CTX_OUT="${ctx}"; STACK_OUT="${stack}"
+  nsvc="$(
+    python3 -c 'import json,sys;print(len(json.load(sys.stdin)["services"]))' \
+      <<<"${summary}"
+  )"
+  nreloc="$(printf '%s' "${summary}" \
+    | python3 -c 'import json,sys;print(json.load(sys.stdin)["relocations"])')"
+  local msg="generated ${nsvc} service unit(s); "
+  msg+="${nreloc} non-FHS path(s) relocated (see RELOCATIONS.txt)"
+  info "${msg}"
+  CTX_OUT="${ctx}"
+  STACK_OUT="${stack}"
 }
 
+#######################################
+# Build an OCI image from a build context.
+# Globals:
+#   REGISTRY, BUILDER, IMAGE_OUT (set)
+# Arguments:
+#   $1 - build context directory
+#   $2 - stack name
+# Outputs:
+#   Progress messages on stderr; sets IMAGE_OUT.
+#######################################
 do_build() {
   local ctx="$1" stack="$2"
   require_builder
@@ -359,28 +521,66 @@ do_build() {
   IMAGE_OUT="${ref}"
 }
 
-#####################################################################################
+######################################################################
 # Subcommand: test — healthcheck-gated smoke test
-#####################################################################################
-# Boots each service image with its declared healthcheck and waits until Podman
-# reports 'healthy'. This is the gate the 7-day rebuild uses before promotion, and
-# the concrete meaning of "auto-tested from the integrated healthchecks".
+######################################################################
+
+#######################################
+# Tear down smoke-test resources. Registered as a RETURN trap by
+# do_test; all failures are ignored.
+# Arguments:
+#   $1 - temp directory to remove
+#   $2 - test network to remove (optional)
+# Outputs:
+#   Suppressed.
+#######################################
+_test_cleanup() {
+  local tmp="$1" net="${2:-}"
+  # shellcheck disable=SC2046  # intentional word-splitting: one id per line
+  podman rm -f -i $(cat "${tmp}/ids" 2>/dev/null) >/dev/null 2>&1 || true
+  if [ -n "${net}" ]; then
+    podman network rm "${net}" >/dev/null 2>&1 || true
+  fi
+  rm -rf "${tmp}"
+}
+
+#######################################
+# Run the healthcheck-gated smoke test on an image.
+#
+# Boots each service image with its declared healthcheck and waits
+# until Podman reports 'healthy'. This is the gate the 7-day rebuild
+# uses before promotion, and the concrete meaning of "auto-tested from
+# the integrated healthchecks".
+# Globals:
+#   PROG, BUILDER
+# Arguments:
+#   $1 - image reference to test
+# Outputs:
+#   Progress messages on stderr.
+# Returns:
+#   0 when all services pass, 1 when any fails; exits 1 (via die) when
+#   podman is unavailable or the image has no services.
+#######################################
 do_test() {
   local image_ref="$1"
   require_builder
   [ "${BUILDER}" = podman ] || die "the smoke test needs podman"
   info "extracting Quadlets from ${image_ref} for the healthcheck smoke test"
-  local tmp; tmp="$(mktemp -d /tmp/${PROG}.test.XXXXXX)"
-  # shellcheck disable=SC2064
-  trap "podman rm -f -i \$(cat '${tmp}/ids' 2>/dev/null) >/dev/null 2>&1 || true; rm -rf '${tmp}'" RETURN
-  local cid; cid="$(podman create "${image_ref}")"
-  podman cp "${cid}:/usr/share/containers/systemd/." "${tmp}/" 2>/dev/null || true
+  local tmp
+  tmp="$(mktemp -d /tmp/${PROG}.test.XXXXXX)"
+  # shellcheck disable=SC2064  # expand ${tmp} now; cleanup runs at RETURN
+  trap "_test_cleanup '${tmp}'" RETURN
+  local cid
+  cid="$(podman create "${image_ref}")"
+  podman cp "${cid}:/usr/share/containers/systemd/." "${tmp}/" 2>/dev/null \
+    || true
   podman rm -f "${cid}" >/dev/null 2>&1 || true
-  : > "${tmp}/ids"
+  : >"${tmp}/ids"
 
-  local net="${PROG}-test-$$"; podman network create "${net}" >/dev/null 2>&1 || true
-  # shellcheck disable=SC2064
-  trap "podman rm -f -i \$(cat '${tmp}/ids' 2>/dev/null) >/dev/null 2>&1 || true; podman network rm '${net}' >/dev/null 2>&1 || true; rm -rf '${tmp}'" RETURN
+  local net="${PROG}-test-$$"
+  podman network create "${net}" >/dev/null 2>&1 || true
+  # shellcheck disable=SC2064  # expand ${tmp}/${net} now; run at RETURN
+  trap "_test_cleanup '${tmp}' '${net}'" RETURN
 
   local fail=0 checked=0 f
   for f in "${tmp}"/*.container; do
@@ -390,42 +590,85 @@ do_test() {
     img="$(sed -n 's/^Image=//p' "${f}" | head -1)"
     hc="$(sed -n 's/^HealthCmd=//p' "${f}" | head -1)"
     [ -n "${img}" ] || continue
-    checked=$((checked+1))
+    checked=$((checked + 1))
     info "  starting ${svc:-?} (${img})"
-    local args=(run -d --rm --name "${PROG}-test-${svc}-$$" --network "${net}" --network-alias "${svc}")
-    [ -n "${hc}" ] && args+=(--health-cmd "${hc}" --health-interval 5s --health-retries 6 --health-timeout 5s)
-    local id; id="$(podman "${args[@]}" "${img}" 2>/dev/null || true)"
-    [ -n "${id}" ] && echo "${id}" >> "${tmp}/ids"
+    local args=(
+      run -d --rm --name "${PROG}-test-${svc}-$$"
+      --network "${net}"
+    )
+    # Only alias the container when the unit names a service; an empty
+    # ContainerName must not become --network-alias "".
+    [ -n "${svc}" ] && args+=(--network-alias "${svc}")
+    [ -n "${hc}" ] && args+=(
+      --health-cmd "${hc}" --health-interval 5s
+      --health-retries 6 --health-timeout 5s
+    )
+    local id
+    id="$(podman "${args[@]}" "${img}" 2>/dev/null || true)"
+    [ -n "${id}" ] && echo "${id}" >>"${tmp}/ids"
     if [ -z "${hc}" ]; then
       info "  ${svc}: no healthcheck declared — start-only check"
-      [ -n "${id}" ] || { warn "  ${svc}: failed to start"; fail=1; }
+      [ -n "${id}" ] || {
+        warn "  ${svc}: failed to start"
+        fail=1
+      }
       continue
     fi
     # Poll Podman's health status up to ~60s.
     local state=""
     for _ in $(seq 1 20); do
-      state="$(podman inspect --format '{{.State.Health.Status}}' "${id}" 2>/dev/null || echo unknown)"
-      case "${state}" in healthy) break;; unhealthy) break;; esac
+      state="$(
+        podman inspect --format '{{.State.Health.Status}}' \
+          "${id}" 2>/dev/null || echo unknown
+      )"
+      case "${state}" in
+        healthy) break ;;
+        unhealthy) break ;;
+      esac
       sleep 3
     done
-    if [ "${state}" = healthy ]; then info "  ${svc}: healthy"; else warn "  ${svc}: ${state:-unknown}"; fail=1; fi
+    if [ "${state}" = healthy ]; then
+      info "  ${svc}: healthy"
+    else
+      warn "  ${svc}: ${state:-unknown}"
+      fail=1
+    fi
   done
   [ "${checked}" -gt 0 ] || die "no services found in image ${image_ref}"
-  if [ "${fail}" -eq 0 ]; then info "smoke test PASSED (${checked} service(s))"; return 0
-  else warn "smoke test FAILED"; return 1; fi
+  if [ "${fail}" -eq 0 ]; then
+    info "smoke test PASSED (${checked} service(s))"
+    return 0
+  else
+    warn "smoke test FAILED"
+    return 1
+  fi
 }
 
-#####################################################################################
+######################################################################
 # Subcommand: install-timer — 7-day autonomous rebuild
-#####################################################################################
+######################################################################
+
+#######################################
+# Install and enable the 7-day rebuild timer for a stack.
+# Globals:
+#   CONF_ROOT, BASE, REGISTRY, PROG
+# Arguments:
+#   $1 - compose file path
+# Outputs:
+#   Progress messages on stderr; writes the rebuild env file.
+# Returns:
+#   Exits 1 (via die) when the file is missing or not run as root.
+#######################################
 do_install_timer() {
   local compose="$1"
   [ -f "${compose}" ] || die "compose file not found: ${compose}"
   [ "$(id -u)" -eq 0 ] || die "install-timer must run as root"
-  local stack; stack="$(resolve_name "${compose}")"
-  local abs; abs="$(cd "$(dirname "${compose}")" && pwd)/$(basename "${compose}")"
+  local stack
+  stack="$(resolve_name "${compose}")"
+  local abs
+  abs="$(cd "$(dirname "${compose}")" && pwd)/$(basename "${compose}")"
   mkdir -p "${CONF_ROOT}"
-  cat > "${CONF_ROOT}/${stack}.env" <<EOF
+  cat >"${CONF_ROOT}/${stack}.env" <<EOF
 # compose2bootc rebuild configuration for the '${stack}' stack.
 COMPOSE=${abs}
 BASE=${BASE}
@@ -437,13 +680,24 @@ EOF
   systemctl list-timers "${PROG}-rebuild@${stack}.timer" --no-pager || true
 }
 
-#####################################################################################
+######################################################################
 # Subcommand: selftest — offline validation of the transpiler
-#####################################################################################
+######################################################################
+
+#######################################
+# Transpile the bundled example and validate the output.
+# Globals:
+#   PROG, DEFAULT_BASE
+# Outputs:
+#   Progress and check results on stderr.
+# Returns:
+#   Exits 1 (via die) when any validation check fails.
+#######################################
 do_selftest() {
   require_python
-  local ex; ex="$(mktemp /tmp/${PROG}.selftest.XXXXXX.yml)"
-  cat > "${ex}" <<'YML'
+  local ex
+  ex="$(mktemp /tmp/${PROG}.selftest.XXXXXX.yml)"
+  cat >"${ex}" <<'YML'
 services:
   whoami:
     image: docker.io/traefik/whoami:latest
@@ -473,53 +727,149 @@ volumes:
   redis-data:
   redis-conf:
 YML
-  local ctx; ctx="$(mktemp -d /tmp/${PROG}.selftest.XXXXXX)"
+  local ctx
+  ctx="$(mktemp -d /tmp/${PROG}.selftest.XXXXXX)"
   # shellcheck disable=SC2064
   trap "rm -rf '${ctx}' '${ex}'" RETURN
   info "selftest: transpiling embedded example"
   render_context "${ex}" "whoami-stack" "${DEFAULT_BASE}" "${ctx}" >/dev/null
   local ok=1
-  check() { if grep -q -- "$2" "$1" 2>/dev/null; then dbg "  OK: $3"; else warn "  MISSING: $3 ($1)"; ok=0; fi; }
+
+  #######################################
+  # Assert a file contains a pattern; record failure otherwise.
+  # Globals:
+  #   ok (set on failure)
+  # Arguments:
+  #   $1 - file to search
+  #   $2 - pattern to look for
+  #   $3 - human-readable check label
+  # Outputs:
+  #   Debug on success, warning on failure, both on stderr.
+  #######################################
+  check() {
+    if grep -q -- "$2" "$1" 2>/dev/null; then
+      dbg "  OK: $3"
+    else
+      warn "  MISSING: $3 ($1)"
+      ok=0
+    fi
+  }
   check "${ctx}/Containerfile" "FROM ${DEFAULT_BASE}" "base image FROM"
   check "${ctx}/Containerfile" "bootc container lint" "bootc lint stage"
-  check "${ctx}/systemd/whoami.container" "additionalimagestore=/usr/lib/bootc/storage" "additional image store"
+  check "${ctx}/systemd/whoami.container" \
+    "additionalimagestore=/usr/lib/bootc/storage" "additional image store"
   check "${ctx}/Containerfile" "bound-images.d" "bound images symlinks"
-  check "${ctx}/systemd/whoami.container" "ContainerName=whoami" "service-name DNS preserved"
-  check "${ctx}/systemd/whoami.container" "After=redis.service" "depends_on -> After="
-  check "${ctx}/systemd/whoami.container" "HealthCmd=" "compose healthcheck -> HealthCmd"
-  check "${ctx}/systemd/whoami.container" "PublishPort=8080:8080" "ports -> PublishPort"
-  check "${ctx}/systemd/redis.container" "Volume=/var/lib/${PROG}/whoami-stack/redis/" "volume host data under /var"
+  check "${ctx}/systemd/whoami.container" \
+    "ContainerName=whoami" "service-name DNS preserved"
+  check "${ctx}/systemd/whoami.container" \
+    "After=redis.service" "depends_on -> After="
+  check "${ctx}/systemd/whoami.container" \
+    "HealthCmd=" "compose healthcheck -> HealthCmd"
+  check "${ctx}/systemd/whoami.container" \
+    "PublishPort=8080:8080" "ports -> PublishPort"
+  check "${ctx}/systemd/redis.container" \
+    "Volume=/var/lib/${PROG}/whoami-stack/redis/" "volume host data under /var"
   check "${ctx}/RELOCATIONS.txt" "/config" "non-FHS /config detected"
-  check "${ctx}/tmpfiles/whoami-stack.conf" "d /var/lib/${PROG}/whoami-stack" "tmpfiles /var dir"
-  if [ "${ok}" -eq 1 ]; then info "selftest PASSED"; else die "selftest FAILED"; fi
+  check "${ctx}/tmpfiles/whoami-stack.conf" \
+    "d /var/lib/${PROG}/whoami-stack" "tmpfiles /var dir"
+  if [ "${ok}" -eq 1 ]; then
+    info "selftest PASSED"
+  else
+    die "selftest FAILED"
+  fi
 }
 
-#####################################################################################
+######################################################################
 # Argument parsing
-#####################################################################################
+######################################################################
 POSITIONAL=()
+
+#######################################
+# Parse command-line flags into the runtime option globals.
+# Globals:
+#   NAME, BASE, REGISTRY, WORKDIR, PROMOTE, DRY_RUN, KEEP, VERBOSE,
+#   POSITIONAL (all set)
+# Arguments:
+#   $@ - the flags and positional arguments
+# Returns:
+#   Exits 0 on --help, 1 (via die) on an unknown option.
+#######################################
 parse_flags() {
   while [ $# -gt 0 ]; do
     case "$1" in
-      --name)     NAME="$2"; shift 2;;
-      --base)     BASE="$2"; shift 2;;
-      --registry) REGISTRY="$2"; shift 2;;
-      --workdir)  WORKDIR="$2"; shift 2;;
-      --promote)  PROMOTE=1; shift;;
-      --dry-run)  DRY_RUN=1; shift;;
-      --keep)     KEEP=1; shift;;
-      -v|--verbose) VERBOSE=1; shift;;
-      -h|--help)  usage; exit 0;;
-      --) shift; while [ $# -gt 0 ]; do POSITIONAL+=("$1"); shift; done;;
-      -*) die "unknown option: $1";;
-      *)  POSITIONAL+=("$1"); shift;;
+      --name)
+        NAME="$2"
+        shift 2
+        ;;
+      --base)
+        BASE="$2"
+        shift 2
+        ;;
+      --registry)
+        REGISTRY="$2"
+        shift 2
+        ;;
+      --workdir)
+        WORKDIR="$2"
+        shift 2
+        ;;
+      --promote)
+        PROMOTE=1
+        shift
+        ;;
+      --dry-run)
+        DRY_RUN=1
+        shift
+        ;;
+      --keep)
+        KEEP=1
+        shift
+        ;;
+      -v | --verbose)
+        VERBOSE=1
+        shift
+        ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      --)
+        shift
+        while [ $# -gt 0 ]; do
+          POSITIONAL+=("$1")
+          shift
+        done
+        ;;
+      -*) die "unknown option: $1" ;;
+      *)
+        POSITIONAL+=("$1")
+        shift
+        ;;
     esac
   done
 }
 
+#######################################
+# Dispatch a subcommand.
+# Globals:
+#   PROG, VERSION, DRY_RUN, PROMOTE, REGISTRY, KEEP, WORKDIR,
+#   STATE_ROOT, CTX_OUT, STACK_OUT, IMAGE_OUT, BUILDER, POSITIONAL,
+#   NAME
+# Arguments:
+#   $@ - subcommand and its arguments
+# Outputs:
+#   Progress messages on stderr; command output on stdout.
+# Returns:
+#   Exits 2 with usage when no subcommand is given; exits 1 (via die)
+#   on errors.
+#######################################
 main() {
-  [ $# -ge 1 ] || { usage; exit 2; }
-  local cmd="$1"; shift || true
+  [ $# -ge 1 ] || {
+    usage
+    exit 2
+  }
+  local cmd="$1"
+  shift || true
   parse_flags "$@"
   set -- "${POSITIONAL[@]:-}"
 
@@ -532,18 +882,25 @@ main() {
     convert)
       [ -n "${1:-}" ] || die "usage: ${PROG} convert <compose.yml>"
       do_generate "$1"
-      if [ "${DRY_RUN}" -eq 1 ]; then info "dry-run: context ready at ${CTX_OUT}"; exit 0; fi
+      if [ "${DRY_RUN}" -eq 1 ]; then
+        info "dry-run: context ready at ${CTX_OUT}"
+        exit 0
+      fi
       do_build "${CTX_OUT}" "${STACK_OUT}"
       if do_test "${IMAGE_OUT}"; then
         if [ "${PROMOTE}" -eq 1 ] && [ -n "${REGISTRY}" ]; then
-          require_builder; "${BUILDER}" tag "${IMAGE_OUT}" "${REGISTRY}"
+          require_builder
+          "${BUILDER}" tag "${IMAGE_OUT}" "${REGISTRY}"
           info "promoted ${IMAGE_OUT} -> ${REGISTRY}"
         fi
         info "SUCCESS: ${IMAGE_OUT} is ready for the PVE plugin to pull"
       else
         die "healthcheck smoke test failed; image not promoted"
       fi
-      [ "${KEEP}" -eq 1 ] || { [ -n "${WORKDIR}" ] || rm -rf "${STATE_ROOT}/${STACK_OUT}/context"; }
+      [ "${KEEP}" -eq 1 ] || {
+        [ -n "${WORKDIR}" ] \
+          || rm -rf "${STATE_ROOT}/${STACK_OUT}/context"
+      }
       ;;
     build)
       [ -n "${1:-}" ] || die "usage: ${PROG} build <context-dir>"
@@ -558,10 +915,10 @@ main() {
       [ -n "${1:-}" ] || die "usage: ${PROG} install-timer <compose.yml>"
       do_install_timer "$1"
       ;;
-    selftest) do_selftest;;
-    version)  printf '%s %s\n' "${PROG}" "${VERSION}";;
-    -h|--help|help) usage;;
-    *) die "unknown command: ${cmd} (try --help)";;
+    selftest) do_selftest ;;
+    version) printf '%s %s\n' "${PROG}" "${VERSION}" ;;
+    -h | --help | help) usage ;;
+    *) die "unknown command: ${cmd} (try --help)" ;;
   esac
 }
 
