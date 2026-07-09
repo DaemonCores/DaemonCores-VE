@@ -1,0 +1,21 @@
+[Unit]
+Description=dc-zramctl — adaptive calibrated zram swap
+Documentation=https://github.com/DaemonCores/DaemonCores-VE
+# zram is a host-kernel resource; never run inside a container (an unprivileged
+# LXC cannot manage it, and we must not touch the host's devices from within one).
+ConditionVirtualization=!container
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/dc-zramctl daemon
+# Hand memory back cleanly on stop: swapoff + remove every zram device.
+ExecStopPost=/usr/sbin/dc-zramctl stop
+Restart=on-failure
+RestartSec=10
+Nice=5
+# Calibration/state lives here.
+StateDirectory=dc-zramctl
+
+[Install]
+WantedBy=multi-user.target
