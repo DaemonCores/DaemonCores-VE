@@ -1,0 +1,17 @@
+[Unit]
+Description=Mount the Proxmox VE cluster config (pmxcfs) from its ZFS dataset
+Documentation=https://github.com/DaemonCores/DaemonCores-VE
+# The ZFS-backed config must be in place at /var/lib/pve-cluster before pmxcfs
+# (pve-cluster) opens config.db, so this runs after ZFS is up and before it.
+After=zfs-mount.service zfs.target
+Wants=zfs-mount.service
+Before=pve-cluster.service
+ConditionPathExists=/etc/dc-config-zfs/dc-config-zfs.conf
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/dc-config-zfs mount
+
+[Install]
+WantedBy=multi-user.target

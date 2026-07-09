@@ -320,6 +320,27 @@ jobs:
           dpkg-deb --build /output/dc-firewall-seed \
             /debs/dc-firewall-seed_${DC_FIREWALL_SEED_VER}_all.deb
 
+      - name: Build dc-config-zfs
+        shell: bash
+        env:
+          DC_CONFIG_ZFS_VER: "1.0.0"
+        run: |
+          SAVE_PWD=$(pwd)
+
+          mkdir -p /output/dc-config-zfs
+          cp -r "${SAVE_PWD}"/workflows/bootc-debs-builder/dc-config-zfs/* /output/dc-config-zfs/
+
+          chmod 0755 /output/dc-config-zfs/usr/sbin/dc-config-zfs
+          chmod 0755 /output/dc-config-zfs/DEBIAN/postinst
+
+          sed -i \
+            -e "s|{{ VER }}|${DC_CONFIG_ZFS_VER}|g" \
+            -e "s|, {{ DEPS }}||g" \
+            /output/dc-config-zfs/DEBIAN/control
+
+          dpkg-deb --build /output/dc-config-zfs \
+            /debs/dc-config-zfs_${DC_CONFIG_ZFS_VER}_all.deb
+
       - name: Build pvect-ostree
         shell: bash
         env:

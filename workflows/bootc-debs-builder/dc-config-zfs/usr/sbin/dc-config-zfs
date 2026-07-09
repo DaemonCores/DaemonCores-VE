@@ -1,0 +1,58 @@
+#!/bin/bash
+#
+# dc-config-zfs — persist the Proxmox VE cluster config (pmxcfs) on a ZFS dataset.
+#
+# /var/lib/pve-cluster/config.db backs /etc/pve. On the single OS disk (btrfs) it
+# dies with the disk or a reinstall. This relocates it onto a ZFS dataset (on
+# redundant data storage the installer never touches) and re-mounts it there
+# before pve-cluster starts, so the configuration survives.
+#
+# Usage:
+#   dc-config-zfs enable <pool/dataset>   # one-time: migrate the config + persist
+#   dc-config-zfs mount                    # boot-time: mount dataset -> /var/lib/pve-cluster
+set -euo pipefail
+
+CONF=/etc/dc-config-zfs/dc-config-zfs.conf
+TARGET=/var/lib/pve-cluster
+
+# Read the configured dataset (empty when the feature is disabled).
+_dataset() {
+    [[ -f "$CONF" ]] && . "$CONF"
+    echo "${DATASET:-}"
+}
+
+case "${1:-}" in
+    enable)
+        DS="${2:?usage: dc-config-zfs enable <pool/dataset>}"
+        # pmxcfs must not be writing config.db while we migrate it.
+        systemctl stop pve-cluster.service 2>/dev/null || true
+        # Create the dataset if absent; keep it out of the auto-mount namespace
+        # (we mount it explicitly at $TARGET, before ZFS' own mounts matter).
+        zfs list -H -o name "$DS" >/dev/null 2>&1 || zfs create -p "$DS"
+        zfs set mountpoint=legacy "$DS"
+        # Seed the dataset from the existing config once, if it is still empty.
+        MP=$(mktemp -d)
+        mount -t zfs "$DS" "$MP"
+        if [[ -z "$(ls -A "$MP" 2>/dev/null)" && -d "$TARGET" ]]; then
+            cp -a "$TARGET"/. "$MP"/
+        fi
+        umount "$MP"; rmdir "$MP"
+        printf 'DATASET=%s\n' "$DS" > "$CONF"
+        "$0" mount
+        systemctl start pve-cluster.service 2>/dev/null || true
+        echo "dc-config-zfs: pmxcfs config now persisted on ${DS}."
+        ;;
+    mount)
+        DS="$(_dataset)"
+        [[ -n "$DS" ]] || exit 0                                  # disabled -> no-op
+        zfs list -H -o name "$DS" >/dev/null 2>&1 \
+            || { echo "dc-config-zfs: dataset ${DS} not found, skipping." >&2; exit 0; }
+        mountpoint -q "$TARGET" && exit 0                         # already mounted
+        mkdir -p "$TARGET"
+        mount -t zfs "$DS" "$TARGET"
+        ;;
+    *)
+        echo "usage: dc-config-zfs {enable <pool/dataset>|mount}" >&2
+        exit 1
+        ;;
+esac
