@@ -10,14 +10,15 @@
 #   --once       Print one metrics line and exit.
 #
 # What it does:
-#   The CPU frequency/voltage curve has an efficiency knee: the top few hundred
-#   MHz cost disproportionate watts (and therefore heat and fan noise) for little
-#   extra work. powerctl measures that curve on THIS machine — it caps the CPU at
-#   each factory frequency step, saturates the cores, and reads the real package
-#   power from RAPL — then picks the knee as the default operating point. The
-#   kernel governor still scales below the cap with load; powerctl raises the cap
-#   toward the factory maximum only while a sustained load actually benefits from
-#   more frequency, and returns to the knee when it does not.
+#   The CPU frequency/voltage curve has an efficiency knee: the top few
+#   hundred MHz cost disproportionate watts (and therefore heat and fan
+#   noise) for little extra work. powerctl measures that curve on THIS
+#   machine — it caps the CPU at each factory frequency step, saturates the
+#   cores, and reads the real package power from RAPL — then picks the knee
+#   as the default operating point. The kernel governor still scales below
+#   the cap with load; powerctl raises the cap toward the factory maximum
+#   only while a sustained load actually benefits from more frequency, and
+#   returns to the knee when it does not.
 #
 #   Everything stays inside the factory range: it only chooses WHERE on the
 #   stock curve to sit, never beyond spec. There is no undervolt and no
@@ -39,35 +40,39 @@ readonly CPUBASE=/sys/devices/system/cpu
 readonly RAPLBASE=/sys/class/powercap
 
 # --- Defaults (overridden by CONF) ------------------------------------------
-GOVERNOR=schedutil        # Preferred governor; falls back if unavailable.
-EPP=balance_power         # energy_performance_preference when supported.
-POLL_INTERVAL=20          # Seconds between control cycles.
-N_TIERS=6                 # Calibration frequency steps when the list is continuous.
-LOAD_SECS=4               # Core-saturation settle time per tier, seconds.
-SAMPLE_SECS=3             # RAPL sampling window per tier, seconds.
-KNEE_FRACTION=50          # Keep climbing while marginal MHz/W >= this % of best.
-ESCALATE_UTIL=80          # Utilization (%) above which the cap may rise.
-DEESCALATE_UTIL=40        # Utilization (%) below which the cap falls to knee.
-IPC_BUSY=70               # IPC x100: at or above this the workload is compute-bound.
-IPC_SAMPLE_SECS=1         # perf sampling window per cycle, seconds.
-CAP_STEP_PCT=15           # Cap move per cycle, percent of the knee..max range.
-IDLE_UTIL=10              # Utilization (%) considered idle for calibration.
-IDLE_WINDOW=300           # Idle must last this long before calibrating, seconds.
-SET_MIN_TO_HW=1           # 1 = pin scaling_min_freq to hardware min while running.
+GOVERNOR=schedutil # Preferred governor; falls back if unavailable.
+EPP=balance_power  # energy_performance_preference when supported.
+POLL_INTERVAL=20   # Seconds between control cycles.
+N_TIERS=6          # Calibration frequency steps when the list is continuous.
+LOAD_SECS=4        # Core-saturation settle time per tier, seconds.
+SAMPLE_SECS=3      # RAPL sampling window per tier, seconds.
+KNEE_FRACTION=50   # Keep climbing while marginal MHz/W >= this % of best.
+ESCALATE_UTIL=80   # Utilization (%) above which the cap may rise.
+DEESCALATE_UTIL=40 # Utilization (%) below which the cap falls to knee.
+IPC_BUSY=70        # IPC x100: at or above this the workload is compute-bound.
+IPC_SAMPLE_SECS=1  # perf sampling window per cycle, seconds.
+CAP_STEP_PCT=15    # Cap move per cycle, percent of the knee..max range.
+IDLE_UTIL=10       # Utilization (%) considered idle for calibration.
+IDLE_WINDOW=300    # Idle must last this long before calibrating, seconds.
+SET_MIN_TO_HW=1    # 1 = pin scaling_min_freq to hardware min while running.
 
 # --- Peripheral power management (each auto-skips if unsupported) ------------
-SATA_ALPM=med_power_with_dipm  # SATA link power ('' = leave alone). Safe + ZFS-ok.
-PCI_RUNTIME_PM=1          # 1 = set PCI devices power/control=auto (wake on demand).
-PCIE_ASPM=''             # PCIe ASPM policy ('' = leave; can hang buggy devices).
-DISK_SPINDOWN_MIN=0       # HDD standby after N min idle (0 = off). ZFS/mounted excluded.
-GPU_POWER_PCT=0           # Cap GPU power at N% of its max (0 = leave factory). NVIDIA+AMD.
-USB_AUTOSUSPEND=leave     # leave | on (power-save) | off (stability, always powered).
-CSTATES_ENSURE=1          # 1 = re-enable any disabled CPU idle C-state.
-SWAPPINESS_DYNAMIC=1      # 1 = scale vm.swappiness from the averaged CPU load.
-SWAPPINESS_MIN=1          # Swappiness under heavy load (protect the working set).
-SWAPPINESS_MAX=60         # Swappiness at idle (reclaim inactive pages for cache).
-SWAPPINESS_STEP=5         # Only rewrite swappiness when it moves by at least this.
-REAPPLY_EVERY=30          # Re-apply peripheral PM every N control cycles.
+# SATA link power ('' = leave alone). Safe + ZFS-ok.
+SATA_ALPM=med_power_with_dipm
+PCI_RUNTIME_PM=1 # 1 = set PCI devices power/control=auto (wake on demand).
+PCIE_ASPM=''     # PCIe ASPM policy ('' = leave; can hang buggy devices).
+# HDD standby after N min idle (0 = off). ZFS/mounted excluded.
+DISK_SPINDOWN_MIN=0
+# Cap GPU power at N% of its max (0 = leave factory). NVIDIA+AMD.
+GPU_POWER_PCT=0
+# leave | on (power-save) | off (stability, always powered).
+USB_AUTOSUSPEND=leave
+CSTATES_ENSURE=1     # 1 = re-enable any disabled CPU idle C-state.
+SWAPPINESS_DYNAMIC=1 # 1 = scale vm.swappiness from the averaged CPU load.
+SWAPPINESS_MIN=1     # Swappiness under heavy load (protect the working set).
+SWAPPINESS_MAX=60    # Swappiness at idle (reclaim inactive pages for cache).
+SWAPPINESS_STEP=5    # Only rewrite swappiness when it moves by at least this.
+REAPPLY_EVERY=30     # Re-apply peripheral PM every N control cycles.
 
 # shellcheck source=/dev/null
 [[ -r "$CONF" ]] && . "$CONF"
@@ -75,17 +80,24 @@ REAPPLY_EVERY=30          # Re-apply peripheral PM every N control cycles.
 # --- Runtime state ----------------------------------------------------------
 HAVE_CPUFREQ=0
 HAVE_RAPL=0
-KNEE_FREQ=0               # Calibrated efficiency-knee frequency, kHz.
-MAX_FREQ=0               # Factory maximum frequency, kHz.
-MIN_FREQ=0               # Factory minimum frequency, kHz.
-KNEE_WATTS=0             # Package watts measured at the knee.
-CUR_CAP=0                # Currently applied cap, kHz.
-HAVE_PERF=0              # 1 = perf PMU counters available (compute-bound sense).
-IDLE_ELAPSED=0          # Seconds of sustained idle accumulated.
-NEED_CAL=0               # 1 = a calibration is pending (first boot or drift).
-PREV_STAT=''            # Previous /proc/stat first line for utilization delta.
-LAST_SWAPPINESS=-1      # Last applied vm.swappiness (-1 = unknown).
+KNEE_FREQ=0        # Calibrated efficiency-knee frequency, kHz.
+MAX_FREQ=0         # Factory maximum frequency, kHz.
+MIN_FREQ=0         # Factory minimum frequency, kHz.
+KNEE_WATTS=0       # Package watts measured at the knee.
+CUR_CAP=0          # Currently applied cap, kHz.
+HAVE_PERF=0        # 1 = perf PMU counters available (compute-bound sense).
+IDLE_ELAPSED=0     # Seconds of sustained idle accumulated.
+NEED_CAL=0         # 1 = a calibration is pending (first boot or drift).
+PREV_STAT=''       # Previous /proc/stat first line for utilization delta.
+LAST_SWAPPINESS=-1 # Last applied vm.swappiness (-1 = unknown).
 
+#######################################
+# Emit a timestamped log line to stdout.
+# Arguments:
+#   $* - message text
+# Outputs:
+#   Log line to stdout.
+#######################################
 log() {
   printf '%s powerctl: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"
 }
@@ -98,8 +110,10 @@ log() {
 detect_features() {
   if [[ -r "${CPUBASE}/cpu0/cpufreq/scaling_max_freq" ]]; then
     HAVE_CPUFREQ=1
-    MAX_FREQ=$(cat "${CPUBASE}/cpu0/cpufreq/cpuinfo_max_freq" 2>/dev/null || echo 0)
-    MIN_FREQ=$(cat "${CPUBASE}/cpu0/cpufreq/cpuinfo_min_freq" 2>/dev/null || echo 0)
+    MAX_FREQ=$(cat "${CPUBASE}/cpu0/cpufreq/cpuinfo_max_freq" 2>/dev/null \
+      || echo 0)
+    MIN_FREQ=$(cat "${CPUBASE}/cpu0/cpufreq/cpuinfo_min_freq" 2>/dev/null \
+      || echo 0)
   fi
   # RAPL only counts if we can actually read the energy counter (root-only).
   [[ -n "$(rapl_energy)" ]] && HAVE_RAPL=1
@@ -113,7 +127,8 @@ detect_features() {
 }
 
 #######################################
-# Measure whole-system IPC (instructions per cycle) over a short window via perf.
+# Measure whole-system IPC (instructions per cycle) over a short window
+# via perf.
 # Globals:
 #   IPC_SAMPLE_SECS (read)
 # Outputs:
@@ -126,30 +141,48 @@ read_ipc() {
   ins=$(awk '/instructions/ {gsub(/[^0-9]/, "", $1); print $1; exit}' <<<"$out")
   cyc=$(awk '/cycles/ {gsub(/[^0-9]/, "", $1); print $1; exit}' <<<"$out")
   [[ "$ins" =~ ^[0-9]+$ && "$cyc" =~ ^[0-9]+$ && "$cyc" -gt 0 ]] || return 1
-  echo $(( ins * 100 / cyc ))
+  echo $((ins * 100 / cyc))
 }
 
+#######################################
 # Write a value to the same cpufreq attribute on every CPU.
+# Globals:
+#   CPUBASE (read)
+# Arguments:
+#   $1 - cpufreq attribute name
+#   $2 - value to write
+#######################################
 cpufreq_write_all() {
   local attr="$1" val="$2" f
   for f in "${CPUBASE}"/cpu[0-9]*/cpufreq/"$attr"; do
-    [[ -w "$f" ]] && echo "$val" > "$f" 2>/dev/null
+    [[ -w "$f" ]] && echo "$val" >"$f" 2>/dev/null
   done
 }
 
-# Pick the preferred governor if available, otherwise a sensible fallback.
+#######################################
+# Pick the preferred governor if available, else a sensible fallback.
+# Globals:
+#   CPUBASE, GOVERNOR (read)
+# Outputs:
+#   Chosen governor name to stdout (empty if none available).
+#######################################
 choose_governor() {
   local avail
   avail=$(cat "${CPUBASE}/cpu0/cpufreq/scaling_available_governors" 2>/dev/null)
   local g
   for g in "$GOVERNOR" schedutil ondemand powersave; do
-    [[ " $avail " == *" $g "* ]] && { echo "$g"; return; }
+    [[ " $avail " == *" $g "* ]] && {
+      echo "$g"
+      return
+    }
   done
   echo ""
 }
 
 #######################################
 # Sum RAPL package energy across all sockets, in microjoules.
+# Globals:
+#   RAPLBASE (read)
 # Outputs:
 #   Total energy_uj to stdout (empty if RAPL is absent).
 #######################################
@@ -157,7 +190,7 @@ rapl_energy() {
   local d total=0 e
   for d in "${RAPLBASE}"/*-rapl:[0-9]; do
     e=$(cat "$d/energy_uj" 2>/dev/null) || continue
-    total=$(( total + e ))
+    total=$((total + e))
   done
   [[ "$total" -gt 0 ]] && echo "$total"
 }
@@ -187,8 +220,13 @@ read_watts() {
 #######################################
 cpu_util() {
   local cur idle1 total1 idle0 total0
-  cur=$(awk '/^cpu /{i=$5+$6; t=0; for(k=2;k<=NF;k++)t+=$k; print i, t}' /proc/stat)
-  if [[ -z "$PREV_STAT" ]]; then PREV_STAT="$cur"; echo 0; return; fi
+  cur=$(awk '/^cpu /{i=$5+$6; t=0; for(k=2;k<=NF;k++)t+=$k; print i, t}' \
+    /proc/stat)
+  if [[ -z "$PREV_STAT" ]]; then
+    PREV_STAT="$cur"
+    echo 0
+    return
+  fi
   read -r idle0 total0 <<<"$PREV_STAT"
   read -r idle1 total1 <<<"$cur"
   PREV_STAT="$cur"
@@ -201,12 +239,15 @@ cpu_util() {
 
 #######################################
 # Build the list of factory frequency tiers to probe, in kHz ascending.
+# Globals:
+#   CPUBASE, MIN_FREQ, MAX_FREQ, N_TIERS (read)
 # Outputs:
 #   Space-separated frequencies to stdout.
 #######################################
 frequency_tiers() {
   local avail
-  avail=$(cat "${CPUBASE}/cpu0/cpufreq/scaling_available_frequencies" 2>/dev/null)
+  avail=$(cat "${CPUBASE}/cpu0/cpufreq/scaling_available_frequencies" \
+    2>/dev/null)
   if [[ -n "$avail" ]]; then
     tr ' ' '\n' <<<"$avail" | grep -E '^[0-9]+$' | sort -n | uniq
     return
@@ -234,20 +275,31 @@ read_temp() {
         if (r + 0 > h) h = r + 0
       }
       END { if (h > 0) printf "%d", h }')
-    [[ -n "$t" ]] && { echo "$t"; return 0; }
+    [[ -n "$t" ]] && {
+      echo "$t"
+      return 0
+    }
   fi
   local ti val h=0
   for ti in /sys/class/hwmon/hwmon*/temp[0-9]*_input; do
     [[ -r "$ti" ]] || continue
-    val=$(cat "$ti" 2>/dev/null); [[ "$val" =~ ^[0-9]+$ ]] || continue
-    (( val / 1000 > h )) && h=$(( val / 1000 ))
+    val=$(cat "$ti" 2>/dev/null)
+    [[ "$val" =~ ^[0-9]+$ ]] || continue
+    ((val / 1000 > h)) && h=$((val / 1000))
   done
-  (( h > 0 )) && echo "$h"
+  ((h > 0)) && echo "$h"
 }
 
+#######################################
+# Persist the calibrated tiers to the state file.
+# Globals:
+#   STATE_DIR, STATE_FILE, KNEE_FREQ, KNEE_WATTS, MAX_FREQ, MIN_FREQ (read)
+# Outputs:
+#   Writes the state file.
+#######################################
 save_tiers() {
   mkdir -p "$STATE_DIR"
-  cat > "$STATE_FILE" <<EOF
+  cat >"$STATE_FILE" <<EOF
 # Written by powerctl --calibrate. Do not edit by hand.
 KNEE_FREQ=${KNEE_FREQ}
 KNEE_WATTS=${KNEE_WATTS}
@@ -257,6 +309,13 @@ CAL_TS=$(date '+%Y-%m-%dT%H:%M:%S%z')
 EOF
 }
 
+#######################################
+# Load previously calibrated tiers from the state file.
+# Globals:
+#   STATE_FILE (read); KNEE_FREQ, KNEE_WATTS, MAX_FREQ, MIN_FREQ (write)
+# Returns:
+#   0 if the state file was read, 1 if it is absent.
+#######################################
 load_tiers() {
   [[ -r "$STATE_FILE" ]] || return 1
   # shellcheck source=/dev/null
@@ -264,7 +323,13 @@ load_tiers() {
   return 0
 }
 
+#######################################
 # Apply a maximum-frequency cap (kHz) across all CPUs.
+# Globals:
+#   CUR_CAP (write)
+# Arguments:
+#   $1 - cap frequency in kHz
+#######################################
 apply_cap() {
   local cap="$1"
   cpufreq_write_all scaling_max_freq "$cap"
@@ -275,35 +340,51 @@ apply_cap() {
 # Measure the package power at each factory frequency tier and pick the knee.
 # Saturates the cores at each capped frequency, so this is disruptive.
 # Globals:
-#   KNEE_FREQ, KNEE_WATTS, CUR_CAP (write)
+#   KNEE_FREQ, KNEE_WATTS, CUR_CAP, NEED_CAL (write)
 #######################################
 calibrate() {
-  [[ "$HAVE_CPUFREQ" == 1 ]] || { log "no cpufreq -> cannot calibrate"; return 1; }
+  if [[ "$HAVE_CPUFREQ" != 1 ]]; then
+    log "no cpufreq -> cannot calibrate"
+    return 1
+  fi
   if [[ "$HAVE_RAPL" != 1 ]]; then
     log "no RAPL -> cannot measure watts; holding factory maximum"
-    KNEE_FREQ="$MAX_FREQ"; KNEE_WATTS=0; save_tiers; NEED_CAL=0; return 0
+    KNEE_FREQ="$MAX_FREQ"
+    KNEE_WATTS=0
+    save_tiers
+    NEED_CAL=0
+    return 0
   fi
 
-  local gov; gov=$(cat "${CPUBASE}/cpu0/cpufreq/scaling_governor" 2>/dev/null)
+  local gov
+  gov=$(cat "${CPUBASE}/cpu0/cpufreq/scaling_governor" 2>/dev/null)
   log "calibrating: sweeping frequency tiers under load (disruptive)..."
   cpufreq_write_all scaling_governor performance
 
-  local tiers; tiers=$(frequency_tiers)
+  local tiers
+  tiers=$(frequency_tiers)
   local f watts temp
   local -a F=() W=()
+  # shellcheck disable=SC2086  # $tiers is an intentional space-separated list.
   for f in $tiers; do
     cpufreq_write_all scaling_min_freq "$f"
     cpufreq_write_all scaling_max_freq "$f"
     # Saturate every core with a dependency-free busy load.
-    local n; n=$(nproc)
+    local n
+    n=$(nproc)
     local pids=() i
-    for (( i = 0; i < n; i++ )); do yes >/dev/null & pids+=($!); done
+    for ((i = 0; i < n; i++)); do
+      yes >/dev/null &
+      pids+=("$!")
+    done
     sleep "$LOAD_SECS"
     watts=$(read_watts "$SAMPLE_SECS")
     temp=$(read_temp)
-    kill "${pids[@]}" 2>/dev/null; wait "${pids[@]}" 2>/dev/null
-    F+=("$f"); W+=("$watts")
-    log "  tier $(( f / 1000 ))MHz -> ${watts}W${temp:+ ${temp}C}"
+    kill "${pids[@]}" 2>/dev/null
+    wait "${pids[@]}" 2>/dev/null
+    F+=("$f")
+    W+=("$watts")
+    log "  tier $((f / 1000))MHz -> ${watts}W${temp:+ ${temp}C}"
   done
 
   # Restore a scalable configuration before choosing the operating point.
@@ -313,32 +394,39 @@ calibrate() {
   # Knee: climb while the marginal MHz-per-watt stays within KNEE_FRACTION%
   # of the best marginal step seen; stop at the first big efficiency drop.
   local knee_idx best=0 j
-  KNEE_FREQ="${F[0]}"; KNEE_WATTS="${W[0]}"; knee_idx=0
-  for (( j = 1; j < ${#F[@]}; j++ )); do
+  KNEE_FREQ="${F[0]}"
+  KNEE_WATTS="${W[0]}"
+  knee_idx=0
+  for ((j = 1; j < ${#F[@]}; j++)); do
     local marg
-    marg=$(awk -v f1="${F[$((j-1))]}" -v f2="${F[$j]}" \
-      -v w1="${W[$((j-1))]}" -v w2="${W[$j]}" 'BEGIN {
+    marg=$(awk -v f1="${F[$((j - 1))]}" -v f2="${F[$j]}" \
+      -v w1="${W[$((j - 1))]}" -v w2="${W[$j]}" 'BEGIN {
         dw = w2 - w1; if (dw <= 0) dw = 0.1
         printf "%d", ((f2 - f1) / 1000.0) / dw
       }')
-    (( marg > best )) && best="$marg"
-    local floor=$(( best * KNEE_FRACTION / 100 ))
-    if (( marg >= floor )); then knee_idx="$j"; else break; fi
+    ((marg > best)) && best="$marg"
+    local floor=$((best * KNEE_FRACTION / 100))
+    if ((marg >= floor)); then
+      knee_idx="$j"
+    else
+      break
+    fi
   done
-  KNEE_FREQ="${F[$knee_idx]}"; KNEE_WATTS="${W[$knee_idx]}"
+  KNEE_FREQ="${F[$knee_idx]}"
+  KNEE_WATTS="${W[$knee_idx]}"
   save_tiers
   NEED_CAL=0
   apply_cap "$KNEE_FREQ"
-  log "calibrated: knee=$(( KNEE_FREQ / 1000 ))MHz at ${KNEE_WATTS}W" \
-    "(max $(( MAX_FREQ / 1000 ))MHz)"
+  log "calibrated: knee=$((KNEE_FREQ / 1000))MHz at ${KNEE_WATTS}W" \
+    "(max $((MAX_FREQ / 1000))MHz)"
 }
 
 #######################################
-# One control cycle: float the cap continuously between the knee and the factory
-# maximum. It rises while the workload is busy AND compute-bound (frequency buys
-# real work), and falls toward the knee when idle or memory/IO-bound (frequency
-# wasted). Compute-boundedness comes from perf IPC; without perf, utilization
-# alone drives it.
+# One control cycle: float the cap continuously between the knee and the
+# factory maximum. It rises while the workload is busy AND compute-bound
+# (frequency buys real work), and falls toward the knee when idle or
+# memory/IO-bound (frequency wasted). Compute-boundedness comes from perf
+# IPC; without perf, utilization alone drives it.
 # Globals:
 #   CUR_CAP (read/write); KNEE_FREQ, MAX_FREQ, HAVE_PERF and tuning (read)
 # Arguments:
@@ -350,63 +438,88 @@ regulate() {
 
   if [[ -n "$ipc" ]]; then
     # Raise only when frequency actually buys work; otherwise ease back.
-    if (( util >= ESCALATE_UTIL && ipc >= IPC_BUSY )); then want=1
-    elif (( util < DEESCALATE_UTIL || ipc < IPC_BUSY )); then want=-1
+    if ((util >= ESCALATE_UTIL && ipc >= IPC_BUSY)); then
+      want=1
+    elif ((util < DEESCALATE_UTIL || ipc < IPC_BUSY)); then
+      want=-1
     fi
   else
-    if (( util >= ESCALATE_UTIL )); then want=1
-    elif (( util < DEESCALATE_UTIL )); then want=-1
+    if ((util >= ESCALATE_UTIL)); then
+      want=1
+    elif ((util < DEESCALATE_UTIL)); then
+      want=-1
     fi
   fi
 
-  step=$(( (MAX_FREQ - KNEE_FREQ) * CAP_STEP_PCT / 100 ))
-  (( step < 1 )) && step=1
+  step=$(((MAX_FREQ - KNEE_FREQ) * CAP_STEP_PCT / 100))
+  ((step < 1)) && step=1
   newcap="$CUR_CAP"
-  (( want > 0 )) && newcap=$(( CUR_CAP + step ))
-  (( want < 0 )) && newcap=$(( CUR_CAP - step ))
-  (( newcap > MAX_FREQ )) && newcap="$MAX_FREQ"
-  (( newcap < KNEE_FREQ )) && newcap="$KNEE_FREQ"
+  ((want > 0)) && newcap=$((CUR_CAP + step))
+  ((want < 0)) && newcap=$((CUR_CAP - step))
+  ((newcap > MAX_FREQ)) && newcap="$MAX_FREQ"
+  ((newcap < KNEE_FREQ)) && newcap="$KNEE_FREQ"
 
-  if (( newcap != CUR_CAP )); then
+  if ((newcap != CUR_CAP)); then
     apply_cap "$newcap"
-    log "cap -> $(( newcap / 1000 ))MHz (util=${util}% ipc=${ipc:-n/a})"
+    log "cap -> $((newcap / 1000))MHz (util=${util}% ipc=${ipc:-n/a})"
   fi
 }
 
-# Set the SATA link power policy (low power between commands, instant wake on
-# I/O). Safe for a live ZFS pool: the platters keep spinning, only the link idles.
+#######################################
+# Set the SATA link power policy (low power between commands, instant wake
+# on I/O). Safe for a live ZFS pool: the platters keep spinning, only the
+# link idles.
+# Globals:
+#   SATA_ALPM (read)
+# Outputs:
+#   Log line when applied.
+#######################################
 apply_sata_alpm() {
   [[ -n "$SATA_ALPM" ]] || return 0
   local h n=0
   for h in /sys/class/scsi_host/host*/link_power_management_policy; do
     [[ -w "$h" ]] || continue
-    echo "$SATA_ALPM" > "$h" 2>/dev/null && (( n++ ))
+    echo "$SATA_ALPM" >"$h" 2>/dev/null && n=$((n + 1))
   done
-  (( n > 0 )) && log "SATA link PM: ${SATA_ALPM} on ${n} host(s)"
+  ((n > 0)) && log "SATA link PM: ${SATA_ALPM} on ${n} host(s)"
 }
 
+#######################################
 # Let idle PCI devices enter low power and wake on demand.
+# Globals:
+#   PCI_RUNTIME_PM (read)
+# Outputs:
+#   Log line when applied.
+#######################################
 apply_pci_runtime_pm() {
   [[ "$PCI_RUNTIME_PM" == 1 ]] || return 0
   local c n=0
   for c in /sys/bus/pci/devices/*/power/control; do
     [[ -w "$c" ]] || continue
-    echo auto > "$c" 2>/dev/null && (( n++ ))
+    echo auto >"$c" 2>/dev/null && n=$((n + 1))
   done
-  (( n > 0 )) && log "PCI runtime PM: auto on ${n} device(s)"
+  ((n > 0)) && log "PCI runtime PM: auto on ${n} device(s)"
 }
 
+#######################################
+# Set the PCIe ASPM policy when configured.
+# Globals:
+#   PCIE_ASPM (read)
+# Outputs:
+#   Log line when applied.
+#######################################
 apply_pcie_aspm() {
   [[ -n "$PCIE_ASPM" ]] || return 0
   local f=/sys/module/pcie_aspm/parameters/policy
-  [[ -w "$f" ]] && echo "$PCIE_ASPM" > "$f" 2>/dev/null \
+  [[ -w "$f" ]] && echo "$PCIE_ASPM" >"$f" 2>/dev/null \
     && log "PCIe ASPM policy: ${PCIE_ASPM}"
 }
 
 #######################################
 # Whole-disk kernel names that back any ZFS pool, whether imported or only
-# carrying a zfs_member signature (an exported/foreign pool). These must never
-# be spun down: ZFS writes metadata continuously and would thrash the drive.
+# carrying a zfs_member signature (an exported/foreign pool). These must
+# never be spun down: ZFS writes metadata continuously and would thrash the
+# drive.
 # Outputs:
 #   One disk name (sdX, nvmeXnY) per line.
 #######################################
@@ -422,22 +535,26 @@ zfs_backed_disks() {
 }
 
 #######################################
-# Spin down idle rotational disks after DISK_SPINDOWN_MIN minutes. ZFS-backed,
-# mounted, and root-backing disks are excluded (safety); wake is automatic on
-# access. Opt-in (DISK_SPINDOWN_MIN=0 disables it).
+# Spin down idle rotational disks after DISK_SPINDOWN_MIN minutes.
+# ZFS-backed, mounted, and root-backing disks are excluded (safety); wake is
+# automatic on access. Opt-in (DISK_SPINDOWN_MIN=0 disables it).
+# Globals:
+#   DISK_SPINDOWN_MIN (read)
+# Outputs:
+#   Log line per disk configured.
 #######################################
 apply_disk_spindown() {
-  (( DISK_SPINDOWN_MIN > 0 )) || return 0
+  ((DISK_SPINDOWN_MIN > 0)) || return 0
   if ! command -v hdparm >/dev/null 2>&1; then
     log "disk spindown requested but hdparm is missing"
     return 0
   fi
   local sval
-  if (( DISK_SPINDOWN_MIN <= 20 )); then
-    sval=$(( DISK_SPINDOWN_MIN * 12 ))          # 1..240 -> 5 s units
+  if ((DISK_SPINDOWN_MIN <= 20)); then
+    sval=$((DISK_SPINDOWN_MIN * 12)) # 1..240 -> 5 s units
   else
-    sval=$(( 240 + (DISK_SPINDOWN_MIN + 29) / 30 ))  # 241..251 -> 30 min units
-    (( sval > 251 )) && sval=251
+    sval=$((240 + (DISK_SPINDOWN_MIN + 29) / 30)) # 241..251 -> 30 min units
+    ((sval > 251)) && sval=251
   fi
   local protected d name
   protected=" $(zfs_backed_disks | sort -u | tr '\n' ' ') "
@@ -448,7 +565,10 @@ apply_disk_spindown() {
     [[ "$(cat "$d/queue/rotational" 2>/dev/null)" == 1 ]] || continue
     # Only genuine internal ATA/SATA/SAS disks (never USB/SD/loop).
     tran=$(lsblk -dno TRAN "/dev/$name" 2>/dev/null)
-    case "$tran" in sata | sas | ata) ;; *) continue ;; esac
+    case "$tran" in
+      sata | sas | ata) ;;
+      *) continue ;;
+    esac
     [[ "$protected" == *" $name "* ]] && continue
     # Skip if any partition (or the disk) is mounted, incl. the root disk.
     lsblk -rno MOUNTPOINT "/dev/$name" 2>/dev/null | grep -q . && continue
@@ -457,16 +577,23 @@ apply_disk_spindown() {
   done
 }
 
-# Cap GPU power at GPU_POWER_PCT% of its factory maximum (datasheet-bounded, no
-# crash risk). Auto-detects NVIDIA (nvidia-smi) and AMD (amdgpu sysfs power cap).
+#######################################
+# Cap GPU power at GPU_POWER_PCT% of its factory maximum (datasheet-bounded,
+# no crash risk). Auto-detects NVIDIA (nvidia-smi) and AMD (amdgpu sysfs
+# power cap).
+# Globals:
+#   GPU_POWER_PCT (read)
+# Outputs:
+#   Log line(s) when applied.
+#######################################
 apply_gpu_power() {
-  (( GPU_POWER_PCT > 0 )) || return 0
+  ((GPU_POWER_PCT > 0)) || return 0
   if command -v nvidia-smi >/dev/null 2>&1; then
     local maxw capw
-    maxw=$(nvidia-smi --query-gpu=power.max_limit --format=csv,noheader,nounits \
-      2>/dev/null | head -1 | cut -d. -f1)
+    maxw=$(nvidia-smi --query-gpu=power.max_limit \
+      --format=csv,noheader,nounits 2>/dev/null | head -1 | cut -d. -f1)
     if [[ "$maxw" =~ ^[0-9]+$ ]]; then
-      capw=$(( maxw * GPU_POWER_PCT / 100 ))
+      capw=$((maxw * GPU_POWER_PCT / 100))
       nvidia-smi -pm 1 >/dev/null 2>&1
       nvidia-smi -pl "$capw" >/dev/null 2>&1 \
         && log "NVIDIA GPU power cap: ${capw}W (${GPU_POWER_PCT}% of ${maxw}W)"
@@ -475,48 +602,64 @@ apply_gpu_power() {
   local f max cap n=0
   for f in /sys/class/drm/card*/device/hwmon/hwmon*/power1_cap; do
     [[ -w "$f" ]] || continue
-    max=$(cat "${f}_max" 2>/dev/null); [[ "$max" =~ ^[0-9]+$ ]] || continue
-    cap=$(( max * GPU_POWER_PCT / 100 ))
-    echo "$cap" > "$f" 2>/dev/null && (( n++ ))
+    max=$(cat "${f}_max" 2>/dev/null)
+    [[ "$max" =~ ^[0-9]+$ ]] || continue
+    cap=$((max * GPU_POWER_PCT / 100))
+    echo "$cap" >"$f" 2>/dev/null && n=$((n + 1))
   done
-  (( n > 0 )) && log "AMD GPU power cap: ${GPU_POWER_PCT}% of max on ${n} card(s)"
+  ((n > 0)) \
+    && log "AMD GPU power cap: ${GPU_POWER_PCT}% of max on ${n} card(s)"
 }
 
-# USB autosuspend: 'on' saves power, 'off' keeps links always powered (stability),
-# 'leave' does not touch the kernel default.
+#######################################
+# USB autosuspend: 'on' saves power, 'off' keeps links always powered
+# (stability), 'leave' does not touch the kernel default.
+# Globals:
+#   USB_AUTOSUSPEND (read)
+# Outputs:
+#   Log line when applied.
+#######################################
 apply_usb_autosuspend() {
   local val
   case "$USB_AUTOSUSPEND" in
-    on)  val=auto ;;
+    on) val=auto ;;
     off) val=on ;;
-    *)   return 0 ;;
+    *) return 0 ;;
   esac
   local c n=0
   for c in /sys/bus/usb/devices/*/power/control; do
     [[ -w "$c" ]] || continue
-    echo "$val" > "$c" 2>/dev/null && (( n++ ))
+    echo "$val" >"$c" 2>/dev/null && n=$((n + 1))
   done
-  (( n > 0 )) && log "USB autosuspend: ${USB_AUTOSUSPEND} on ${n} device(s)"
+  ((n > 0)) && log "USB autosuspend: ${USB_AUTOSUSPEND} on ${n} device(s)"
 }
 
-# Re-enable any CPU idle C-state that was disabled, so deep idle power saving is
-# available. Safe: enabling idle states never destabilises the CPU.
+#######################################
+# Re-enable any CPU idle C-state that was disabled, so deep idle power
+# saving is available. Safe: enabling idle states never destabilises the
+# CPU.
+# Globals:
+#   CSTATES_ENSURE, CPUBASE (read)
+# Outputs:
+#   Log line when applied.
+#######################################
 ensure_cstates() {
   [[ "$CSTATES_ENSURE" == 1 ]] || return 0
   local s n=0
   for s in "${CPUBASE}"/cpu[0-9]*/cpuidle/state[0-9]*/disable; do
     [[ -w "$s" ]] || continue
     [[ "$(cat "$s" 2>/dev/null)" == 1 ]] || continue
-    echo 0 > "$s" 2>/dev/null && (( n++ ))
+    echo 0 >"$s" 2>/dev/null && n=$((n + 1))
   done
-  (( n > 0 )) && log "C-states: re-enabled ${n} disabled idle state(s)"
+  ((n > 0)) && log "C-states: re-enabled ${n} disabled idle state(s)"
 }
 
 #######################################
-# Scale vm.swappiness from the averaged CPU load: low under heavy load (keep the
-# working set resident), higher at idle (let the kernel reclaim inactive pages
-# for cache). Driven by the interval-averaged utilization, not the instantaneous
-# frequency, which schedutil changes every few ms and would make swappiness flap.
+# Scale vm.swappiness from the averaged CPU load: low under heavy load (keep
+# the working set resident), higher at idle (let the kernel reclaim inactive
+# pages for cache). Driven by the interval-averaged utilization, not the
+# instantaneous frequency, which schedutil changes every few ms and would
+# make swappiness flap.
 # Globals:
 #   SWAPPINESS_* (read), LAST_SWAPPINESS (write)
 # Arguments:
@@ -525,16 +668,23 @@ ensure_cstates() {
 apply_swappiness() {
   [[ "$SWAPPINESS_DYNAMIC" == 1 ]] || return 0
   [[ -w /proc/sys/vm/swappiness ]] || return 0
-  local sw=$(( SWAPPINESS_MAX - (SWAPPINESS_MAX - SWAPPINESS_MIN) * $1 / 100 ))
-  (( sw < SWAPPINESS_MIN )) && sw="$SWAPPINESS_MIN"
-  (( sw > SWAPPINESS_MAX )) && sw="$SWAPPINESS_MAX"
-  local delta=$(( sw > LAST_SWAPPINESS ? sw - LAST_SWAPPINESS : LAST_SWAPPINESS - sw ))
-  if (( LAST_SWAPPINESS < 0 || delta >= SWAPPINESS_STEP )); then
-    echo "$sw" > /proc/sys/vm/swappiness 2>/dev/null && LAST_SWAPPINESS="$sw"
+  local sw=$((SWAPPINESS_MAX - (SWAPPINESS_MAX - SWAPPINESS_MIN) * $1 / 100))
+  ((sw < SWAPPINESS_MIN)) && sw="$SWAPPINESS_MIN"
+  ((sw > SWAPPINESS_MAX)) && sw="$SWAPPINESS_MAX"
+  local delta
+  if ((sw > LAST_SWAPPINESS)); then
+    delta=$((sw - LAST_SWAPPINESS))
+  else
+    delta=$((LAST_SWAPPINESS - sw))
+  fi
+  if ((LAST_SWAPPINESS < 0 || delta >= SWAPPINESS_STEP)); then
+    echo "$sw" >/proc/sys/vm/swappiness 2>/dev/null && LAST_SWAPPINESS="$sw"
   fi
 }
 
-# Apply every peripheral power setting; each function no-ops if unsupported.
+#######################################
+# Apply every peripheral power setting; each callee no-ops if unsupported.
+#######################################
 apply_peripheral_pm() {
   apply_sata_alpm
   apply_pci_runtime_pm
@@ -545,57 +695,155 @@ apply_peripheral_pm() {
   apply_disk_spindown
 }
 
+#######################################
+# Apply the governor, EPP and minimum-frequency pin.
+# Globals:
+#   GOVERNOR, EPP, SET_MIN_TO_HW, MIN_FREQ, CPUBASE (read)
+# Outputs:
+#   Log line when the governor is set.
+#######################################
 apply_static_settings() {
-  local gov; gov=$(choose_governor)
-  [[ -n "$gov" ]] && { cpufreq_write_all scaling_governor "$gov"; log "governor -> $gov"; }
+  local gov
+  gov=$(choose_governor)
+  if [[ -n "$gov" ]]; then
+    cpufreq_write_all scaling_governor "$gov"
+    log "governor -> $gov"
+  fi
   [[ -w "${CPUBASE}/cpu0/cpufreq/energy_performance_preference" ]] \
     && cpufreq_write_all energy_performance_preference "$EPP"
   [[ "$SET_MIN_TO_HW" == 1 && "$MIN_FREQ" -gt 0 ]] \
     && cpufreq_write_all scaling_min_freq "$MIN_FREQ"
 }
 
+#######################################
+# Remove the frequency cap on exit, restoring the factory maximum.
+# Globals:
+#   MAX_FREQ (read)
+# Outputs:
+#   Log line.
+#######################################
 cleanup() {
   log "stopping -> removing frequency cap"
   [[ "$MAX_FREQ" -gt 0 ]] && cpufreq_write_all scaling_max_freq "$MAX_FREQ"
 }
 
+#######################################
+# Format the GPU power-cap status line for --check.
+# Globals:
+#   GPU_POWER_PCT (read)
+# Outputs:
+#   Status string to stdout (no trailing newline).
+#######################################
+gpu_cap_status() {
+  if ((GPU_POWER_PCT > 0)); then
+    printf '%s' "${GPU_POWER_PCT}%"
+  else
+    printf '%s' off
+  fi
+  command -v nvidia-smi >/dev/null 2>&1 && printf '%s' ' (nvidia present)'
+  compgen -G '/sys/class/drm/card*/device/hwmon/hwmon*/power1_cap' \
+    >/dev/null 2>&1 && printf '%s' ' (amdgpu present)'
+}
+
+#######################################
+# Format the swappiness status line for --check.
+# Globals:
+#   SWAPPINESS_DYNAMIC, SWAPPINESS_MIN, SWAPPINESS_MAX (read)
+# Outputs:
+#   Status string to stdout.
+#######################################
+swappiness_status() {
+  if [[ "$SWAPPINESS_DYNAMIC" == 1 ]]; then
+    local now
+    now=$(cat /proc/sys/vm/swappiness 2>/dev/null)
+    echo "dynamic ${SWAPPINESS_MIN}..${SWAPPINESS_MAX} (now ${now})"
+  else
+    echo static
+  fi
+}
+
+#######################################
+# Print detected features, calibrated tiers and live metrics.
+# Globals:
+#   Many tuning and state globals (read).
+# Outputs:
+#   Human-readable status report to stdout.
+#######################################
 do_check() {
   detect_features
   echo "--- Governor ---"
-  echo "  current : $(cat "${CPUBASE}/cpu0/cpufreq/scaling_governor" 2>/dev/null || echo n/a)"
-  echo "  available: $(cat "${CPUBASE}/cpu0/cpufreq/scaling_available_governors" 2>/dev/null || echo n/a)"
+  local cur avail
+  cur=$(cat "${CPUBASE}/cpu0/cpufreq/scaling_governor" 2>/dev/null || echo n/a)
+  echo "  current : $cur"
+  avail=$(cat "${CPUBASE}/cpu0/cpufreq/scaling_available_governors" \
+    2>/dev/null || echo n/a)
+  echo "  available: $avail"
   echo "--- Frequency ---"
-  echo "  min/max : $(( MIN_FREQ / 1000 ))/$(( MAX_FREQ / 1000 )) MHz"
-  echo "  cap now : $(( $(cat "${CPUBASE}/cpu0/cpufreq/scaling_max_freq" 2>/dev/null || echo 0) / 1000 )) MHz"
+  echo "  min/max : $((MIN_FREQ / 1000))/$((MAX_FREQ / 1000)) MHz"
+  local capnow
+  capnow=$(cat "${CPUBASE}/cpu0/cpufreq/scaling_max_freq" 2>/dev/null || echo 0)
+  echo "  cap now : $((capnow / 1000)) MHz"
   echo "--- Power (RAPL) ---"
-  if [[ "$HAVE_RAPL" == 1 ]]; then echo "  package : $(read_watts 1) W"; else echo "  n/a"; fi
+  if [[ "$HAVE_RAPL" == 1 ]]; then
+    echo "  package : $(read_watts 1) W"
+  else
+    echo "  n/a"
+  fi
   echo "--- Utilization ---"
-  cpu_util >/dev/null; sleep 1; echo "  $(cpu_util)%"
+  cpu_util >/dev/null
+  sleep 1
+  echo "  $(cpu_util)%"
   echo "--- Calibrated tiers ---"
   if load_tiers; then
-    echo "  knee=$(( KNEE_FREQ / 1000 ))MHz @ ${KNEE_WATTS}W  max=$(( MAX_FREQ / 1000 ))MHz"
+    local kf mf
+    kf=$((KNEE_FREQ / 1000))
+    mf=$((MAX_FREQ / 1000))
+    echo "  knee=${kf}MHz @ ${KNEE_WATTS}W  max=${mf}MHz"
   else
     echo "  (not calibrated yet)"
   fi
   echo "--- Peripheral PM ---"
   echo "  SATA ALPM : ${SATA_ALPM:-off}"
-  echo "  PCI rtpm  : $([[ "$PCI_RUNTIME_PM" == 1 ]] && echo on || echo off)"
+  local pcirtpm
+  if [[ "$PCI_RUNTIME_PM" == 1 ]]; then
+    pcirtpm=on
+  else
+    pcirtpm=off
+  fi
+  echo "  PCI rtpm  : $pcirtpm"
   echo "  USB susp  : ${USB_AUTOSUSPEND}"
-  echo "  GPU cap   : $((( GPU_POWER_PCT > 0 )) && echo "${GPU_POWER_PCT}%" || echo off)$(command -v nvidia-smi >/dev/null 2>&1 && echo ' (nvidia present)')$(compgen -G '/sys/class/drm/card*/device/hwmon/hwmon*/power1_cap' >/dev/null 2>&1 && echo ' (amdgpu present)')"
-  echo "  C-states  : $([[ "$CSTATES_ENSURE" == 1 ]] && echo ensure-enabled || echo leave)"
-  echo "  swappiness: $([[ "$SWAPPINESS_DYNAMIC" == 1 ]] && echo "dynamic ${SWAPPINESS_MIN}..${SWAPPINESS_MAX} (now $(cat /proc/sys/vm/swappiness 2>/dev/null))" || echo static)"
-  if (( DISK_SPINDOWN_MIN > 0 )); then
-    echo "  disk spin : ${DISK_SPINDOWN_MIN}min (ZFS-excluded: $(zfs_backed_disks | sort -u | tr '\n' ' '))"
+  echo "  GPU cap   : $(gpu_cap_status)"
+  local cstates
+  if [[ "$CSTATES_ENSURE" == 1 ]]; then
+    cstates=ensure-enabled
+  else
+    cstates=leave
+  fi
+  echo "  C-states  : $cstates"
+  echo "  swappiness: $(swappiness_status)"
+  if ((DISK_SPINDOWN_MIN > 0)); then
+    local zex
+    zex=$(zfs_backed_disks | sort -u | tr '\n' ' ')
+    echo "  disk spin : ${DISK_SPINDOWN_MIN}min (ZFS-excluded: $zex)"
   else
     echo "  disk spin : off"
   fi
 }
 
+#######################################
+# Run the control loop: detect features, apply settings, then float the cap
+# and peripheral PM on each poll interval.
+# Globals:
+#   Many tuning and state globals (read/write).
+# Outputs:
+#   Log lines; installs EXIT/INT/TERM traps.
+#######################################
 run_daemon() {
   detect_features
-  apply_peripheral_pm            # SATA/PCI/disk PM works even without cpufreq.
+  apply_peripheral_pm # SATA/PCI/disk PM works even without cpufreq.
   if [[ "$HAVE_CPUFREQ" != 1 ]]; then
-    log "no cpufreq interface -> peripheral power management applied, no cap loop"
+    log "no cpufreq interface -> peripheral power management applied," \
+      "no cap loop"
     exit 0
   fi
   trap cleanup EXIT
@@ -603,53 +851,76 @@ run_daemon() {
   apply_static_settings
 
   if load_tiers; then
-    log "loaded tiers: knee=$(( KNEE_FREQ / 1000 ))MHz @ ${KNEE_WATTS}W"
+    log "loaded tiers: knee=$((KNEE_FREQ / 1000))MHz @ ${KNEE_WATTS}W"
     apply_cap "$KNEE_FREQ"
   else
     NEED_CAL=1
     log "no calibration yet -> will calibrate at the next idle window"
   fi
 
-  cpu_util >/dev/null   # Prime the utilization delta.
+  cpu_util >/dev/null # Prime the utilization delta.
   local loop_n=0
   while :; do
     sleep "$POLL_INTERVAL"
-    local util; util=$(cpu_util)
+    local util
+    util=$(cpu_util)
 
     # Swappiness follows the averaged load every cycle (cheap, stable signal).
     apply_swappiness "$util"
 
-    # Periodically re-apply peripheral PM (new hotplugged devices, fresh ZFS scan).
-    (( ++loop_n % REAPPLY_EVERY == 0 )) && apply_peripheral_pm
+    # Periodically re-apply peripheral PM (hotplugged devices, fresh ZFS scan).
+    ((++loop_n % REAPPLY_EVERY == 0)) && apply_peripheral_pm
 
     # Track idle windows for (re)calibration.
-    if (( util < IDLE_UTIL )); then
-      (( IDLE_ELAPSED += POLL_INTERVAL ))
+    if ((util < IDLE_UTIL)); then
+      ((IDLE_ELAPSED += POLL_INTERVAL))
     else
       IDLE_ELAPSED=0
     fi
 
-    if (( NEED_CAL == 1 && IDLE_ELAPSED >= IDLE_WINDOW )); then
+    if ((NEED_CAL == 1 && IDLE_ELAPSED >= IDLE_WINDOW)); then
       calibrate
       IDLE_ELAPSED=0
       continue
     fi
 
-    (( NEED_CAL == 1 )) && continue   # Hold factory settings until calibrated.
+    ((NEED_CAL == 1)) && continue # Hold factory settings until calibrated.
     regulate "$util"
   done
 }
 
 # The efficiency knee is a stable property of the CPU, so there is no runtime
-# "watt drift" recalibration: re-measure only on first boot or via --calibrate
-# (e.g. after a CPU swap). KNEE_WATTS is kept for information only.
+# "watt drift" recalibration: re-measure only on first boot or via
+# --calibrate (e.g. after a CPU swap). KNEE_WATTS is kept for information
+# only.
 
+#######################################
+# Dispatch on the command-line mode.
+# Arguments:
+#   $1 - mode flag (default --daemon)
+# Returns:
+#   2 on an unknown flag.
+#######################################
 main() {
   case "${1:---daemon}" in
     --check) do_check ;;
-    --restore) detect_features; cleanup ;;
-    --calibrate) detect_features; apply_static_settings; calibrate ;;
-    --once) detect_features; echo "util=$( cpu_util >/dev/null; sleep 1; cpu_util )%" ;;
+    --restore)
+      detect_features
+      cleanup
+      ;;
+    --calibrate)
+      detect_features
+      apply_static_settings
+      calibrate
+      ;;
+    --once)
+      detect_features
+      echo "util=$(
+        cpu_util >/dev/null
+        sleep 1
+        cpu_util
+      )%"
+      ;;
     --daemon) run_daemon ;;
     *)
       echo "usage: powerctl [--daemon|--check|--calibrate|--restore|--once]" >&2
