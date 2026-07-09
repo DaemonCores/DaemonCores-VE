@@ -27,6 +27,7 @@ permissions:
   packages: write
   pages: write
   id-token: write
+  issues: write
 
 jobs:
   meta:
