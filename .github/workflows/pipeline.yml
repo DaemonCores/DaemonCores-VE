@@ -9,6 +9,10 @@ on:
     - cron: '0 5 1 * *'
   workflow_dispatch:
     inputs:
+      update_base:
+        description: 'Rebuild debian-bootc base image first (triggers its pipeline and waits)'
+        type: boolean
+        default: false
       run_debs:
         description: 'Build .deb packages'
         type: boolean
@@ -42,32 +46,60 @@ jobs:
             name="${name//-/ }"               # replace dashes with spaces
             echo "product_name=$name" >> "$GITHUB_OUTPUT"
 
+  base:
+    name: Rebuild debian-bootc base first
+    # Optional: only when the checkbox is ticked on manual dispatch. Rebuilds
+    # the upstream base image so the Proxmox image below builds on top of a
+    # fresh base. If this fails, the downstream jobs are skipped (they gate on
+    # base success/skipped), so the run goes red instead of shipping on a
+    # stale base.
+    if: ${{ inputs.update_base }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger debian-bootc pipeline and wait
+        uses: DaemonCores/DaemonCores-CI/trigger-pipeline@main
+        with:
+          repo: DaemonCores/debian-bootc
+          workflow: pipeline.yml
+          ref: main
+          # PAT with Actions read+write on debian-bootc (GITHUB_TOKEN cannot
+          # dispatch cross-repo). Add it as a repo/org secret.
+          token: ${{ secrets.PAT_DISPATCH }}
+
   debs:
     name: Build .deb packages
-    if: ${{ github.event_name == 'schedule' || inputs.run_debs }}
+    needs: [base]
+    # always() lets debs run even when base was skipped (update_base off).
+    if: |
+      always() &&
+      (github.event_name == 'schedule' || inputs.run_debs) &&
+      (needs.base.result == 'success' || needs.base.result == 'skipped')
     uses: ./.github/workflows/bootc-debs-builder.yml
     secrets: inherit
 
   image:
     name: Build container image
-    needs: [debs]
-    # always() forces evaluation even when the debs job was skipped.
-    # image runs if: checked AND (debs succeeded OR debs was skipped).
+    needs: [debs, base]
+    # always() forces evaluation even when the debs/base jobs were skipped.
+    # image runs if: checked AND (base ok OR skipped) AND (debs ok OR skipped).
     if: |
       always() &&
       (github.event_name == 'schedule' || inputs.run_image) &&
+      (needs.base.result == 'success' || needs.base.result == 'skipped') &&
       (needs.debs.result == 'success' || needs.debs.result == 'skipped')
     uses: DaemonCores/DaemonCores-CI/.github/workflows/bootc-build.yml@main
     secrets: inherit
 
   iso:
     name: Build ISO
-    needs: [debs, image, meta]
-    # always() forces evaluation even when debs or image were skipped.
-    # iso runs if: checked AND (debs ok OR skipped) AND (image ok OR skipped).
+    needs: [debs, image, meta, base]
+    # always() forces evaluation even when debs, image or base were skipped.
+    # iso runs if: checked AND (base ok OR skipped) AND (debs ok OR skipped)
+    # AND (image ok OR skipped).
     if: |
       always() &&
       (github.event_name == 'schedule' || inputs.run_iso) &&
+      (needs.base.result == 'success' || needs.base.result == 'skipped') &&
       (needs.debs.result == 'success' || needs.debs.result == 'skipped') &&
       (needs.image.result == 'success' || needs.image.result == 'skipped') &&
       needs.meta.result == 'success'
