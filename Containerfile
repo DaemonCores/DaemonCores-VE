@@ -51,6 +51,7 @@ RUN chmod +x /usr/sbin/policy-rc.d \
         fanctl \
         powerctl \
         dc-firewall-seed \
+        dc-config-zfs \
         proxmox-firewall \
         pvect-ostree \
         compose2bootc \
