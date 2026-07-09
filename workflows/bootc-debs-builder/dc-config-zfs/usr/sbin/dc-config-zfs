@@ -1,58 +1,98 @@
 #!/bin/bash
 #
-# dc-config-zfs — persist the Proxmox VE cluster config (pmxcfs) on a ZFS dataset.
+# dc-config-zfs - persist the Proxmox VE cluster config (pmxcfs) on a ZFS
+# dataset.
 #
-# /var/lib/pve-cluster/config.db backs /etc/pve. On the single OS disk (btrfs) it
-# dies with the disk or a reinstall. This relocates it onto a ZFS dataset (on
+# /var/lib/pve-cluster/config.db backs /etc/pve. On the single OS disk (btrfs)
+# it dies with the disk or a reinstall. This relocates it onto a ZFS dataset (on
 # redundant data storage the installer never touches) and re-mounts it there
 # before pve-cluster starts, so the configuration survives.
 #
 # Usage:
-#   dc-config-zfs enable <pool/dataset>   # one-time: migrate the config + persist
-#   dc-config-zfs mount                    # boot-time: mount dataset -> /var/lib/pve-cluster
+#   dc-config-zfs enable <pool/dataset>   one-time: migrate + persist the config
+#   dc-config-zfs mount                   boot-time: mount the dataset at target
 set -euo pipefail
 
-CONF=/etc/dc-config-zfs/dc-config-zfs.conf
-TARGET=/var/lib/pve-cluster
+readonly CONF=/etc/dc-config-zfs/dc-config-zfs.conf
+readonly TARGET=/var/lib/pve-cluster
 
-# Read the configured dataset (empty when the feature is disabled).
-_dataset() {
-    [[ -f "$CONF" ]] && . "$CONF"
-    echo "${DATASET:-}"
+#######################################
+# Print the configured dataset, empty when the feature is disabled.
+# Globals:
+#   CONF
+# Outputs:
+#   Writes the dataset name to stdout.
+#######################################
+configured_dataset() {
+  # shellcheck source=/dev/null
+  [[ -f "${CONF}" ]] && . "${CONF}"
+  echo "${DATASET:-}"
 }
 
-case "${1:-}" in
+#######################################
+# Mount the configured dataset at TARGET before pve-cluster starts. No-op when
+# the feature is disabled or the dataset is missing.
+# Globals:
+#   TARGET
+#######################################
+do_mount() {
+  local dataset
+  dataset=$(configured_dataset)
+  [[ -n "${dataset}" ]] || return 0
+  if ! zfs list -H -o name "${dataset}" >/dev/null 2>&1; then
+    echo "dc-config-zfs: dataset ${dataset} not found, skipping." >&2
+    return 0
+  fi
+  mountpoint -q "${TARGET}" && return 0
+  mkdir -p "${TARGET}"
+  mount -t zfs "${dataset}" "${TARGET}"
+}
+
+#######################################
+# Migrate the current pmxcfs config onto a ZFS dataset and persist the choice.
+# Globals:
+#   CONF, TARGET
+# Arguments:
+#   $1 - pool/dataset
+#######################################
+do_enable() {
+  local dataset="$1" staging
+  # pmxcfs must not be writing config.db while we migrate it.
+  systemctl stop pve-cluster.service 2>/dev/null || true
+  zfs list -H -o name "${dataset}" >/dev/null 2>&1 \
+    || zfs create -p "${dataset}"
+  # We mount it explicitly at TARGET, so keep it out of ZFS' auto-mount.
+  zfs set mountpoint=legacy "${dataset}"
+  # Seed the dataset from the existing config once, while it is still empty.
+  staging=$(mktemp -d)
+  mount -t zfs "${dataset}" "${staging}"
+  if [[ -z "$(ls -A "${staging}" 2>/dev/null)" && -d "${TARGET}" ]]; then
+    cp -a "${TARGET}/." "${staging}/"
+  fi
+  umount "${staging}"
+  rmdir "${staging}"
+  printf 'DATASET=%s\n' "${dataset}" >"${CONF}"
+  do_mount
+  systemctl start pve-cluster.service 2>/dev/null || true
+  echo "dc-config-zfs: pmxcfs config now persisted on ${dataset}."
+}
+
+#######################################
+# Dispatch the requested subcommand.
+# Arguments:
+#   $1 - enable <pool/dataset> | mount
+#######################################
+main() {
+  case "${1:-}" in
     enable)
-        DS="${2:?usage: dc-config-zfs enable <pool/dataset>}"
-        # pmxcfs must not be writing config.db while we migrate it.
-        systemctl stop pve-cluster.service 2>/dev/null || true
-        # Create the dataset if absent; keep it out of the auto-mount namespace
-        # (we mount it explicitly at $TARGET, before ZFS' own mounts matter).
-        zfs list -H -o name "$DS" >/dev/null 2>&1 || zfs create -p "$DS"
-        zfs set mountpoint=legacy "$DS"
-        # Seed the dataset from the existing config once, if it is still empty.
-        MP=$(mktemp -d)
-        mount -t zfs "$DS" "$MP"
-        if [[ -z "$(ls -A "$MP" 2>/dev/null)" && -d "$TARGET" ]]; then
-            cp -a "$TARGET"/. "$MP"/
-        fi
-        umount "$MP"; rmdir "$MP"
-        printf 'DATASET=%s\n' "$DS" > "$CONF"
-        "$0" mount
-        systemctl start pve-cluster.service 2>/dev/null || true
-        echo "dc-config-zfs: pmxcfs config now persisted on ${DS}."
-        ;;
-    mount)
-        DS="$(_dataset)"
-        [[ -n "$DS" ]] || exit 0                                  # disabled -> no-op
-        zfs list -H -o name "$DS" >/dev/null 2>&1 \
-            || { echo "dc-config-zfs: dataset ${DS} not found, skipping." >&2; exit 0; }
-        mountpoint -q "$TARGET" && exit 0                         # already mounted
-        mkdir -p "$TARGET"
-        mount -t zfs "$DS" "$TARGET"
-        ;;
+      do_enable "${2:?usage: dc-config-zfs enable <pool/dataset>}"
+      ;;
+    mount) do_mount ;;
     *)
-        echo "usage: dc-config-zfs {enable <pool/dataset>|mount}" >&2
-        exit 1
-        ;;
-esac
+      echo "usage: dc-config-zfs {enable <pool/dataset>|mount}" >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
