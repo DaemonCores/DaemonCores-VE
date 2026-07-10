@@ -1,0 +1,140 @@
+# Exhaustive image tests, run on a real boot of the built image (bootc install
+# to a virtual disk + QEMU/KVM), executed over SSH before the image is pushed.
+# A failing test blocks the push.
+#
+#   boot_timeout   seconds to wait for the VM to answer SSH
+#   tests[].name   label shown in the CI log
+#   tests[].run    command executed on the VM; passes on exit 0
+#   tests[].expect optional: pass instead when this string is in the output
+
+boot_timeout: 900
+
+tests:
+  # ── base (inherited from debian-bootc) ─────────────────────────────────
+  - name: booted through bootc
+    run: bootc status --format=json
+    expect: booted
+  - name: root is a composefs/overlay mount
+    run: findmnt -no FSTYPE / | grep -qiE 'overlay|composefs'
+  - name: no failed systemd units
+    run: test "$(systemctl --failed --no-legend | wc -l)" -eq 0
+
+  # ── pmxcfs / cluster ───────────────────────────────────────────────────
+  - name: pmxcfs mounted at /etc/pve
+    run: mountpoint -q /etc/pve
+  - name: pve-cluster active
+    run: systemctl is-active pve-cluster
+  - name: node directory /etc/pve/local resolves
+    run: test -d /etc/pve/local
+  - name: pmxcfs config db present
+    run: test -f /var/lib/pve-cluster/config.db
+
+  # ── proxmox services ───────────────────────────────────────────────────
+  - name: pveproxy active
+    run: systemctl is-active pveproxy
+  - name: pvedaemon active
+    run: systemctl is-active pvedaemon
+  - name: pvestatd active
+    run: systemctl is-active pvestatd
+  - name: pve-firewall active
+    run: systemctl is-active pve-firewall
+
+  # ── web UI (libtemplate-perl mtime fix => no HTTP 500) ─────────────────
+  - name: web UI answers on 8006
+    run: curl -skf https://localhost:8006/ -o /dev/null
+  - name: web UI serves the login page (not a 500)
+    run: curl -sk https://localhost:8006/ | grep -qi proxmox
+
+  # ── no-subscription popup patched ──────────────────────────────────────
+  - name: Subscription.pm patched to active
+    run: grep -q 'status => "active"' /usr/share/perl5/PVE/API2/Subscription.pm
+
+  # ── qemu-server backend VM defaults (7 patches) ────────────────────────
+  - name: backend default BIOS is OVMF
+    run: grep -q "default => 'ovmf'," /usr/share/perl5/PVE/QemuServer.pm
+  - name: backend default machine is q35
+    run: grep -q "x86_64 => 'q35'," /usr/share/perl5/PVE/QemuServer/Machine.pm
+  - name: backend default CPU is x86-64-v2-AES
+    run: grep -q "x86-64-v2-AES" /usr/share/perl5/PVE/QemuServer/CPUConfig.pm
+  - name: backend NIC firewall on by default
+    run: grep -A4 'firewall => {' /usr/share/perl5/PVE/QemuServer/Network.pm | grep -q 'default => 1,'
+  - name: backend disk cache writethrough by default
+    run: grep -A4 'cache => {' /usr/share/perl5/PVE/QemuServer/Drive.pm | grep -q "default => 'writethrough',"
+  - name: backend guest agent on by default
+    run: grep -B2 'default_key => 1,' /usr/share/perl5/PVE/QemuServer/Agent.pm | grep -q 'default => 1,'
+  - name: backend EFI vars disk auto-provision injected
+    run: grep -q 'auto-provision an EFI' /usr/share/perl5/PVE/API2/Qemu.pm
+
+  # ── pve-manager GUI wizard defaults (3 JS patches) ─────────────────────
+  - name: GUI guest agent default on
+    run: |
+      grep -A3 "name: 'agent'," /usr/share/pve-manager/js/pvemanagerlib.js | grep -q 'defaultValue: 1,'
+  - name: GUI default BIOS OVMF
+    run: |
+      grep -q "'OVMF (UEFI)' : 'OVMF (UEFI)'" /usr/share/pve-manager/js/pvemanagerlib.js
+  - name: GUI default machine q35
+    run: |
+      grep -A2 defaultMachines /usr/share/pve-manager/js/pvemanagerlib.js | grep -q "x86_64: 'q35'"
+
+  # ── repacked package versions (+bootc) ─────────────────────────────────
+  - name: pve-manager repacked
+    run: dpkg-query -W -f='${Version}' pve-manager
+    expect: +bootc
+  - name: qemu-server repacked
+    run: dpkg-query -W -f='${Version}' qemu-server
+    expect: +bootc
+  - name: libtemplate-perl repacked
+    run: dpkg-query -W -f='${Version}' libtemplate-perl
+    expect: +bootc
+  - name: chrony repacked
+    run: dpkg-query -W -f='${Version}' chrony
+    expect: +bootc
+  - name: openipmi repacked
+    run: dpkg-query -W -f='${Version}' openipmi
+    expect: +bootc
+  - name: proxmox-kernel-helper repacked
+    run: dpkg-query -W -f='${Version}' proxmox-kernel-helper
+    expect: +bootc
+  - name: ifupdown2 repacked
+    run: dpkg-query -W -f='${Version}' ifupdown2
+    expect: +bootc
+
+  # ── libtemplate-perl mtime fix (the HTTP 500 root cause) ───────────────
+  - name: libtemplate-perl mtime patch applied
+    run: grep -q 'arr\[9\] || 1' /usr/share/perl5/Template/Provider.pm
+
+  # ── proxmox-kernel-helper bootc-hostile bits stripped ──────────────────
+  - name: no proxmox-boot-tool grub-install wrapper
+    run: "! grep -rqi proxmox-boot-tool /usr/sbin/grub-install 2>/dev/null"
+
+  # ── dc-zramctl / swap ──────────────────────────────────────────────────
+  - name: dc-zramctl active
+    run: systemctl is-active dc-zramctl
+  - name: a zram device exists
+    run: test -e /dev/zram0
+  - name: swap is zram-only
+    run: swapon --show=NAME --noheadings | grep -qx /dev/zram0
+  - name: no disk or file swap
+    run: "! swapon --show=NAME --noheadings | grep -qv zram"
+
+  # ── dc-firewall-seed ───────────────────────────────────────────────────
+  - name: cluster firewall seeded into pmxcfs
+    run: test -f /etc/pve/firewall/cluster.fw
+  - name: node firewall seeded into pmxcfs
+    run: test -f /etc/pve/local/host.fw
+
+  # ── KSM / ballooning ───────────────────────────────────────────────────
+  - name: ksmtuned active
+    run: systemctl is-active ksmtuned
+
+  # ── custom tools shipped ───────────────────────────────────────────────
+  - name: dc-config-zfs present
+    run: command -v dc-config-zfs
+  - name: fanctl present
+    run: command -v fanctl
+  - name: powerctl present
+    run: command -v powerctl
+  - name: compose2bootc present
+    run: command -v compose2bootc
+  - name: pvect-ostree present
+    run: command -v pvect-ostree
