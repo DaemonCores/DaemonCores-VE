@@ -1,15 +1,17 @@
 [Unit]
-Description=fanctl — generic fan controller (local IPMI)
+Description=fanctl — generic self-calibrating fan controller (IPMI / EC / hwmon)
 Documentation=https://github.com/DaemonCores/DaemonCores-VE
-# Only start when the local IPMI interface is present.
-ConditionPathExists=/dev/ipmi0
+# No ConditionPathExists=/dev/ipmi0: the daemon detects its own backend (server
+# IPMI, ChromeOS/Framework EC via ectool, or hwmon PWM) and stays in read-only
+# monitor mode if none can control fans. A blanket IPMI condition would stop the
+# EC and hwmon backends from ever starting.
 After=multi-user.target
 
 [Service]
 Type=simple
 ExecStart=/usr/sbin/fanctl --daemon
 # Safety net if the process is killed (SIGKILL cannot be trapped): explicitly
-# hand fan regulation back to the BMC automatic mode.
+# hand fan regulation back to automatic control (BMC or EC).
 ExecStopPost=/usr/sbin/fanctl --restore
 Restart=on-failure
 RestartSec=10
@@ -18,7 +20,8 @@ Nice=5
 # Persistent calibration state in /var/lib/fanctl (created and made writable).
 StateDirectory=fanctl
 
-# Light hardening (needs /dev/ipmi0 and to execute ipmitool).
+# Light hardening. Backends need /dev/ipmi0 + ipmitool, or /dev/cros_ec + ioperm
+# (runs as root, CAP_SYS_RAWIO); ProtectSystem=strict does not touch /dev.
 ProtectHome=yes
 ProtectSystem=strict
 NoNewPrivileges=yes
