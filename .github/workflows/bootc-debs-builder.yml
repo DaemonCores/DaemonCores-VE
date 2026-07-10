@@ -1,481 +1,122 @@
 name: Build & Publish Bootc .deb
 
+# Generic, manifest-driven builder. setup reads workflows/bootc-debs-builder/
+# packages.yml, computes dependency waves (topological levels), and each wave is
+# a matrix that builds its packages in parallel via the build-one-deb reusable
+# workflow. A package with deps lands in a later wave and installs its deps'
+# debs first. Independent packages all run together in wave 0.
+
 on:
   workflow_dispatch:
   workflow_call:
+    outputs:
+      any_rebuilt:
+        description: 'true if at least one package was rebuilt (not cache-reused).'
+        value: ${{ jobs.publish.outputs.any_rebuilt }}
 
 jobs:
-  build:
+  setup:
     runs-on: ubuntu-latest
-    container: debian:trixie
-    permissions:
-      contents: read
-      # Lets the guarded repack steps open/append a "patch drift" issue
-      # (notification) when an upstream refactor moves a patch anchor.
-      issues: write
-
+    outputs:
+      wave0: ${{ steps.waves.outputs.wave0 }}
+      wave1: ${{ steps.waves.outputs.wave1 }}
+      wave2: ${{ steps.waves.outputs.wave2 }}
+      wave3: ${{ steps.waves.outputs.wave3 }}
+      env_image: ${{ steps.waves.outputs.env_image }}
     steps:
-      - uses: DaemonCores/DaemonCores-CI/bootc-debs-start@main
+      - uses: actions/checkout@v7
 
-      - name: Repack ifupdown2 from Proxmox with bootc fix
+      - name: Compute dependency waves
+        id: waves
         shell: bash
         run: |
-          SAVE_PWD=$(pwd)
-
-          apt update
-          cd /tmp
-          apt-get download ifupdown2
-
-          mkdir -p /output/ifupdown2
-          dpkg-deb -R /tmp/ifupdown2_*.deb /output/ifupdown2
-
-          ORIG_VER=$(dpkg-deb -f /tmp/ifupdown2_*.deb Version)
-
-          cp -r "${SAVE_PWD}"/workflows/bootc-debs-builder/ifupdown2postinstall/* \
-            /output/ifupdown2/
-
-          # Regenerate md5sums after content modification
-          find /output/ifupdown2 -not -path '*/DEBIAN/*' -type f \
-            | xargs md5sum \
-            | sed "s|/output/ifupdown2/||" \
-            > /output/ifupdown2/DEBIAN/md5sums
-
-          # Preserve +pmx suffix for pve-manager version check
-          sed -i "s/^Version: .*/Version: 2:${ORIG_VER}+bootc5/" \
-            /output/ifupdown2/DEBIAN/control
-          chmod +x /output/ifupdown2/usr/sbin/ifupdown2-autoconf \
-            /output/ifupdown2/usr/sbin/domain-set
-
-          dpkg-deb --build /output/ifupdown2 \
-            /debs/ifupdown2_${ORIG_VER}+bootc5_all.deb
-
-      - name: Repack chrony with bootc fix
-        shell: bash
-        run: |
-          SAVE_PWD=$(pwd)
-
-          apt update
-          cd /tmp
-          apt-get download chrony
-
-          mkdir -p /output/chrony
-          dpkg-deb -R /tmp/chrony_*.deb /output/chrony
-
-          ORIG_VER=$(dpkg-deb -f /tmp/chrony_*.deb Version)
-          ARCH=$(dpkg-deb -f /tmp/chrony_*.deb Architecture)
-
-          cp -r "${SAVE_PWD}"/workflows/bootc-debs-builder/chronypostinstall/* \
-            /output/chrony/
-
-          # Regenerate md5sums after content modification
-          find /output/chrony -not -path '*/DEBIAN/*' -type f \
-            | xargs md5sum \
-            | sed "s|/output/chrony/||" \
-            > /output/chrony/DEBIAN/md5sums
-
-          sed -i "s/^Version: .*/Version: 1:${ORIG_VER}+bootc2/" \
-            /output/chrony/DEBIAN/control
-
-          dpkg-deb --build /output/chrony \
-            /debs/chrony_${ORIG_VER}+bootc2_${ARCH}.deb
-
-      - name: Repack openipmi with no-IPMI skip
-        shell: bash
-        run: |
-          SAVE_PWD=$(pwd)
-
-          apt update
-          cd /tmp
-          apt-get download openipmi
-
-          mkdir -p /output/openipmi
-          dpkg-deb -R /tmp/openipmi_*.deb /output/openipmi
-
-          ORIG_VER=$(dpkg-deb -f /tmp/openipmi_*.deb Version)
-          ARCH=$(dpkg-deb -f /tmp/openipmi_*.deb Architecture)
-
-          cp -r "${SAVE_PWD}"/workflows/bootc-debs-builder/openipmipostinstall/* \
-            /output/openipmi/
-
-          # Regenerate md5sums after content modification
-          find /output/openipmi -not -path '*/DEBIAN/*' -type f \
-            | xargs md5sum \
-            | sed "s|/output/openipmi/||" \
-            > /output/openipmi/DEBIAN/md5sums
-
-          sed -i "s/^Version: .*/Version: 1:${ORIG_VER}+bootc1/" \
-            /output/openipmi/DEBIAN/control
-
-          dpkg-deb --build /output/openipmi \
-            /debs/openipmi_${ORIG_VER}+bootc1_${ARCH}.deb
-
-      - name: Repack libtemplate-perl with ostree mtime fix
-        shell: bash
-        run: |
-          apt update
-          cd /tmp
-          apt-get download libtemplate-perl
-
-          mkdir -p /output/libtemplate-perl
-          dpkg-deb -R /tmp/libtemplate-perl_*.deb /output/libtemplate-perl
-
-          ORIG_VER=$(dpkg-deb -f /tmp/libtemplate-perl_*.deb Version)
-          ARCH=$(dpkg-deb -f /tmp/libtemplate-perl_*.deb Architecture)
-
-          # ostree canonicalizes every /usr file mtime to 0 (epoch) at deploy
-          # time. Template Toolkit's _template_modified returns that mtime and
-          # its caller uses the value as the "does this template exist?" truth:
-          # a zero mtime is falsy, so every template shipped under /usr is
-          # reported missing and the Proxmox VE web UI answers HTTP 500
-          # ("index.html.tpl: not found"). Map a real-but-zero mtime to 1
-          # (truthy and stable, so the freshness cache never thrashes) while
-          # still returning undef for genuinely absent files.
-          PROV=$(find /output/libtemplate-perl -path '*/Template/Provider.pm')
-          grep -qF 'return (stat( $template ))[9];' "$PROV" \
-            || { echo "ERROR: libtemplate-perl _template_modified changed upstream; patch needs review." >&2; exit 1; }
-          sed -i 's#return (stat( $template ))\[9\];#my @arr = stat($template); return @arr ? ($arr[9] || 1) : undef;#' "$PROV"
-          grep -qF 'my @arr = stat($template); return @arr ? ($arr[9] || 1) : undef;' "$PROV" \
-            || { echo "ERROR: libtemplate-perl mtime patch failed to apply." >&2; exit 1; }
-          # Compile-check the patched module. The package is only extracted here,
-          # not installed, so add its own tree to @INC to resolve the sibling
-          # Template::* modules (e.g. Template::Base) it inherits from.
-          perl -I "$(dirname "$(dirname "$PROV")")" -c "$PROV" \
-            || { echo "ERROR: patched Provider.pm fails perl -c." >&2; exit 1; }
-
-          # Regenerate md5sums after content modification
-          find /output/libtemplate-perl -not -path '*/DEBIAN/*' -type f \
-            | xargs md5sum \
-            | sed "s|/output/libtemplate-perl/||" \
-            > /output/libtemplate-perl/DEBIAN/md5sums
-
-          sed -i "s/^Version: .*/Version: 1:${ORIG_VER}+bootc1/" \
-            /output/libtemplate-perl/DEBIAN/control
-
-          dpkg-deb --build /output/libtemplate-perl \
-            /debs/libtemplate-perl_${ORIG_VER}+bootc1_${ARCH}.deb
-
-      - name: Repack pve-manager (no-subscription popup + GUI VM defaults)
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          SAVE_PWD=$(pwd)
-
-          apt update
-          # nodejs: the patch script runs `node --check` on the patched web UI JS.
-          apt install -y --no-install-recommends nodejs
-          cd /tmp
-          apt-get download pve-manager
-
-          mkdir -p /output/pve-manager
-          dpkg-deb -R /tmp/pve-manager_*.deb /output/pve-manager
-
-          ORIG_VER=$(dpkg-deb -f /tmp/pve-manager_*.deb Version)
-          ARCH=$(dpkg-deb -f /tmp/pve-manager_*.deb Architecture)
-
-          # Guarded patches: suppress the no-subscription popup (Subscription.pm)
-          # and set the GUI create-wizard VM defaults (agent/OVMF/q35) to match the
-          # qemu-server backend. Exit 3 => a patch anchor drifted upstream: skip
-          # this deb (keep the last-good +bootc build, never ship the unpatched
-          # upstream) without failing the pipeline; the script already surfaced the
-          # reason in the step summary + a GitHub issue.
-          set +e
-          bash "${SAVE_PWD}/workflows/bootc-debs-builder/pve-manager/patch-defaults.sh" \
-            /output/pve-manager
-          rc=$?
-          set -e
-          if [ "$rc" -eq 3 ]; then
-            echo "pve-manager skipped (patch drift) — last-good version retained."
-            exit 0
-          elif [ "$rc" -ne 0 ]; then
-            exit "$rc"
-          fi
-
-          # Regenerate md5sums after content modification
-          find /output/pve-manager -not -path '*/DEBIAN/*' -type f \
-            | xargs md5sum \
-            | sed "s|/output/pve-manager/||" \
-            > /output/pve-manager/DEBIAN/md5sums
-
-          sed -i "s/^Version: .*/Version: 1:${ORIG_VER}+bootc1/" \
-            /output/pve-manager/DEBIAN/control
-
-          dpkg-deb --build /output/pve-manager \
-            /debs/pve-manager_${ORIG_VER}+bootc1_${ARCH}.deb
-
-      - name: Repack qemu-server with DaemonCores VM defaults
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          SAVE_PWD=$(pwd)
-
-          apt update
-          cd /tmp
-          apt-get download qemu-server
-
-          O=/output/qemu-server
-          mkdir -p "$O"
-          dpkg-deb -R /tmp/qemu-server_*.deb "$O"
-
-          ORIG_VER=$(dpkg-deb -f /tmp/qemu-server_*.deb Version)
-          ARCH=$(dpkg-deb -f /tmp/qemu-server_*.deb Architecture)
-
-          # Guarded default patches. Exit 3 => an upstream refactor moved a patch
-          # anchor: skip this deb (keep the last-good +bootc build, never ship the
-          # unpatched upstream) without failing the pipeline; the script already
-          # surfaced the reason in the step summary + a GitHub issue.
-          set +e
-          bash "${SAVE_PWD}/workflows/bootc-debs-builder/qemu-server/patch-defaults.sh" "$O"
-          rc=$?
-          set -e
-          if [ "$rc" -eq 3 ]; then
-            echo "qemu-server skipped (patch drift) — last-good version retained."
-            exit 0
-          elif [ "$rc" -ne 0 ]; then
-            exit "$rc"
-          fi
-
-          # Regenerate md5sums after content modification
-          find "$O" -not -path '*/DEBIAN/*' -type f \
-            | xargs md5sum \
-            | sed "s|$O/||" \
-            > "$O/DEBIAN/md5sums"
-
-          sed -i "s/^Version: .*/Version: 1:${ORIG_VER}+bootc1/" "$O/DEBIAN/control"
-
-          dpkg-deb --build "$O" \
-            /debs/qemu-server_${ORIG_VER}+bootc1_${ARCH}.deb
-
-      - name: Repack proxmox-kernel-helper without the bootc-hostile grub/boot handling
-        shell: bash
-        run: |
-          apt update
-          cd /tmp
-          apt-get download proxmox-kernel-helper
-
-          O=/output/proxmox-kernel-helper
-          mkdir -p "$O"
-          dpkg-deb -R /tmp/proxmox-kernel-helper_*.deb "$O"
-
-          ORIG_VER=$(dpkg-deb -f /tmp/proxmox-kernel-helper_*.deb Version)
-          ARCH=$(dpkg-deb -f /tmp/proxmox-kernel-helper_*.deb Architecture)
-
-          # In a bootc/ostree image the ESP is owned by bootupd, not by
-          # proxmox-boot-tool. Stock proxmox-kernel-helper diverts
-          # /usr/sbin/grub-install to a proxmox-boot-tool wrapper and registers
-          # dpkg triggers on /usr/lib/grub, /usr/lib/shim and /usr/lib/systemd/boot
-          # that run `proxmox-boot-tool reinit` on every grub/shim change. On bootc
-          # that reinit repeatedly calls grub-install and relocates the Debian
-          # signed grub, producing the noisy
-          # "mv: cannot stat '.../grubx64.efi.signed'" error and a boot path that
-          # competes with bootupd. Strip that whole grub/boot integration; keep
-          # only the kernel NeverAutoRemove hooks (proxmox-auto-removal) and the
-          # now-inert helper binaries so the proxmox-ve dependency stays satisfied.
-          # grub itself is left untouched.
-
-          # 1. Drop the grub-install wrapper and the proxmox-boot-tool hooks.
-          rm -f \
-            "$O/usr/sbin/grub-install" \
-            "$O/etc/grub.d/000_proxmox_boot_header" \
-            "$O/etc/initramfs/post-update.d/proxmox-boot-sync" \
-            "$O/etc/kernel/postinst.d/zz-proxmox-boot" \
-            "$O/etc/kernel/postrm.d/zz-proxmox-boot"
-
-          # 2. No dpkg triggers: the package must not react to grub/shim changes.
-          rm -f "$O/DEBIAN/triggers"
-
-          # 3. Keep only the two proxmox-auto-removal conffiles.
-          printf '%s\n' \
-            /etc/kernel/postinst.d/proxmox-auto-removal \
-            /etc/kernel/postrm.d/proxmox-auto-removal \
-            > "$O/DEBIAN/conffiles"
-
-          # 4. Neutral maintainer scripts: no grub-install diversion, no
-          #    proxmox-boot-tool reinit. The kept conffiles are managed by dpkg
-          #    directly and need no registration.
-          for s in preinst postinst prerm postrm; do
-            printf '#!/bin/sh\nset -e\nexit 0\n' > "$O/DEBIAN/$s"
-            chmod 0755 "$O/DEBIAN/$s"
-          done
-
-          # Guard: the grub-install wrapper and dpkg triggers must be gone.
-          test ! -e "$O/usr/sbin/grub-install" \
-            || { echo "ERROR: grub-install wrapper still present." >&2; exit 1; }
-          test ! -e "$O/DEBIAN/triggers" \
-            || { echo "ERROR: dpkg triggers still present." >&2; exit 1; }
-
-          # Regenerate md5sums after content modification
-          find "$O" -not -path '*/DEBIAN/*' -type f \
-            | xargs md5sum \
-            | sed "s|$O/||" \
-            > "$O/DEBIAN/md5sums"
-
-          sed -i "s/^Version: .*/Version: 1:${ORIG_VER}+bootc1/" "$O/DEBIAN/control"
-
-          dpkg-deb --build "$O" \
-            /debs/proxmox-kernel-helper_${ORIG_VER}+bootc1_${ARCH}.deb
-
-      - name: Build fanctl
-        shell: bash
-        env:
-          FANCTL_VER: "1.2.1"
-        run: |
-          SAVE_PWD=$(pwd)
-
-          mkdir -p /output/fanctl
-          cp -r "${SAVE_PWD}"/workflows/bootc-debs-builder/fanctl/* /output/fanctl/
-
-          chmod 0755 /output/fanctl/usr/sbin/fanctl
-          chmod 0755 /output/fanctl/DEBIAN/postinst
-
-          sed -i \
-            -e "s|{{ VER }}|${FANCTL_VER}|g" \
-            -e "s|, {{ DEPS }}||g" \
-            /output/fanctl/DEBIAN/control
-
-          dpkg-deb --build /output/fanctl \
-            /debs/fanctl_${FANCTL_VER}_all.deb
-
-      - name: Build powerctl
-        shell: bash
-        env:
-          POWERCTL_VER: "1.1.0"
-        run: |
-          SAVE_PWD=$(pwd)
-
-          mkdir -p /output/powerctl
-          cp -r "${SAVE_PWD}"/workflows/bootc-debs-builder/powerctl/* /output/powerctl/
-
-          chmod 0755 /output/powerctl/usr/sbin/powerctl
-          chmod 0755 /output/powerctl/DEBIAN/postinst
-
-          sed -i \
-            -e "s|{{ VER }}|${POWERCTL_VER}|g" \
-            -e "s|, {{ DEPS }}||g" \
-            /output/powerctl/DEBIAN/control
-
-          dpkg-deb --build /output/powerctl \
-            /debs/powerctl_${POWERCTL_VER}_all.deb
-
-      - name: Build dc-firewall-seed
-        shell: bash
-        env:
-          DC_FIREWALL_SEED_VER: "1.0.0"
-        run: |
-          SAVE_PWD=$(pwd)
-
-          mkdir -p /output/dc-firewall-seed
-          cp -r "${SAVE_PWD}"/workflows/bootc-debs-builder/dc-firewall-seed/* /output/dc-firewall-seed/
-
-          chmod 0755 /output/dc-firewall-seed/usr/sbin/dc-firewall-seed
-          chmod 0755 /output/dc-firewall-seed/DEBIAN/postinst
-
-          sed -i \
-            -e "s|{{ VER }}|${DC_FIREWALL_SEED_VER}|g" \
-            -e "s|, {{ DEPS }}||g" \
-            /output/dc-firewall-seed/DEBIAN/control
-
-          dpkg-deb --build /output/dc-firewall-seed \
-            /debs/dc-firewall-seed_${DC_FIREWALL_SEED_VER}_all.deb
-
-      - name: Build dc-config-zfs
-        shell: bash
-        env:
-          DC_CONFIG_ZFS_VER: "1.0.0"
-        run: |
-          SAVE_PWD=$(pwd)
-
-          mkdir -p /output/dc-config-zfs
-          cp -r "${SAVE_PWD}"/workflows/bootc-debs-builder/dc-config-zfs/* /output/dc-config-zfs/
-
-          chmod 0755 /output/dc-config-zfs/usr/sbin/dc-config-zfs
-          chmod 0755 /output/dc-config-zfs/DEBIAN/postinst
-
-          sed -i \
-            -e "s|{{ VER }}|${DC_CONFIG_ZFS_VER}|g" \
-            -e "s|, {{ DEPS }}||g" \
-            /output/dc-config-zfs/DEBIAN/control
-
-          dpkg-deb --build /output/dc-config-zfs \
-            /debs/dc-config-zfs_${DC_CONFIG_ZFS_VER}_all.deb
-
-      - name: Build dc-zramctl
-        shell: bash
-        env:
-          DC_ZRAMCTL_VER: "1.0.0"
-        run: |
-          SAVE_PWD=$(pwd)
-
-          mkdir -p /output/dc-zramctl
-          cp -r "${SAVE_PWD}"/workflows/bootc-debs-builder/dc-zramctl/* /output/dc-zramctl/
-
-          chmod 0755 /output/dc-zramctl/usr/sbin/dc-zramctl
-          chmod 0755 /output/dc-zramctl/usr/lib/dc-zramctl/calibrate
-          chmod 0755 /output/dc-zramctl/DEBIAN/postinst
-
-          sed -i \
-            -e "s|{{ VER }}|${DC_ZRAMCTL_VER}|g" \
-            -e "s|, {{ DEPS }}||g" \
-            /output/dc-zramctl/DEBIAN/control
-
-          dpkg-deb --build /output/dc-zramctl \
-            /debs/dc-zramctl_${DC_ZRAMCTL_VER}_all.deb
-
-      - name: Build pvect-ostree
-        shell: bash
-        env:
-          PVECT_OSTREE_VER: "1.0.0"
-        run: |
-          SAVE_PWD=$(pwd)
-          
-          mkdir -p /output/pvect-ostree
-          cp -r "${SAVE_PWD}"/workflows/bootc-debs-builder/pvect-ostree/* /output/pvect-ostree/
-
-          chmod 0755 /output/pvect-ostree/usr/sbin/pvect-ostree
-          chmod 0755 /output/pvect-ostree/DEBIAN/postinst
-
-          sed -i \
-            -e "s|{{ VER }}|${PVECT_OSTREE_VER}|g" \
-            -e "s|, {{ DEPS }}||g" \
-            /output/pvect-ostree/DEBIAN/control
-          
-          dpkg-deb --build /output/pvect-ostree \
-            /debs/pvect-ostree_${PVECT_OSTREE_VER}_all.deb
-
-      - name: Build compose2bootc
-        shell: bash
-        env:
-          COMPOSE2BOOTC_VER: "0.1.0"
-        run: |
-          SAVE_PWD=$(pwd)
-
-          mkdir -p /output/compose2bootc
-          cp -r "${SAVE_PWD}"/workflows/bootc-debs-builder/compose2bootc/* /output/compose2bootc/
-
-          chmod 0755 /output/compose2bootc/usr/sbin/compose2bootc
-          chmod 0755 /output/compose2bootc/DEBIAN/postinst
-          
-          sed -i \
-            -e "s|{{ VER }}|${COMPOSE2BOOTC_VER}|g" \
-            -e "s|, {{ DEPS }}||g" \
-            /output/compose2bootc/DEBIAN/control
-          
-          dpkg-deb --build /output/compose2bootc \
-            /debs/compose2bootc_${COMPOSE2BOOTC_VER}_all.deb
-
-      - name: Upload debs
-        uses: actions/upload-artifact@v7
-        with:
-          name: debs
-          path: /debs/*.deb
+          set -euo pipefail
+          echo "env_image=ghcr.io/${GITHUB_REPOSITORY,,}:buildenv" \
+            >>"$GITHUB_OUTPUT"
+          curl -fsSL \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
+            -o /usr/local/bin/yq
+          chmod +x /usr/local/bin/yq
+          yq -o=json '.' workflows/bootc-debs-builder/packages.yml >/tmp/pkgs.json
+          python3 - <<'PY'
+          import json, os
+          pkgs = json.load(open('/tmp/pkgs.json'))['packages']
+          deps = {p['name']: (p.get('deps') or []) for p in pkgs}
+          memo = {}
+          def wave(name):
+              if name in memo:
+                  return memo[name]
+              d = deps.get(name, [])
+              memo[name] = 0 if not d else 1 + max(wave(x) for x in d)
+              return memo[name]
+          waves = {}
+          for name in deps:
+              waves.setdefault(wave(name), []).append(name)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              for i in range(4):
+                  out.write("wave%d=%s\n" % (i, json.dumps(sorted(waves.get(i, [])))))
+          PY
+
+  wave0:
+    needs: setup
+    if: ${{ needs.setup.outputs.wave0 != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.setup.outputs.wave0) }}
+    uses: DaemonCores/DaemonCores-CI/.github/workflows/build-one-deb.yml@main
+    with:
+      package: ${{ matrix.package }}
+      container_image: ${{ needs.setup.outputs.env_image }}
+    secrets: inherit
+
+  wave1:
+    needs: [setup, wave0]
+    if: ${{ needs.setup.outputs.wave1 != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.setup.outputs.wave1) }}
+    uses: DaemonCores/DaemonCores-CI/.github/workflows/build-one-deb.yml@main
+    with:
+      package: ${{ matrix.package }}
+      container_image: ${{ needs.setup.outputs.env_image }}
+    secrets: inherit
+
+  wave2:
+    needs: [setup, wave1]
+    if: ${{ needs.setup.outputs.wave2 != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.setup.outputs.wave2) }}
+    uses: DaemonCores/DaemonCores-CI/.github/workflows/build-one-deb.yml@main
+    with:
+      package: ${{ matrix.package }}
+      container_image: ${{ needs.setup.outputs.env_image }}
+    secrets: inherit
+
+  wave3:
+    needs: [setup, wave2]
+    if: ${{ needs.setup.outputs.wave3 != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.setup.outputs.wave3) }}
+    uses: DaemonCores/DaemonCores-CI/.github/workflows/build-one-deb.yml@main
+    with:
+      package: ${{ matrix.package }}
+      container_image: ${{ needs.setup.outputs.env_image }}
+    secrets: inherit
 
   publish:
+    needs: [setup, wave0, wave1, wave2, wave3]
     runs-on: ubuntu-latest
-    needs: build
     permissions:
       pages: write
       id-token: write
+    outputs:
+      any_rebuilt: ${{ steps.end.outputs.any_rebuilt }}
     steps:
       - id: repo
         shell: bash
@@ -483,7 +124,8 @@ jobs:
           name="${GITHUB_REPOSITORY##*/}"          # cut at the slash -> repo name
           echo "name=${name,,}" >> "$GITHUB_OUTPUT"  # lowercase
 
-      - uses: DaemonCores/DaemonCores-CI/bootc-debs-end@main
+      - id: end
+        uses: DaemonCores/DaemonCores-CI/bootc-debs-end@main
         with:
           repo_name: ${{ steps.repo.outputs.name }}
           apt_gpg_key: ${{ secrets.APT_GPG_KEY }}
