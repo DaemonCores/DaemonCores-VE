@@ -86,7 +86,7 @@ jobs:
       (github.event_name == 'schedule' || inputs.run_debs) &&
       (needs.base.result == 'success' || needs.base.result == 'skipped') &&
       (needs.build_env.result == 'success' || needs.build_env.result == 'skipped')
-    uses: ./.github/workflows/bootc-debs-builder.yml
+    uses: DaemonCores/DaemonCores-CI/.github/workflows/bootc-debs-builder.yml@main
     secrets: inherit
 
   image:
