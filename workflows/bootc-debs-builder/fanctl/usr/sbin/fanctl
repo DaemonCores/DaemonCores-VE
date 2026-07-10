@@ -130,7 +130,8 @@ FAIL_COUNT=0     # Consecutive IPMI read failures.
 DRIFT_COUNT=0    # Consecutive cycles with |error| >= the driver's RECAL.
 REG_PREV_TEMP=-1 # Driver temperature at the previous cycle (anti-windup).
 REG_PREV_PCT=-1  # Fan speed at the previous cycle (anti-windup).
-REG_INEFFECTIVE=0 # Consecutive fan rises that did NOT cool the driver.
+REG_PREV_LABEL=none # Driving component at the previous cycle (anti-windup memory).
+REG_INEFFECTIVE=0 # Fan rises that did NOT cool the driver (per-driver, persists).
 
 # Persisted calibration (loaded from STATE_FILE).
 CAL_PCT=0   # Calibrated operating fan speed, percent.
@@ -952,17 +953,26 @@ regulate() {
   err=$((CTRLTEMP - CTRLTARGET))
   local abs_err=$((err < 0 ? -err : err))
 
-  # Anti-windup accounting FIRST (before recalibration): did last cycle's fan RISE
-  # actually cool the driver? If we raised the speed and the temperature did NOT
-  # drop, the fans have no grip on this component. Kept ahead of recalibration so a
-  # component the fans cannot cool is recognised as such and never triggers one.
-  if ((REG_PREV_PCT >= 0 && LAST_PCT > REG_PREV_PCT && CTRLTEMP >= REG_PREV_TEMP)); then
-    ((REG_INEFFECTIVE++))
-  elif ((REG_PREV_TEMP >= 0 && CTRLTEMP < REG_PREV_TEMP)); then
-    REG_INEFFECTIVE=0 # it cooled -> the fans do have grip, keep them honest
+  # Anti-windup accounting FIRST (before recalibration). REG_INEFFECTIVE tracks
+  # whether the fans have grip on the CURRENT driver, and PERSISTS: it is reset
+  # only when the driver CHANGES (a new component must be re-evaluated), and it
+  # updates ONLY on a real fan RISE (raised without cooling => ineffective; raised
+  # and cooled => effective). Temperature moving on its own (ambient heat, no fan
+  # change) leaves the memory intact -- so a component the fans cannot cool stays
+  # flagged across dead-zone dips instead of forgetting and re-triggering the ramp
+  # and recalibration each time it warms up again.
+  if [[ "$CTRLLABEL" != "$REG_PREV_LABEL" ]]; then
+    REG_INEFFECTIVE=0
+  elif ((REG_PREV_PCT >= 0 && LAST_PCT > REG_PREV_PCT)); then
+    if ((CTRLTEMP >= REG_PREV_TEMP)); then
+      ((REG_INEFFECTIVE++))
+    else
+      REG_INEFFECTIVE=0 # the fans do have grip on it, keep them honest
+    fi
   fi
   REG_PREV_TEMP=$CTRLTEMP
   REG_PREV_PCT=$LAST_PCT
+  REG_PREV_LABEL=$CTRLLABEL
 
   # Recalibration: the error stayed past the driver's RECAL band -> the curve is
   # wrong (cooling too much or too little). Persist a few cycles so a transient
@@ -989,10 +999,18 @@ regulate() {
 
   # Anti-yoyo dead zone: within the driver's DEADBAND of its target, hold the fans
   # perfectly steady and ignore the noise. This is what kills the oscillation.
-  ((abs_err < CTRLDEADBAND)) && {
-    REG_INEFFECTIVE=0
+  # (REG_INEFFECTIVE is NOT reset here -- the fans-have-no-grip verdict must persist
+  # through dead-zone dips, else an insensitive driver is re-probed every warm-up.)
+  if ((abs_err < CTRLDEADBAND)); then
+    # If the driver is one the fans cannot cool, ease steadily back to the floor
+    # (no reason to keep airflow it does not use); a monotonic descent, no yoyo.
+    if ((REG_INEFFECTIVE >= INEFFECTIVE_MAX && CAL_FLOOR > 0 && LAST_PCT > CAL_FLOOR)); then
+      pct=$((LAST_PCT - TRIM_MAX))
+      ((pct < CAL_FLOOR)) && pct="$CAL_FLOOR"
+      apply_pct "$pct"
+    fi
     return
-  }
+  fi
 
   # Between DEADBAND and RECAL: nudge the speed toward the target by a bounded
   # step (gain from the calibrated slope). Never fall below the calibrated
