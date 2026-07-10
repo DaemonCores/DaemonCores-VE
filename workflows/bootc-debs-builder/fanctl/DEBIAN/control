@@ -6,17 +6,23 @@ Maintainer: Gabriel Guillou guillou.gabriel@gmail.com
 Homepage: https://github.com/DaemonCores/DaemonCores-VE
 Section: admin
 Priority: optional
-Depends: ipmitool, kmod, openipmi, {{ DEPS }}
-Description: generic temperature-driven fan controller over local IPMI
- A lightweight bash daemon that regulates server fan speed from temperature,
- through the local IPMI interface (/dev/ipmi0).
+Depends: ipmitool, kmod, openipmi, gawk, {{ DEPS }}
+Description: generic self-calibrating temperature-driven fan controller
+ A lightweight bash daemon that regulates fan speed from temperature. Backends,
+ auto-detected: a profiled IPMI BMC (servers), a ChromeOS/Framework Embedded
+ Controller via ectool (laptops with no IPMI/PWM), or a writable hwmon PWM.
  .
- Self-adapting: it discovers temperature sensors and their own Upper-Critical
- thresholds, then normalizes the speed curve per sensor, so nothing is
- hard-coded and it works across CPUs and servers.
+ Every temperature sensor is classified into its component profile with two
+ sourced values: an optimal target the curve tracks in real time, and a hard
+ critical. Cool-preferring parts (CPU, GPU, VRM, RAM, battery) are held cool;
+ warm-preferring parts (SSD, HDD) are left warm. The component furthest above its
+ own target drives the auto-calibrated curve, so every part sits at its optimum.
+ A sensor whose name is unknown but whose critical is high (generic server
+ sensors) is still regulated, preserving the historical behaviour.
  .
- Writing the fan speed uses an auto-detected vendor profile (ipmitool mc info).
- Dell iDRAC is supported; any unrecognized vendor falls back to monitor mode
- (read-only) and never touches the fans. Fan regulation is handed back to the
- BMC automatically on over-temperature, a failed fan, or loss of IPMI
- communication.
+ The critical is a bare hard-safety threshold (reading >= crit forces 100%, no
+ margin) that should never fire in normal use. Implausible readings/thresholds
+ (phantom or unpopulated sensors) are rejected. Writing the fan speed uses an
+ auto-detected vendor profile over IPMI (Dell iDRAC verified), ectool on an EC,
+ or hwmon PWM; an unknown IPMI vendor stays in read-only monitor mode. Regulation
+ is handed back to automatic control on stop or on loss of communication.
