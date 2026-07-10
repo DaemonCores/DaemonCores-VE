@@ -93,6 +93,7 @@ TEMP_SANE_MAX=150             # Above this a reading/threshold is discarded.
 AMBIENT_MATCH='Inlet|Ambient' # Regex for the inlet-air sensor (excluded from control).
 HYST_PCT=3                    # Minimum percent change before issuing a command.
 TRIM_MAX=4                    # Max fan change per cycle while holding, percent.
+INEFFECTIVE_MAX=3             # Fan rises with no cooling before easing back (anti-windup).
 MAX_FAIL=3                    # Consecutive IPMI read errors before failsafe.
 REQUIRE_KNOWN_VENDOR=0        # 1 = exit on unknown vendor; 0 = monitor mode.
 
@@ -127,6 +128,9 @@ MODE=auto        # Current control mode: auto | manual.
 LAST_PCT=-1      # Last applied speed, percent (-1 = unknown).
 FAIL_COUNT=0     # Consecutive IPMI read failures.
 DRIFT_COUNT=0    # Consecutive cycles with |error| >= the driver's RECAL.
+REG_PREV_TEMP=-1 # Driver temperature at the previous cycle (anti-windup).
+REG_PREV_PCT=-1  # Fan speed at the previous cycle (anti-windup).
+REG_INEFFECTIVE=0 # Consecutive fan rises that did NOT cool the driver.
 
 # Persisted calibration (loaded from STATE_FILE).
 CAL_PCT=0   # Calibrated operating fan speed, percent.
@@ -675,7 +679,7 @@ calibrate() {
     "(inlet=${INLET}C, ${NCTRL} components)..."
   to_manual
 
-  local pct prev_pct=-1 prev_t=-1 step err t0 trend
+  local pct prev_pct=-1 prev_t=-1 step err t0 trend cal_ineffective=0 cal_prev_t=-1
   # Start from the current fan speed if known (a post-critical recalibration thus
   # begins at 100% and only eases down), else the last calibrated point, else mid.
   if ((LAST_PCT >= 0)); then
@@ -722,6 +726,19 @@ calibrate() {
       # Does NOT hold (rising or above target): needs more air.
       ((floor >= 0)) && break     # the minimum was the last holding step just above
       ((pct >= MAX_PCT)) && break
+      # Anti-windup: if raising the fans is NOT cooling the driver, more air is
+      # useless (fans have no grip on it) -- stop before ramping to MAX and settle
+      # at the minimum, exactly like the live loop. The driver stays fully watched.
+      if ((cal_prev_t >= 0 && CTRLTEMP >= cal_prev_t)); then
+        ((cal_ineffective++))
+      else
+        cal_ineffective=0
+      fi
+      cal_prev_t="$CTRLTEMP"
+      ((cal_ineffective >= INEFFECTIVE_MAX)) && {
+        floor="$MIN_PCT"
+        break
+      }
       if ((trend > STABLE_BAND)); then
         ((pct += CAL_STEP_MAX))
       else
@@ -949,9 +966,23 @@ regulate() {
     return
   fi
 
+  # Anti-windup accounting: did last cycle's fan RISE actually cool the driver?
+  # If we raised the speed and the temperature did NOT drop, the fans have no grip
+  # on this component -- integrating further just ramps to 100% for nothing.
+  if ((REG_PREV_PCT >= 0 && LAST_PCT > REG_PREV_PCT && CTRLTEMP >= REG_PREV_TEMP)); then
+    ((REG_INEFFECTIVE++))
+  elif ((REG_PREV_TEMP >= 0 && CTRLTEMP < REG_PREV_TEMP)); then
+    REG_INEFFECTIVE=0 # it cooled -> the fans do have grip, keep them honest
+  fi
+  REG_PREV_TEMP=$CTRLTEMP
+  REG_PREV_PCT=$LAST_PCT
+
   # Anti-yoyo dead zone: within the driver's DEADBAND of its target, hold the fans
   # perfectly steady and ignore the noise. This is what kills the oscillation.
-  ((abs_err < CTRLDEADBAND)) && return
+  ((abs_err < CTRLDEADBAND)) && {
+    REG_INEFFECTIVE=0
+    return
+  }
 
   # Between DEADBAND and RECAL: nudge the speed toward the target by a bounded
   # step (gain from the calibrated slope). Never fall below the calibrated
@@ -961,6 +992,12 @@ regulate() {
   ((step > TRIM_MAX)) && step="$TRIM_MAX"
   ((step < -TRIM_MAX)) && step=$((-TRIM_MAX))
   ((step == 0)) && step=$((err > 0 ? 1 : -1))
+  # Anti-windup: raising is proven useless on this driver -> stop wasting airflow
+  # and ease back to the floor. The component stays fully watched -- its knee still
+  # trips the 100% bypass and survival still escalates if it ever really overheats.
+  if ((step > 0 && REG_INEFFECTIVE >= INEFFECTIVE_MAX)); then
+    step=$((-TRIM_MAX))
+  fi
   base=$((LAST_PCT >= 0 ? LAST_PCT : CAL_PCT))
   pct=$((base + step))
   ((CAL_FLOOR > 0 && pct < CAL_FLOOR)) && pct="$CAL_FLOOR"
