@@ -20,9 +20,12 @@ Description: generic self-calibrating temperature-driven fan controller
  A sensor whose name is unknown but whose critical is high (generic server
  sensors) is still regulated, preserving the historical behaviour.
  .
- The critical is a bare hard-safety threshold (reading >= crit forces 100%, no
- margin) that should never fire in normal use. Implausible readings/thresholds
- (phantom or unpopulated sensors) are rejected. Writing the fan speed uses an
+ The longevity knee forces fans to 100% (bare threshold, no margin) and should
+ never fire in normal use. Past a component's hardware survival Tjmax, a last-
+ resort escalation warns every user to save, then powers off cleanly, then cuts
+ power violently -- keyed off survival, never the knee, so a normal load spike
+ never powers the machine off. Implausible readings/thresholds (phantom or
+ unpopulated sensors) are rejected. Writing the fan speed uses an
  auto-detected vendor profile over IPMI (Dell iDRAC verified), ectool on an EC,
  or hwmon PWM; an unknown IPMI vendor stays in read-only monitor mode. Regulation
  is handed back to automatic control on stop or on loss of communication.
