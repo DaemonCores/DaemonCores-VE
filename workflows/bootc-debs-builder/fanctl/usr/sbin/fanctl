@@ -725,7 +725,14 @@ calibrate() {
     else
       # Does NOT hold (rising or above target): needs more air.
       ((floor >= 0)) && break     # the minimum was the last holding step just above
-      ((pct >= MAX_PCT)) && break
+      if ((pct >= MAX_PCT)); then
+        # At full speed but STILL not holding. If even MAX is not cooling it
+        # (trend not clearly falling), the fans have no grip -> the floor is MIN,
+        # NOT max (blasting full does nothing). Never persist a bogus 100% floor.
+        # Only keep MAX when MAX genuinely helps (trend falling).
+        ((trend > -STABLE_BAND)) && floor="$MIN_PCT"
+        break
+      fi
       # Anti-windup: if raising the fans is NOT cooling the driver, more air is
       # useless (fans have no grip on it) -- stop before ramping to MAX and settle
       # at the minimum, exactly like the live loop. The driver stays fully watched.
@@ -945,11 +952,25 @@ regulate() {
   err=$((CTRLTEMP - CTRLTARGET))
   local abs_err=$((err < 0 ? -err : err))
 
+  # Anti-windup accounting FIRST (before recalibration): did last cycle's fan RISE
+  # actually cool the driver? If we raised the speed and the temperature did NOT
+  # drop, the fans have no grip on this component. Kept ahead of recalibration so a
+  # component the fans cannot cool is recognised as such and never triggers one.
+  if ((REG_PREV_PCT >= 0 && LAST_PCT > REG_PREV_PCT && CTRLTEMP >= REG_PREV_TEMP)); then
+    ((REG_INEFFECTIVE++))
+  elif ((REG_PREV_TEMP >= 0 && CTRLTEMP < REG_PREV_TEMP)); then
+    REG_INEFFECTIVE=0 # it cooled -> the fans do have grip, keep them honest
+  fi
+  REG_PREV_TEMP=$CTRLTEMP
+  REG_PREV_PCT=$LAST_PCT
+
   # Recalibration: the error stayed past the driver's RECAL band -> the curve is
   # wrong (cooling too much or too little). Persist a few cycles so a transient
-  # spike does not trigger it. Also on an inlet-air shift.
+  # spike does not trigger it. Also on an inlet-air shift. But NOT when the fans
+  # have no grip on the driver (REG_INEFFECTIVE maxed): recalibrating a component
+  # the fans cannot cool is sterile -- it re-measures the same floor and loops.
   inlet_delta=$((INLET > CAL_INLET ? INLET - CAL_INLET : CAL_INLET - INLET))
-  if ((abs_err >= CTRLRECAL)); then
+  if ((abs_err >= CTRLRECAL && REG_INEFFECTIVE < INEFFECTIVE_MAX)); then
     ((DRIFT_COUNT++))
   else
     DRIFT_COUNT=0
@@ -960,22 +981,11 @@ regulate() {
     calibrate
     return
   fi
-  if ((inlet_delta > INLET_DRIFT)); then
+  if ((inlet_delta > INLET_DRIFT && REG_INEFFECTIVE < INEFFECTIVE_MAX)); then
     log "inlet shifted (${CAL_INLET}C -> ${INLET}C) -> recalibrate"
     calibrate
     return
   fi
-
-  # Anti-windup accounting: did last cycle's fan RISE actually cool the driver?
-  # If we raised the speed and the temperature did NOT drop, the fans have no grip
-  # on this component -- integrating further just ramps to 100% for nothing.
-  if ((REG_PREV_PCT >= 0 && LAST_PCT > REG_PREV_PCT && CTRLTEMP >= REG_PREV_TEMP)); then
-    ((REG_INEFFECTIVE++))
-  elif ((REG_PREV_TEMP >= 0 && CTRLTEMP < REG_PREV_TEMP)); then
-    REG_INEFFECTIVE=0 # it cooled -> the fans do have grip, keep them honest
-  fi
-  REG_PREV_TEMP=$CTRLTEMP
-  REG_PREV_PCT=$LAST_PCT
 
   # Anti-yoyo dead zone: within the driver's DEADBAND of its target, hold the fans
   # perfectly steady and ignore the noise. This is what kills the oscillation.
