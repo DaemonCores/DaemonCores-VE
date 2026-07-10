@@ -10,25 +10,26 @@
 #   --once       Print one metrics line and exit.
 #
 # How it works:
-#   Temperature sensors and their own Upper-Critical thresholds are discovered
-#   at runtime, so nothing is hard-coded. Sensors whose Upper-Critical is high
-#   enough (CONTROL_UCR_MIN) are the controlling (CPU-class) sensors; the daemon
-#   holds the hottest of them near TARGET_TEMP.
+#   Each temperature sensor is classified (by chip + label) into a component
+#   profile with two SOURCED values: an optimal TARGET and a hard-safety CRIT
+#   (see classify_sensor). Cool-preferring parts (CPU/GPU/VRM/RAM/battery) get a
+#   low target; warm-preferring parts (SSD/HDD) a higher one. The auto-calibrated
+#   fan curve tracks, in real time, the component that is furthest above ITS OWN
+#   target -- so every part is held at its optimal temperature, all the time.
 #
-#   Calibration measures the real thermal response of THIS machine: it
-#   converges the fan speed to the quiet operating point that holds the
-#   target, and records the fan/temperature slope. The result (CAL_PCT,
-#   CAL_SLOPE, CAL_INLET) is persisted so it survives restarts. In normal
-#   operation the daemon applies a proportional correction around the
-#   calibrated point, and recalibrates by itself when the error stays large
-#   (too hot, or fans running harder than the temperature warrants) or when
-#   the inlet air temperature drifts.
+#   Calibration measures the real thermal response of THIS machine: it converges
+#   the fan speed to the point that holds the driving component at its target,
+#   and records the fan/temperature slope (CAL_PCT, CAL_SLOPE, CAL_INLET are
+#   persisted). It recalibrates by itself when the target error stays large
+#   (curve is wrong: cooling too much or too little), on an inlet shift, and --
+#   as sheer evidence the curve is wrong -- immediately if any crit is reached.
 #
-#   Safety is temperature-based, never fan-count-based: a single failed fan
-#   among many has no special handling; only an over-temperature (near
-#   Upper-Critical) forces maximum cooling. Writing the fan speed uses an
-#   auto-detected vendor profile (ipmitool mc info); an unknown vendor stays
-#   in read-only monitor mode.
+#   CRIT is a bare hard-safety threshold (T >= crit -> 100%, no margin), a net
+#   for a program-level failure that should never trigger in normal use, never an
+#   operating point. Ambient/inlet sensors are reference only, never controlled.
+#   Writing the fan speed uses an auto-detected vendor profile (ipmitool mc info)
+#   on IPMI, ectool on a ChromeOS/Framework EC, or hwmon PWM; an unknown IPMI
+#   vendor stays in read-only monitor mode.
 #
 # Note on shell options: the daemon deliberately does not use "set -e"; a
 # transient ipmitool failure must not kill the control loop.
@@ -41,14 +42,37 @@ readonly STATE_FILE="${STATE_DIR}/calibration.conf"
 
 # --- Defaults (overridden by CONF) ------------------------------------------
 IPMITOOL=ipmitool             # ipmitool binary; local IPMI via /dev/ipmi0.
+ECTOOL=ectool                 # ectool binary; ChromeOS/Framework EC fan control.
 POLL_INTERVAL=20              # Seconds between control cycles.
 MIN_PCT=10                    # Fan speed floor, percent (baseline airflow).
 MAX_PCT=100                   # Fan speed ceiling, percent.
-TARGET_TEMP=60                # Target for hottest controlling sensor, deg C.
-HARD_MARGIN=10                # Emergency: force max at Upper-Crit minus this.
-CONTROL_UCR_MIN=80            # Upper-Critical >= this marks a CPU sensor.
-HWMON_CPU_CRIT=95             # Fallback crit temp for hwmon sensors.
-AMBIENT_MATCH='Inlet|Ambient' # Regex for the inlet-air sensor.
+# Per-component TARGET (optimal) and CRIT (hard safety) live in classify_sensor().
+# The auto-calibrated fan curve tracks each component's TARGET in real time; that
+# is the only control in normal operation. CRIT is a bare hard threshold
+# (T >= crit -> 100%, NO margin) that only a program-level failure should ever
+# reach -- it is a safety net, never an operating point.
+# Compatibility fallback for a sensor whose label is NOT in the profile table but
+# that declares a high critical of its own (typical of servers with generic sensor
+# names like "Temp"): it is regulated toward GENERIC_TARGET with its own crit as
+# the bypass, preserving the historical "any high-crit sensor is controlling"
+# behaviour. Below GENERIC_CRIT_MIN an unclassified sensor is bypass-only.
+GENERIC_TARGET=60             # Fallback target for an unclassified high-crit sensor.
+GENERIC_CRIT_MIN=80           # Min own-crit for an unclassified sensor to be controlling.
+# Physical plausibility window for any temperature reading OR threshold, deg C.
+# A value outside it comes from a stuck, unpopulated or parasitic sensor (a
+# phantom 179C channel, a -273C unconnected one, a bogus 250C "critical") and
+# must never drive control: taken as real it would either pin the fans to 100%
+# forever or, as a bogus-high critical, mask a genuine over-temperature.
+#
+# The upper bound is the highest LEGITIMATE junction temperature any PC component
+# reaches, all categories included, so a real hot part is never mistaken for a
+# phantom (that would leave it uncooled): CPU Tjmax ~95-105C, GPU junction ~110C
+# (AMD spec), NVMe controller ~120C, and the hottest of all -- VRM power MOSFETs,
+# datasheet Tjmax 150C. So 150C is the market-wide legitimate ceiling; anything
+# above can only be a phantom. Principle: when unsure, cool -- never cook.
+TEMP_SANE_MIN=-40             # Below this a reading/threshold is discarded.
+TEMP_SANE_MAX=150             # Above this a reading/threshold is discarded.
+AMBIENT_MATCH='Inlet|Ambient' # Regex for the inlet-air sensor (excluded from control).
 HYST_PCT=3                    # Minimum percent change before issuing a command.
 TRIM_MAX=4                    # Max fan change per cycle while holding, percent.
 MAX_FAIL=3                    # Consecutive IPMI read errors before failsafe.
@@ -69,11 +93,13 @@ DEFAULT_GAIN=3    # Fallback proportional gain, percent per deg C.
 [[ -r "$CONF" ]] && . "$CONF"
 
 # --- Runtime state ----------------------------------------------------------
-BACKEND=none # Fan-control backend: ipmi | hwmon | none.
+BACKEND=none # Fan-control backend: ipmi | ec | hwmon | none.
 # IPMI backend: detected vendor and its manual/auto raw commands.
 IPMI_VENDOR=unknown
 RAW_MANUAL=''
 RAW_AUTO=''
+# EC backend (ChromeOS/Framework embedded controller via ectool): fan count.
+EC_NUMFANS=0
 # hwmon backend: parallel arrays of controllable PWM channels.
 HWMON_PWM=()     # Paths to writable pwmN files.
 HWMON_EN=()      # Matching pwmN_enable paths.
@@ -82,7 +108,6 @@ MODE=auto        # Current control mode: auto | manual.
 LAST_PCT=-1      # Last applied speed, percent (-1 = unknown).
 FAIL_COUNT=0     # Consecutive IPMI read failures.
 DRIFT_COUNT=0    # Consecutive cycles with |error| > DRIFT.
-EMERG_COUNT=0    # Consecutive over-temperature cycles.
 
 # Persisted calibration (loaded from STATE_FILE).
 CAL_PCT=0   # Calibrated operating fan speed, percent.
@@ -90,13 +115,66 @@ CAL_SLOPE=0 # Measured response, deg C per percent (negative).
 CAL_INLET=0 # Inlet temperature at calibration time, deg C.
 
 # Metrics from the last read (set by eval of read_metrics).
-T=0       # Hottest controlling sensor, deg C.
-CRITMIN=0 # Lowest Upper-Critical among controlling sensors.
-INLET=0   # Inlet-air temperature, deg C.
-NCTRL=0   # Number of controlling sensors seen.
+CTRLTEMP=0     # Driving component temperature, deg C (furthest above its target).
+CTRLTARGET=0   # That component's optimal target (from classify_sensor).
+CTRLLABEL=none # That component's sanitized name (for logs).
+CRITHIT=0      # 1 = a component reached its own crit -> bare hard bypass.
+CRITLABEL=none # The component that tripped the bypass (for logs).
+INLET=0        # Inlet-air temperature, deg C.
+NCTRL=0        # Number of controlling components seen.
 
 log() {
   printf '%s fanctl: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"
+}
+
+#######################################
+# Report whether a temperature value (deg C) is physically plausible, i.e. within
+# [TEMP_SANE_MIN, TEMP_SANE_MAX]. Used to reject phantom/stuck sensor readings and
+# bogus thresholds (from any exotic sensor, on any machine) before they can drive
+# control. Generic and hardware-agnostic, like the rest of the program.
+# Globals:
+#   TEMP_SANE_MIN, TEMP_SANE_MAX (read)
+# Arguments:
+#   $1 - integer degrees C (may be negative)
+# Returns:
+#   0 if plausible, 1 otherwise (including a non-integer argument).
+#######################################
+temp_sane() {
+  local t="$1"
+  [[ "$t" =~ ^-?[0-9]+$ ]] || return 1
+  ((t >= TEMP_SANE_MIN && t <= TEMP_SANE_MAX))
+}
+
+#######################################
+# Classify a sensor into its component profile and emit "TARGET CRIT".
+# TARGET is the optimal operating temperature the fan curve tracks in real time;
+# CRIT is the sourced hard-safety knee (see the table below). Both are per class,
+# never a margin off each other. Sourced values (deg C):
+#   CPU 60/80, GPU core 60/85, GPU VRAM 60/95, VRM 60/90, RAM 50/85,
+#   chipset 55/90, battery 30/45 (all "run cooler is better");
+#   NVMe 60/80, SATA SSD 50/70, HDD 42/55 (all "run warm is better").
+# Ambient/inlet is handled by the caller and never reaches here.
+# Arguments:
+#   $1 - lowercase "chipname label" classification key
+# Outputs:
+#   "TARGET CRIT" to stdout.
+# Returns:
+#   0 if the sensor is a known component, 1 otherwise (caller decides).
+#######################################
+classify_sensor() {
+  case "${1,,}" in
+    *vram* | *gddr* | *amdgpu*mem* | *radeon*mem* | *nvidia*mem*) echo "60 95" ;;
+    *amdgpu* | *radeon* | *nouveau* | *nvidia* | *gpu* | *junction* | *edge* | *hotspot*) echo "60 85" ;;
+    *k10temp* | *coretemp* | *zenpower* | *package* | *tctl* | *tdie* | *tccd* | *core* | *cpu* | *apu* | *soc*) echo "60 80" ;;
+    *vrm* | *mosfet* | *charger* | *vddgfx* | *vddnb*) echo "60 90" ;;
+    *spd* | *dimm* | *memory* | *ram*) echo "50 85" ;;
+    *pch* | *chipset*) echo "55 90" ;;
+    *bat*) echo "30 45" ;;
+    *nvme*) echo "60 80" ;;
+    *ssd* | *sata* | *ahci* | *scsi*) echo "50 70" ;;
+    *hdd* | *drivetemp*) echo "42 55" ;;
+    *) return 1 ;;
+  esac
 }
 
 #######################################
@@ -149,10 +227,32 @@ ipmi_profile() {
 }
 
 #######################################
-# Select the fan-control backend: a profiled IPMI BMC (any brand), else hwmon.
-# An IPMI BMC whose vendor is not profiled still allows read-only monitoring.
+# Detect a ChromeOS/Framework embedded controller reachable through ectool.
+# This is the fan-control path on laptops (e.g. Framework 16) that have no IPMI
+# BMC and expose no writable hwmon PWM: the fans live behind the EC, and ectool
+# is the only way to drive them. Reading temperatures still goes through hwmon
+# (k10temp, amdgpu, ...); the EC backend only owns the fan WRITE path.
 # Globals:
-#   IPMITOOL (read); BACKEND, IPMI_VENDOR, RAW_*, HWMON_* (write)
+#   ECTOOL (read); EC_NUMFANS (write)
+# Returns:
+#   0 if the EC exposes at least one controllable fan, 1 otherwise.
+#######################################
+detect_ec() {
+  command -v "$ECTOOL" >/dev/null 2>&1 || return 1
+  local n
+  n=$("$ECTOOL" pwmgetnumfans 2>/dev/null | grep -oE '[0-9]+' | head -1)
+  [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] || return 1
+  EC_NUMFANS="$n"
+  return 0
+}
+
+#######################################
+# Select the fan-control backend, in order of specificity: a profiled IPMI BMC
+# (servers, any brand), else a ChromeOS/Framework EC via ectool (laptops), else
+# a writable hwmon PWM (standard PC). An IPMI BMC whose vendor is not profiled
+# still allows read-only monitoring.
+# Globals:
+#   IPMITOOL, ECTOOL (read); BACKEND, IPMI_VENDOR, RAW_*, HWMON_*, EC_* (write)
 #######################################
 detect_backend() {
   local mc mfg
@@ -163,6 +263,11 @@ detect_backend() {
   if [[ -n "$RAW_MANUAL" ]]; then
     BACKEND=ipmi
     log "backend: ipmi/${IPMI_VENDOR} (Manufacturer ID=${mfg})"
+    return
+  fi
+  if detect_ec; then
+    BACKEND=ec
+    log "backend: ec (ectool, ${EC_NUMFANS} fan(s))"
     return
   fi
   if detect_hwmon; then
@@ -189,6 +294,10 @@ fan_auto() {
       # ipmitool as separate arguments; the word-splitting is intentional.
       # shellcheck disable=SC2086
       "$IPMITOOL" raw $RAW_AUTO >/dev/null 2>&1
+      ;;
+    ec)
+      # Hand every fan back to the EC's own automatic control.
+      "$ECTOOL" autofanctrl >/dev/null 2>&1
       ;;
     hwmon)
       local i
@@ -245,6 +354,11 @@ fan_set() {
         *) return 1 ;;
       esac
       ;;
+    ec)
+      # A single duty-cycle percent drives all EC fans; issuing it also switches
+      # the EC out of automatic control, so no separate "manual" step is needed.
+      "$ECTOOL" fanduty "$1" >/dev/null 2>&1 || return 1
+      ;;
     hwmon)
       local pwmval p
       pwmval=$(($1 * 255 / 100))
@@ -285,7 +399,7 @@ apply_pct() {
   delta=$((pct > LAST_PCT ? pct - LAST_PCT : LAST_PCT - pct))
   if ((LAST_PCT < 0 || delta >= HYST_PCT)); then
     if fan_set "$pct"; then
-      log "fans -> ${pct}% (T=${T}C target=$(effective_target)C)"
+      log "fans -> ${pct}% (${CTRLLABEL} ${CTRLTEMP}C target=${CTRLTARGET}C)"
     else
       log "failed to set fan speed -> automatic fan control"
       to_auto
@@ -294,11 +408,12 @@ apply_pct() {
 }
 
 #######################################
-# Read metrics via IPMI in a single ipmitool pass.
+# Read metrics via IPMI in a single ipmitool pass, classifying each sensor into
+# its component profile (same table as classify_sensor).
 # Globals:
-#   IPMITOOL, CONTROL_UCR_MIN, AMBIENT_MATCH (read)
+#   IPMITOOL, AMBIENT_MATCH, TEMP_SANE_* (read)
 # Outputs:
-#   "T=<hottest> CRITMIN=<min ucr> INLET=<inlet> NCTRL=<n>" to stdout.
+#   "CTRLTEMP=.. CTRLTARGET=.. CTRLLABEL=.. CRITHIT=.. CRITLABEL=.. INLET=.. NCTRL=.."
 # Returns:
 #   0 on success, 1 if IPMI returned nothing.
 #######################################
@@ -306,64 +421,131 @@ read_metrics_ipmi() {
   local out
   out=$("$IPMITOOL" sensor 2>/dev/null) || return 1
   [[ -n "$out" ]] || return 1
-  awk -F'|' -v umin="$CONTROL_UCR_MIN" -v amb="$AMBIENT_MATCH" '
+  awk -F'|' -v amb="$AMBIENT_MATCH" \
+    -v tmin="$TEMP_SANE_MIN" -v tmax="$TEMP_SANE_MAX" \
+    -v gtarget="$GENERIC_TARGET" -v gcritmin="$GENERIC_CRIT_MIN" '
     function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+    function sane(v) { return (v >= tmin && v <= tmax) }
+    # Same sourced profiles as classify_sensor(); sets g_t/g_c, returns 1 if known.
+    function classify(n,   l) {
+      l = tolower(n)
+      if (l ~ /vram|gddr/)                                   { g_t=60; g_c=95; return 1 }
+      if (l ~ /gpu|junction|edge|hotspot/)                   { g_t=60; g_c=85; return 1 }
+      if (l ~ /cpu|package|tctl|tdie|tccd|core|apu|soc|proc/){ g_t=60; g_c=80; return 1 }
+      if (l ~ /vrm|mosfet|charger|vcore|vddgfx/)             { g_t=60; g_c=90; return 1 }
+      if (l ~ /dimm|memory|ram|spd/)                         { g_t=50; g_c=85; return 1 }
+      if (l ~ /pch|chipset/)                                 { g_t=55; g_c=90; return 1 }
+      if (l ~ /bat/)                                         { g_t=30; g_c=45; return 1 }
+      if (l ~ /nvme/)                                        { g_t=60; g_c=80; return 1 }
+      if (l ~ /ssd|sata|ahci|scsi/)                          { g_t=50; g_c=70; return 1 }
+      if (l ~ /hdd|drive/)                                   { g_t=42; g_c=55; return 1 }
+      return 0
+    }
+    BEGIN { best = -1000 }
     { name = trim($1); reading = trim($2); unit = trim($3); ucr = trim($9) }
     unit ~ /degrees C/ && reading ~ /^[0-9]+(\.[0-9]+)?$/ {
       r = reading + 0
-      if (name ~ amb) inlet = r
-      has_ucr = (ucr ~ /^[0-9]+(\.[0-9]+)?$/)
-      if (has_ucr && (ucr + 0) >= umin) {
-        nctrl++
-        if (r > hottest) hottest = r
-        if (critmin == 0 || (ucr + 0) < critmin) critmin = ucr + 0
+      if (!sane(r)) next
+      if (name ~ amb) { inlet = r; next }
+      sc = (ucr ~ /^[0-9]+(\.[0-9]+)?$/ && sane(ucr + 0)) ? ucr + 0 : 0
+      if (classify(name)) {
+        if (sc > 0 && sc < g_c) g_c = sc   # tighter real crit wins
+      } else if (sc >= gcritmin) {
+        g_t = gtarget; g_c = sc            # generic high-crit sensor (server names)
+      } else {
+        if (sc > 0 && r >= sc) { crithit = 1; crlabel = name }  # low-crit: bypass only
+        next
       }
+      nctrl++
+      press = r - g_t
+      if (press > best) { best = press; ctemp = r; ctarget = g_t; clabel = name }
+      if (r >= g_c) { crithit = 1; crlabel = name }   # bare hard threshold
     }
     END {
-      printf "T=%d CRITMIN=%d INLET=%d NCTRL=%d\n", \
-        int(hottest + 0.5), int(critmin + 0.5), int(inlet + 0.5), nctrl + 0
+      gsub(/[^A-Za-z0-9_-]/, "_", clabel); gsub(/[^A-Za-z0-9_-]/, "_", crlabel)
+      if (clabel == "") clabel = "none"
+      if (crlabel == "") crlabel = "none"
+      printf "CTRLTEMP=%d CTRLTARGET=%d CTRLLABEL=%s CRITHIT=%d CRITLABEL=%s INLET=%d NCTRL=%d\n", \
+        int(ctemp + 0.5), ctarget + 0, clabel, crithit + 0, crlabel, int(inlet + 0.5), nctrl + 0
     }' <<<"$out"
 }
 
 #######################################
-# Read metrics from Linux hwmon sensors (coretemp, k10temp, ...).
-# A sensor counts as controlling when its critical threshold is CPU-class, or
-# when its label looks like a CPU domain (fallback critical = HWMON_CPU_CRIT).
+# Read metrics from Linux hwmon sensors (coretemp, k10temp, amdgpu, nvme, ...).
+# Each sensor is classified into its component profile (target + crit). The
+# driver of regulation is the component furthest above ITS OWN target; the bypass
+# fires as soon as any component reaches ITS OWN crit (bare, no margin). A sensor
+# with an unknown class but a real sysfs crit still counts for the bypass only.
 # Globals:
-#   CONTROL_UCR_MIN, HWMON_CPU_CRIT, AMBIENT_MATCH (read)
+#   AMBIENT_MATCH (read)
 # Outputs:
-#   "T=<hottest> CRITMIN=<min crit> INLET=<inlet> NCTRL=<n>" to stdout.
+#   "CTRLTEMP=.. CTRLTARGET=.. CTRLLABEL=.. CRITHIT=.. CRITLABEL=.. INLET=.. NCTRL=.."
 # Returns:
 #   0 if any temperature was read, 1 otherwise.
 #######################################
 read_metrics_hwmon() {
-  local ti base val label crit
-  local hottest=0 critmin=0 inlet=0 nctrl=0 any=0 tdeg cdeg
+  local ti base val label chip key crit ccrit prof tgt tdeg press
+  local inlet=0 nctrl=0 any=0
+  local best=-1000 ctemp=0 ctarget=0 clabel=none crithit=0 crlabel=none
   for ti in /sys/class/hwmon/hwmon*/temp[0-9]*_input; do
     [[ -r "$ti" ]] || continue
     val=$(cat "$ti" 2>/dev/null)
     [[ "$val" =~ ^[0-9]+$ ]] || continue
-    any=1
     tdeg=$((val / 1000))
+    # Reject a phantom/stuck reading before it can drive control (a 179C ghost).
+    temp_sane "$tdeg" || continue
+    any=1
     base="${ti%_input}"
     label=$(cat "${base}_label" 2>/dev/null || echo "")
-    [[ "$label" =~ $AMBIENT_MATCH ]] && inlet=$tdeg
-    crit=$(cat "${base}_crit" 2>/dev/null || echo "")
-    if [[ "$crit" =~ ^[0-9]+$ ]]; then cdeg=$((crit / 1000)); else cdeg=0; fi
-    if ((cdeg >= CONTROL_UCR_MIN)); then
-      :
-    elif [[ "$label" =~ (Package|Tctl|Tdie|Core|CPU) ]]; then
-      cdeg=$HWMON_CPU_CRIT
-    else
+    chip=$(cat "${base%/*}/name" 2>/dev/null || echo "")
+    key="${chip} ${label}"
+    # Ambient/inlet is a reference, never a controlling component.
+    [[ "$key" =~ $AMBIENT_MATCH ]] && {
+      inlet=$tdeg
       continue
+    }
+    # This sensor's own sysfs critical, if plausible.
+    crit=$(cat "${base}_crit" 2>/dev/null || echo "")
+    if [[ "$crit" =~ ^[0-9]+$ ]]; then ccrit=$((crit / 1000)); else ccrit=0; fi
+    temp_sane "$ccrit" || ccrit=0
+    if prof=$(classify_sensor "$key"); then
+      # Known component: regulate toward TARGET; crit = min(sourced, sysfs) so a
+      # tighter real threshold wins and a bogus one is capped by the table.
+      read -r tgt crit <<<"$prof"
+      ((ccrit > 0 && ccrit < crit)) && crit="$ccrit"
+    elif ((ccrit >= GENERIC_CRIT_MIN)); then
+      # Unclassified but a high own-crit: a hot active component (generic server
+      # sensor). Regulate toward the generic target, own crit as the bypass --
+      # preserves the historical "any high-crit sensor is controlling".
+      tgt="$GENERIC_TARGET"
+      crit="$ccrit"
+    elif ((ccrit > 0)); then
+      # Unclassified low-crit sensor: hard-safety bypass only, never a driver.
+      ((tdeg >= ccrit)) && {
+        crithit=1
+        crlabel=${key//[^A-Za-z0-9_-]/_}
+      }
+      continue
+    else
+      continue # Nothing usable (no class, no crit).
     fi
+    # Regulated component (classified or generic high-crit): drive + bypass.
     ((nctrl++))
-    ((tdeg > hottest)) && hottest=$tdeg
-    ((critmin == 0 || cdeg < critmin)) && critmin=$cdeg
+    press=$((tdeg - tgt))
+    if ((press > best)); then
+      best=$press
+      ctemp=$tdeg
+      ctarget=$tgt
+      clabel=${key//[^A-Za-z0-9_-]/_}
+    fi
+    ((tdeg >= crit)) && {
+      crithit=1
+      crlabel=${key//[^A-Za-z0-9_-]/_}
+    }
   done
   ((any == 0)) && return 1
-  printf "T=%d CRITMIN=%d INLET=%d NCTRL=%d\n" \
-    "$hottest" "$critmin" "$inlet" "$nctrl"
+  printf "CTRLTEMP=%d CTRLTARGET=%d CTRLLABEL=%s CRITHIT=%d CRITLABEL=%s INLET=%d NCTRL=%d\n" \
+    "$ctemp" "$ctarget" "$clabel" "$crithit" "$crlabel" "$inlet" "$nctrl"
 }
 
 #######################################
@@ -375,25 +557,10 @@ read_metrics_hwmon() {
 read_metrics() {
   case "$BACKEND" in
     ipmi) read_metrics_ipmi ;;
+    ec) read_metrics_hwmon ;;
     hwmon) read_metrics_hwmon ;;
     *) read_metrics_ipmi || read_metrics_hwmon ;;
   esac
-}
-
-#######################################
-# Compute the effective target, kept safely below Upper-Critical.
-# Globals:
-#   TARGET_TEMP, CRITMIN, HARD_MARGIN (read)
-# Outputs:
-#   The effective target temperature to stdout.
-#######################################
-effective_target() {
-  local ceiling=$((CRITMIN - HARD_MARGIN - 5))
-  if ((CRITMIN > 0 && TARGET_TEMP > ceiling)); then
-    echo "$ceiling"
-  else
-    echo "$TARGET_TEMP"
-  fi
 }
 
 #######################################
@@ -433,7 +600,7 @@ save_calibration() {
 CAL_PCT=${CAL_PCT}
 CAL_SLOPE=${CAL_SLOPE}
 CAL_INLET=${CAL_INLET}
-CAL_TARGET=$(effective_target)
+CAL_TARGET=${CTRLTARGET}
 CAL_TS=$(date '+%Y-%m-%dT%H:%M:%S%z')
 EOF
 }
@@ -448,13 +615,20 @@ EOF
 calibrate() {
   can_control || return 0
   read_metrics_into || return 1
-  local target
-  target=$(effective_target)
-  log "calibrating toward ${target}C (inlet=${INLET}C, ${NCTRL} sensors)..."
+  log "calibrating: driver=${CTRLLABEL} target=${CTRLTARGET}C" \
+    "(inlet=${INLET}C, ${NCTRL} components)..."
   to_manual
 
   local pct prev_pct=-1 prev_t=-1 step err
-  pct=$((CAL_PCT > 0 ? CAL_PCT : (MIN_PCT + MAX_PCT) / 2))
+  # Start from the current fan speed if known (a post-critical recalibration thus
+  # begins at 100% and only eases down), else the last calibrated point, else mid.
+  if ((LAST_PCT >= 0)); then
+    pct="$LAST_PCT"
+  elif ((CAL_PCT > 0)); then
+    pct="$CAL_PCT"
+  else
+    pct=$(((MIN_PCT + MAX_PCT) / 2))
+  fi
   local i
   for ((i = 0; i < MAX_CAL_STEPS; i++)); do
     ((pct < MIN_PCT)) && pct="$MIN_PCT"
@@ -462,13 +636,13 @@ calibrate() {
     fan_set "$pct"
     sleep "$STABILIZE_SECS"
     read_metrics_into || return 1
-    err=$((T - target))
-    log "  step ${i}: ${pct}% -> ${T}C (err=${err})"
+    err=$((CTRLTEMP - CTRLTARGET))
+    log "  step ${i}: ${pct}% -> ${CTRLLABEL} ${CTRLTEMP}C (target=${CTRLTARGET}C err=${err})"
 
     # Derive the slope from the last two distinct operating points.
     if ((prev_pct >= 0 && pct != prev_pct)); then
       CAL_SLOPE=$(awk \
-        -v t1="$prev_t" -v t2="$T" -v p1="$prev_pct" -v p2="$pct" \
+        -v t1="$prev_t" -v t2="$CTRLTEMP" -v p1="$prev_pct" -v p2="$pct" \
         'BEGIN { printf "%.3f", (t2 - t1) / (p2 - p1) }')
     fi
 
@@ -477,7 +651,7 @@ calibrate() {
     if ((pct >= MAX_PCT && err > 0)); then break; fi # As loud as allowed.
 
     prev_pct="$pct"
-    prev_t="$T"
+    prev_t="$CTRLTEMP"
     step=$((err >= 0 ? err : -err))
     ((step < CAL_STEP_MIN)) && step="$CAL_STEP_MIN"
     ((step > CAL_STEP_MAX)) && step="$CAL_STEP_MAX"
@@ -492,7 +666,8 @@ calibrate() {
     "pct=${CAL_PCT}% slope=${CAL_SLOPE}C/% (gain=$(current_gain)%/C)"
 }
 
-# read_metrics wrapper that assigns the T/CRITMIN/INLET/NCTRL globals.
+# read_metrics wrapper that assigns the CTRL*/CRIT*/INLET/NCTRL globals. All
+# emitted values are numeric or sanitized names, so eval is safe.
 read_metrics_into() {
   local line
   line=$(read_metrics) || return 1
@@ -509,15 +684,20 @@ cleanup() {
 do_check() {
   detect_backend
   echo "--- Temperature sensors ---"
-  if [[ "$BACKEND" == hwmon ]]; then
-    local ti b
+  if [[ "$BACKEND" == hwmon || "$BACKEND" == ec ]]; then
+    local ti b val crit
     for ti in /sys/class/hwmon/hwmon*/temp[0-9]*_input; do
       [[ -r "$ti" ]] || continue
       b="${ti%_input}"
+      # A present-but-unreadable sensor (e.g. an unconnected channel) returns no
+      # data; skip it so we never divide an empty string.
+      val=$(cat "$ti" 2>/dev/null)
+      [[ "$val" =~ ^[0-9]+$ ]] || continue
+      crit=$(cat "${b}_crit" 2>/dev/null)
+      [[ "$crit" =~ ^[0-9]+$ ]] || crit=0
       printf "  %-24s reading=%sC crit=%sC\n" \
         "$(cat "${b}_label" 2>/dev/null || basename "$b")" \
-        "$(($(cat "$ti") / 1000))" \
-        "$(($(cat "${b}_crit" 2>/dev/null || echo 0) / 1000))"
+        "$((val / 1000))" "$((crit / 1000))"
     done
   else
     "$IPMITOOL" sensor 2>/dev/null | awk -F'|' '
@@ -529,7 +709,9 @@ do_check() {
       }'
   fi
   echo "--- Fans ---"
-  if [[ "$BACKEND" == hwmon ]]; then
+  if [[ "$BACKEND" == ec ]]; then
+    "$ECTOOL" pwmgetfanrpm all 2>/dev/null | sed 's/^/  /'
+  elif [[ "$BACKEND" == hwmon ]]; then
     local f
     for f in /sys/class/hwmon/hwmon*/fan[0-9]*_input; do
       [[ -r "$f" ]] && printf "  %s: %s RPM\n" \
@@ -540,8 +722,8 @@ do_check() {
   fi
   echo "--- Metrics ---"
   if read_metrics_into; then
-    echo "  T=${T}C CRITMIN=${CRITMIN}C INLET=${INLET}C sensors=${NCTRL}" \
-      "target=$(effective_target)C"
+    echo "  driver=${CTRLLABEL} ${CTRLTEMP}C (target ${CTRLTARGET}C)" \
+      "bypass=${CRITHIT}${CRITHIT:+ (${CRITLABEL})} components=${NCTRL} inlet=${INLET}C"
   else
     echo "  (no readable sensors)"
   fi
@@ -563,30 +745,31 @@ do_restore() {
 }
 
 #######################################
-# One regulation cycle: proportional control plus drift-driven recalibration.
+# One regulation cycle: hard-safety bypass, then proportional tracking of the
+# driving component toward its target, plus drift/crit-driven recalibration.
 # Globals:
-#   T, CRITMIN, INLET, CAL_PCT, CAL_INLET, DRIFT_COUNT and tuning.
+#   CTRLTEMP, CTRLTARGET, CRITHIT, CRITLABEL, INLET, CAL_PCT, CAL_INLET,
+#   DRIFT_COUNT and tuning.
 #######################################
 regulate() {
-  local target err gain step pct base inlet_delta
+  local err gain step pct base inlet_delta
 
-  # Temperature-based emergency: force max cooling. Repeated emergencies mean
-  # the calibration is badly wrong, so escalate to a recalibration.
-  if ((T >= CRITMIN - HARD_MARGIN)); then
+  # Hard safety bypass (bare, no margin): a component reached ITS OWN crit. This
+  # must never happen in normal use -- the real-time curve holds every component
+  # at its target -- so a repeated trip means the calibration is off.
+  if ((CRITHIT == 1)); then
+    # Cumulative with the target-drift check below. Reaching a crit is proof the
+    # curve is wrong, so: force 100% now AND recalibrate immediately (no waiting
+    # for it to repeat). Calibration restarts from the current fan speed (100%
+    # here), so it never eases off while a component is still critical.
     apply_pct "$MAX_PCT"
-    ((EMERG_COUNT++))
-    log "over-temperature (${T}C, crit ${CRITMIN}C) -> max cooling"
-    if ((EMERG_COUNT >= DRIFT_CYCLES)); then
-      log "repeated over-temperature -> recalibrate"
-      calibrate
-      EMERG_COUNT=0
-    fi
+    log "CRITICAL bypass: ${CRITLABEL} reached its crit -> max cooling + recalibrate"
+    calibrate
     return
   fi
-  EMERG_COUNT=0
 
-  target=$(effective_target)
-  err=$((T - target))
+  # Track the driving component (furthest above its optimal target) toward it.
+  err=$((CTRLTEMP - CTRLTARGET))
 
   # Gentle incremental (integral) tracking: nudge the current speed toward the
   # target by a bounded step. Bounding the per-cycle change keeps it stable and
@@ -639,7 +822,7 @@ run_daemon() {
   fi
   trap cleanup EXIT
   trap 'exit 0' INT TERM
-  log "starting (poll=${POLL_INTERVAL}s target=${TARGET_TEMP}C" \
+  log "starting (poll=${POLL_INTERVAL}s per-component targets" \
     "range=${MIN_PCT}-${MAX_PCT}%)"
 
   if can_control; then
@@ -658,7 +841,7 @@ run_daemon() {
     FAIL_COUNT=0
 
     if ! can_control; then
-      log "monitor: T=${T}C inlet=${INLET}C sensors=${NCTRL}"
+      log "monitor: ${CTRLLABEL} ${CTRLTEMP}C inlet=${INLET}C components=${NCTRL}"
       sleep "$POLL_INTERVAL"
       continue
     fi
