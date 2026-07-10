@@ -17,16 +17,24 @@
 #   fan curve tracks, in real time, the component that is furthest above ITS OWN
 #   target -- so every part is held at its optimal temperature, all the time.
 #
-#   Calibration measures the real thermal response of THIS machine: it converges
-#   the fan speed to the point that holds the driving component at its target,
-#   and records the fan/temperature slope (CAL_PCT, CAL_SLOPE, CAL_INLET are
-#   persisted). It recalibrates by itself when the target error stays large
-#   (curve is wrong: cooling too much or too little), on an inlet shift, and --
-#   as sheer evidence the curve is wrong -- immediately if any crit is reached.
+#   Calibration measures the real thermal response of THIS machine by its
+#   DERIVATIVE: at each fan speed it watches whether the driving component rises,
+#   falls or holds over a window (dT/dt), not a single instant, and converges to
+#   the speed that holds it stable at its target. It also records the lowest speed
+#   that keeps the volatile part from climbing -- the constant floor (CAL_FLOOR)
+#   the machine idles at, so it settles at one level instead of oscillating. In
+#   normal operation a per-component DEAD ZONE around the target keeps the fans
+#   steady through noise (no yoyo); only past that does the speed nudge, and past
+#   the wider RECAL band the curve is recalibrated (also on inlet shift, and
+#   immediately -- as sheer evidence -- if any knee is reached).
 #
-#   CRIT is a bare hard-safety threshold (T >= crit -> 100%, no margin), a net
-#   for a program-level failure that should never trigger in normal use, never an
-#   operating point. Ambient/inlet sensors are reference only, never controlled.
+#   Two hard thresholds sit above the target, both bare (no margin) and both
+#   meant never to trigger in normal use. KNEE: T >= knee forces fans to 100%
+#   (longevity). SURVIVAL (the hardware Tjmax): if temperature still climbs past
+#   it -- cooling has truly failed -- a last-resort escalation warns the user at
+#   +5, powers off cleanly at +8, and cuts power violently (SysRq o) at +12.
+#   The escalation keys off SURVIVAL, never the knee, so a normal load spike
+#   never powers the machine off. Ambient/inlet sensors are reference only.
 #   Writing the fan speed uses an auto-detected vendor profile (ipmitool mc info)
 #   on IPMI, ectool on a ChromeOS/Framework EC, or hwmon PWM; an unknown IPMI
 #   vendor stays in read-only monitor mode.
@@ -57,7 +65,17 @@ MAX_PCT=100                   # Fan speed ceiling, percent.
 # the bypass, preserving the historical "any high-crit sensor is controlling"
 # behaviour. Below GENERIC_CRIT_MIN an unclassified sensor is bypass-only.
 GENERIC_TARGET=60             # Fallback target for an unclassified high-crit sensor.
-GENERIC_CRIT_MIN=80           # Min own-crit for an unclassified sensor to be controlling.
+GENERIC_DEADBAND=8            # Fallback anti-yoyo hysteresis for such a sensor.
+GENERIC_RECAL=12             # Fallback recalibration threshold for such a sensor.
+GENERIC_CRIT_MIN=80          # Min own-crit for an unclassified sensor to be controlling.
+# Last-resort thermal escalation, in deg C ABOVE a component's survival crit
+# (its Tjmax). Fans are already at 100% (knee bypass) well before this; these
+# only fire if temperature keeps climbing past the hardware limit -- i.e. cooling
+# has really failed. Keyed off SURVIVAL, never the longevity knee, so a normal
+# load spike never powers off. Set any to a very high number to disable it.
+CRIT_SURVIVE_NOTIFY=5         # +5 over survival  -> warn the user to save NOW.
+CRIT_SURVIVE_SOFT=8           # +8 over survival  -> clean poweroff.
+CRIT_SURVIVE_HARD=12          # +12 over survival -> violent instant power cut.
 # Physical plausibility window for any temperature reading OR threshold, deg C.
 # A value outside it comes from a stuck, unpopulated or parasitic sensor (a
 # phantom 179C channel, a -273C unconnected one, a bogus 250C "critical") and
@@ -78,12 +96,13 @@ TRIM_MAX=4                    # Max fan change per cycle while holding, percent.
 MAX_FAIL=3                    # Consecutive IPMI read errors before failsafe.
 REQUIRE_KNOWN_VENDOR=0        # 1 = exit on unknown vendor; 0 = monitor mode.
 
-# Calibration and drift tuning.
-DEADBAND=3        # Convergence tolerance during calibration, deg C.
-DRIFT=8           # Sustained |error| that triggers recalibration, deg C.
-DRIFT_CYCLES=5    # Cycles the drift must persist before recalibrating.
+# Calibration and drift tuning. (The deadband and the recalibration threshold are
+# per component -- see classify_sensor; a hot-running part tolerates a wider swing
+# than a slow one, which is what stops the fans from chasing every spike.)
+STABLE_BAND=2     # Calibration: driver moving <= this over a window == stable.
+DRIFT_CYCLES=5    # Cycles the error must stay past RECAL before recalibrating.
 INLET_DRIFT=5     # Inlet change vs calibration that triggers recal, deg C.
-STABILIZE_SECS=40 # Settle time after a fan change while calibrating.
+STABILIZE_SECS=40 # Settle/measure window after a fan change while calibrating.
 MAX_CAL_STEPS=10  # Maximum convergence steps per calibration.
 CAL_STEP_MIN=2    # Minimum per-step fan change while calibrating, pct.
 CAL_STEP_MAX=12   # Maximum per-step fan change while calibrating, pct.
@@ -107,21 +126,29 @@ HWMON_EN_ORIG=() # Their original enable values (restored on stop).
 MODE=auto        # Current control mode: auto | manual.
 LAST_PCT=-1      # Last applied speed, percent (-1 = unknown).
 FAIL_COUNT=0     # Consecutive IPMI read failures.
-DRIFT_COUNT=0    # Consecutive cycles with |error| > DRIFT.
+DRIFT_COUNT=0    # Consecutive cycles with |error| >= the driver's RECAL.
 
 # Persisted calibration (loaded from STATE_FILE).
 CAL_PCT=0   # Calibrated operating fan speed, percent.
 CAL_SLOPE=0 # Measured response, deg C per percent (negative).
 CAL_INLET=0 # Inlet temperature at calibration time, deg C.
+CAL_FLOOR=0 # Calibrated constant floor: lowest speed that still holds stability.
 
 # Metrics from the last read (set by eval of read_metrics).
 CTRLTEMP=0     # Driving component temperature, deg C (furthest above its target).
 CTRLTARGET=0   # That component's optimal target (from classify_sensor).
+CTRLDEADBAND=0 # That component's anti-yoyo hysteresis (deg C).
+CTRLRECAL=0    # That component's recalibration threshold (deg C).
 CTRLLABEL=none # That component's sanitized name (for logs).
-CRITHIT=0      # 1 = a component reached its own crit -> bare hard bypass.
-CRITLABEL=none # The component that tripped the bypass (for logs).
+CRITHIT=0      # 1 = a component reached its own knee -> bare hard fan bypass.
+CRITLABEL=none # The component that tripped the fan bypass (for logs).
+SURVOVER=-1000 # Worst overshoot (deg C) above any component's survival crit.
+SURVTEMP=0     # Temperature of that worst component, deg C.
+SURVLABEL=none # Name of that worst component (for logs/notifications).
 INLET=0        # Inlet-air temperature, deg C.
 NCTRL=0        # Number of controlling components seen.
+NOTIFY_SENT=0  # 1 = the "save now" warning is currently active (avoid spamming).
+POWEROFF_INITIATED=0 # 1 = a poweroff has already been triggered this episode.
 
 log() {
   printf '%s fanctl: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"
@@ -146,33 +173,36 @@ temp_sane() {
 }
 
 #######################################
-# Classify a sensor into its component profile and emit "TARGET CRIT".
-# TARGET is the optimal operating temperature the fan curve tracks in real time;
-# CRIT is the sourced hard-safety knee (see the table below). Both are per class,
-# never a margin off each other. Sourced values (deg C):
-#   CPU 60/80, GPU core 60/85, GPU VRAM 60/95, VRM 60/90, RAM 50/85,
-#   chipset 55/90, battery 30/45 (all "run cooler is better");
-#   NVMe 60/80, SATA SSD 50/70, HDD 42/55 (all "run warm is better").
+# Classify a sensor into its component profile and emit
+# "TARGET DEADBAND RECAL KNEE SURVIVAL" (all deg C, sourced, per class).
+# TARGET   - optimal temperature the fan curve tracks in real time.
+# DEADBAND - anti-yoyo hysteresis: the driver may sit this far from TARGET without
+#            the fans moving at all. Wide for volatile parts (CPU/GPU), tight for
+#            slow ones (HDD), so noisy spikes never chase the fans.
+# RECAL    - error past which the curve is deemed wrong and recalibration runs.
+# KNEE     - longevity knee; reaching it forces fans to 100% ("cool it now").
+# SURVIVAL - hardware Tjmax; the last-resort poweroff escalation keys off THIS,
+#            never the knee, so a normal load spike never powers the box off.
 # Ambient/inlet is handled by the caller and never reaches here.
 # Arguments:
 #   $1 - lowercase "chipname label" classification key
 # Outputs:
-#   "TARGET CRIT" to stdout.
+#   "TARGET DEADBAND RECAL KNEE SURVIVAL" to stdout.
 # Returns:
 #   0 if the sensor is a known component, 1 otherwise (caller decides).
 #######################################
 classify_sensor() {
   case "${1,,}" in
-    *vram* | *gddr* | *amdgpu*mem* | *radeon*mem* | *nvidia*mem*) echo "60 95" ;;
-    *amdgpu* | *radeon* | *nouveau* | *nvidia* | *gpu* | *junction* | *edge* | *hotspot*) echo "60 85" ;;
-    *k10temp* | *coretemp* | *zenpower* | *package* | *tctl* | *tdie* | *tccd* | *core* | *cpu* | *apu* | *soc*) echo "60 80" ;;
-    *vrm* | *mosfet* | *charger* | *vddgfx* | *vddnb*) echo "60 90" ;;
-    *spd* | *dimm* | *memory* | *ram*) echo "50 85" ;;
-    *pch* | *chipset*) echo "55 90" ;;
-    *bat*) echo "30 45" ;;
-    *nvme*) echo "60 80" ;;
-    *ssd* | *sata* | *ahci* | *scsi*) echo "50 70" ;;
-    *hdd* | *drivetemp*) echo "42 55" ;;
+    *vram* | *gddr* | *amdgpu*mem* | *radeon*mem* | *nvidia*mem*) echo "60 6 10 95 100" ;;
+    *amdgpu* | *radeon* | *nouveau* | *nvidia* | *gpu* | *junction* | *edge* | *hotspot*) echo "60 8 12 85 105" ;;
+    *k10temp* | *coretemp* | *zenpower* | *package* | *tctl* | *tdie* | *tccd* | *core* | *cpu* | *apu* | *soc*) echo "60 10 15 80 95" ;;
+    *vrm* | *mosfet* | *charger* | *vddgfx* | *vddnb*) echo "60 6 10 90 110" ;;
+    *spd* | *dimm* | *memory* | *ram*) echo "50 5 8 85 95" ;;
+    *pch* | *chipset*) echo "55 5 8 90 105" ;;
+    *bat*) echo "30 4 7 45 60" ;;
+    *nvme*) echo "60 5 8 80 90" ;;
+    *ssd* | *sata* | *ahci* | *scsi*) echo "50 4 7 70 85" ;;
+    *hdd* | *drivetemp*) echo "42 3 6 55 65" ;;
     *) return 1 ;;
   esac
 }
@@ -423,25 +453,27 @@ read_metrics_ipmi() {
   [[ -n "$out" ]] || return 1
   awk -F'|' -v amb="$AMBIENT_MATCH" \
     -v tmin="$TEMP_SANE_MIN" -v tmax="$TEMP_SANE_MAX" \
-    -v gtarget="$GENERIC_TARGET" -v gcritmin="$GENERIC_CRIT_MIN" '
+    -v gtarget="$GENERIC_TARGET" -v gcritmin="$GENERIC_CRIT_MIN" \
+    -v gdband="$GENERIC_DEADBAND" -v grecal="$GENERIC_RECAL" '
     function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
     function sane(v) { return (v >= tmin && v <= tmax) }
-    # Same sourced profiles as classify_sensor(); sets g_t/g_c, returns 1 if known.
+    # Same sourced profiles as classify_sensor(); sets g_t/g_c/g_s (target, knee,
+    # survival), returns 1 if the sensor name is a known component class.
     function classify(n,   l) {
       l = tolower(n)
-      if (l ~ /vram|gddr/)                                   { g_t=60; g_c=95; return 1 }
-      if (l ~ /gpu|junction|edge|hotspot/)                   { g_t=60; g_c=85; return 1 }
-      if (l ~ /cpu|package|tctl|tdie|tccd|core|apu|soc|proc/){ g_t=60; g_c=80; return 1 }
-      if (l ~ /vrm|mosfet|charger|vcore|vddgfx/)             { g_t=60; g_c=90; return 1 }
-      if (l ~ /dimm|memory|ram|spd/)                         { g_t=50; g_c=85; return 1 }
-      if (l ~ /pch|chipset/)                                 { g_t=55; g_c=90; return 1 }
-      if (l ~ /bat/)                                         { g_t=30; g_c=45; return 1 }
-      if (l ~ /nvme/)                                        { g_t=60; g_c=80; return 1 }
-      if (l ~ /ssd|sata|ahci|scsi/)                          { g_t=50; g_c=70; return 1 }
-      if (l ~ /hdd|drive/)                                   { g_t=42; g_c=55; return 1 }
+      if (l ~ /vram|gddr/)                                   { g_t=60; g_d=6;  g_r=10; g_c=95; g_s=100; return 1 }
+      if (l ~ /gpu|junction|edge|hotspot/)                   { g_t=60; g_d=8;  g_r=12; g_c=85; g_s=105; return 1 }
+      if (l ~ /cpu|package|tctl|tdie|tccd|core|apu|soc|proc/){ g_t=60; g_d=10; g_r=15; g_c=80; g_s=95;  return 1 }
+      if (l ~ /vrm|mosfet|charger|vcore|vddgfx/)             { g_t=60; g_d=6;  g_r=10; g_c=90; g_s=110; return 1 }
+      if (l ~ /dimm|memory|ram|spd/)                         { g_t=50; g_d=5;  g_r=8;  g_c=85; g_s=95;  return 1 }
+      if (l ~ /pch|chipset/)                                 { g_t=55; g_d=5;  g_r=8;  g_c=90; g_s=105; return 1 }
+      if (l ~ /bat/)                                         { g_t=30; g_d=4;  g_r=7;  g_c=45; g_s=60;  return 1 }
+      if (l ~ /nvme/)                                        { g_t=60; g_d=5;  g_r=8;  g_c=80; g_s=90;  return 1 }
+      if (l ~ /ssd|sata|ahci|scsi/)                          { g_t=50; g_d=4;  g_r=7;  g_c=70; g_s=85;  return 1 }
+      if (l ~ /hdd|drive/)                                   { g_t=42; g_d=3;  g_r=6;  g_c=55; g_s=65;  return 1 }
       return 0
     }
-    BEGIN { best = -1000 }
+    BEGIN { best = -1000; survover = -1000 }
     { name = trim($1); reading = trim($2); unit = trim($3); ucr = trim($9) }
     unit ~ /degrees C/ && reading ~ /^[0-9]+(\.[0-9]+)?$/ {
       r = reading + 0
@@ -449,24 +481,31 @@ read_metrics_ipmi() {
       if (name ~ amb) { inlet = r; next }
       sc = (ucr ~ /^[0-9]+(\.[0-9]+)?$/ && sane(ucr + 0)) ? ucr + 0 : 0
       if (classify(name)) {
-        if (sc > 0 && sc < g_c) g_c = sc   # tighter real crit wins
+        if (sc > 0 && sc < g_c) g_c = sc   # tighter real crit wins the fan bypass
+        if (sc > 0) g_s = sc               # real Tjmax drives the poweroff escalation
       } else if (sc >= gcritmin) {
-        g_t = gtarget; g_c = sc            # generic high-crit sensor (server names)
+        g_t = gtarget; g_d = gdband; g_r = grecal; g_c = sc; g_s = sc  # generic sensor
       } else {
         if (sc > 0 && r >= sc) { crithit = 1; crlabel = name }  # low-crit: bypass only
         next
       }
       nctrl++
       press = r - g_t
-      if (press > best) { best = press; ctemp = r; ctarget = g_t; clabel = name }
-      if (r >= g_c) { crithit = 1; crlabel = name }   # bare hard threshold
+      if (press > best) { best = press; ctemp = r; ctarget = g_t; cdband = g_d; crecal = g_r; clabel = name }
+      if (r >= g_c) { crithit = 1; crlabel = name }   # bare hard fan threshold
+      over = r - g_s
+      if (over > survover) { survover = over; survtemp = r; survlabel = name }
     }
     END {
       gsub(/[^A-Za-z0-9_-]/, "_", clabel); gsub(/[^A-Za-z0-9_-]/, "_", crlabel)
+      gsub(/[^A-Za-z0-9_-]/, "_", survlabel)
       if (clabel == "") clabel = "none"
       if (crlabel == "") crlabel = "none"
-      printf "CTRLTEMP=%d CTRLTARGET=%d CTRLLABEL=%s CRITHIT=%d CRITLABEL=%s INLET=%d NCTRL=%d\n", \
-        int(ctemp + 0.5), ctarget + 0, clabel, crithit + 0, crlabel, int(inlet + 0.5), nctrl + 0
+      if (survlabel == "") survlabel = "none"
+      printf "CTRLTEMP=%d CTRLTARGET=%d CTRLDEADBAND=%d CTRLRECAL=%d CTRLLABEL=%s CRITHIT=%d CRITLABEL=%s SURVOVER=%d SURVTEMP=%d SURVLABEL=%s INLET=%d NCTRL=%d\n", \
+        int(ctemp + 0.5), ctarget + 0, cdband + 0, crecal + 0, clabel, crithit + 0, crlabel, \
+        (survover == -1000 ? -1000 : int(survover + 0.5)), int(survtemp + 0.5), survlabel, \
+        int(inlet + 0.5), nctrl + 0
     }' <<<"$out"
 }
 
@@ -484,9 +523,10 @@ read_metrics_ipmi() {
 #   0 if any temperature was read, 1 otherwise.
 #######################################
 read_metrics_hwmon() {
-  local ti base val label chip key crit ccrit prof tgt tdeg press
+  local ti base val label chip key crit ccrit prof tgt dband recal surv tdeg press over
   local inlet=0 nctrl=0 any=0
-  local best=-1000 ctemp=0 ctarget=0 clabel=none crithit=0 crlabel=none
+  local best=-1000 ctemp=0 ctarget=0 cdband=0 crecal=0 clabel=none crithit=0 crlabel=none
+  local survover=-1000 survtemp=0 survlabel=none
   for ti in /sys/class/hwmon/hwmon*/temp[0-9]*_input; do
     [[ -r "$ti" ]] || continue
     val=$(cat "$ti" 2>/dev/null)
@@ -509,18 +549,24 @@ read_metrics_hwmon() {
     if [[ "$crit" =~ ^[0-9]+$ ]]; then ccrit=$((crit / 1000)); else ccrit=0; fi
     temp_sane "$ccrit" || ccrit=0
     if prof=$(classify_sensor "$key"); then
-      # Known component: regulate toward TARGET; crit = min(sourced, sysfs) so a
-      # tighter real threshold wins and a bogus one is capped by the table.
-      read -r tgt crit <<<"$prof"
+      # Known component. KNEE = min(sourced, sysfs) so a tighter real threshold
+      # wins the fan bypass; SURVIVAL = the real sysfs Tjmax if present, else the
+      # sourced market Tjmax -- this is what the poweroff escalation keys off.
+      read -r tgt dband recal crit surv <<<"$prof"
       ((ccrit > 0 && ccrit < crit)) && crit="$ccrit"
+      ((ccrit > 0)) && surv="$ccrit"
     elif ((ccrit >= GENERIC_CRIT_MIN)); then
       # Unclassified but a high own-crit: a hot active component (generic server
-      # sensor). Regulate toward the generic target, own crit as the bypass --
-      # preserves the historical "any high-crit sensor is controlling".
+      # sensor). Regulate toward the generic target; its own crit is both the fan
+      # bypass and the survival threshold.
       tgt="$GENERIC_TARGET"
+      dband="$GENERIC_DEADBAND"
+      recal="$GENERIC_RECAL"
       crit="$ccrit"
+      surv="$ccrit"
     elif ((ccrit > 0)); then
-      # Unclassified low-crit sensor: hard-safety bypass only, never a driver.
+      # Unclassified low-crit sensor: fan bypass only. No poweroff escalation --
+      # a low, unqualified crit must never be able to power the machine off.
       ((tdeg >= ccrit)) && {
         crithit=1
         crlabel=${key//[^A-Za-z0-9_-]/_}
@@ -529,23 +575,32 @@ read_metrics_hwmon() {
     else
       continue # Nothing usable (no class, no crit).
     fi
-    # Regulated component (classified or generic high-crit): drive + bypass.
+    # Regulated component: drive the curve, arm the fan bypass, and track the
+    # worst overshoot above SURVIVAL for the last-resort poweroff escalation.
     ((nctrl++))
     press=$((tdeg - tgt))
     if ((press > best)); then
       best=$press
       ctemp=$tdeg
       ctarget=$tgt
+      cdband=$dband
+      crecal=$recal
       clabel=${key//[^A-Za-z0-9_-]/_}
     fi
     ((tdeg >= crit)) && {
       crithit=1
       crlabel=${key//[^A-Za-z0-9_-]/_}
     }
+    over=$((tdeg - surv))
+    if ((over > survover)); then
+      survover=$over
+      survtemp=$tdeg
+      survlabel=${key//[^A-Za-z0-9_-]/_}
+    fi
   done
   ((any == 0)) && return 1
-  printf "CTRLTEMP=%d CTRLTARGET=%d CTRLLABEL=%s CRITHIT=%d CRITLABEL=%s INLET=%d NCTRL=%d\n" \
-    "$ctemp" "$ctarget" "$clabel" "$crithit" "$crlabel" "$inlet" "$nctrl"
+  printf "CTRLTEMP=%d CTRLTARGET=%d CTRLDEADBAND=%d CTRLRECAL=%d CTRLLABEL=%s CRITHIT=%d CRITLABEL=%s SURVOVER=%d SURVTEMP=%d SURVLABEL=%s INLET=%d NCTRL=%d\n" \
+    "$ctemp" "$ctarget" "$cdband" "$crecal" "$clabel" "$crithit" "$crlabel" "$survover" "$survtemp" "$survlabel" "$inlet" "$nctrl"
 }
 
 #######################################
@@ -587,7 +642,7 @@ load_calibration() {
     # shellcheck source=/dev/null
     . "$STATE_FILE"
     log "loaded calibration:" \
-      "pct=${CAL_PCT}% slope=${CAL_SLOPE}C/% inlet=${CAL_INLET}C"
+      "pct=${CAL_PCT}% floor=${CAL_FLOOR}% slope=${CAL_SLOPE}C/% inlet=${CAL_INLET}C"
     return 0
   fi
   return 1
@@ -598,6 +653,7 @@ save_calibration() {
   cat >"$STATE_FILE" <<EOF
 # Written by fanctl --calibrate. Do not edit by hand.
 CAL_PCT=${CAL_PCT}
+CAL_FLOOR=${CAL_FLOOR}
 CAL_SLOPE=${CAL_SLOPE}
 CAL_INLET=${CAL_INLET}
 CAL_TARGET=${CTRLTARGET}
@@ -619,7 +675,7 @@ calibrate() {
     "(inlet=${INLET}C, ${NCTRL} components)..."
   to_manual
 
-  local pct prev_pct=-1 prev_t=-1 step err
+  local pct prev_pct=-1 prev_t=-1 step err t0 trend
   # Start from the current fan speed if known (a post-critical recalibration thus
   # begins at 100% and only eases down), else the last calibrated point, else mid.
   if ((LAST_PCT >= 0)); then
@@ -629,41 +685,65 @@ calibrate() {
   else
     pct=$(((MIN_PCT + MAX_PCT) / 2))
   fi
-  local i
+  # Search for the LOWEST speed that still holds the driver stable at/below its
+  # target -- the constant idle floor -- instead of validating whatever speed we
+  # started from. While a speed holds, step DOWN to probe lower; the moment a
+  # speed no longer holds, the last holding one just above was the minimum.
+  local i floor=-1
   for ((i = 0; i < MAX_CAL_STEPS; i++)); do
     ((pct < MIN_PCT)) && pct="$MIN_PCT"
     ((pct > MAX_PCT)) && pct="$MAX_PCT"
     fan_set "$pct"
+    # Measure the TREND over the settle window (dT/dt), not a single instant: read
+    # the driver at the start and end and see whether it rises, falls or holds.
+    read_metrics_into || return 1
+    t0=$CTRLTEMP
     sleep "$STABILIZE_SECS"
     read_metrics_into || return 1
+    trend=$((CTRLTEMP - t0))
     err=$((CTRLTEMP - CTRLTARGET))
-    log "  step ${i}: ${pct}% -> ${CTRLLABEL} ${CTRLTEMP}C (target=${CTRLTARGET}C err=${err})"
+    log "  step ${i}: ${pct}% -> ${CTRLLABEL} ${CTRLTEMP}C trend=${trend}C/win err=${err}C"
 
-    # Derive the slope from the last two distinct operating points.
+    # Slope (deg C per percent) from two distinct operating points, for the gain.
     if ((prev_pct >= 0 && pct != prev_pct)); then
       CAL_SLOPE=$(awk \
         -v t1="$prev_t" -v t2="$CTRLTEMP" -v p1="$prev_pct" -v p2="$pct" \
         'BEGIN { printf "%.3f", (t2 - t1) / (p2 - p1) }')
     fi
-
-    if ((err <= DEADBAND && err >= -DEADBAND)); then break; fi
-    if ((pct <= MIN_PCT && err < 0)); then break; fi # As quiet as allowed.
-    if ((pct >= MAX_PCT && err > 0)); then break; fi # As loud as allowed.
-
     prev_pct="$pct"
     prev_t="$CTRLTEMP"
-    step=$((err >= 0 ? err : -err))
-    ((step < CAL_STEP_MIN)) && step="$CAL_STEP_MIN"
-    ((step > CAL_STEP_MAX)) && step="$CAL_STEP_MAX"
-    ((pct += (err > 0 ? step : -step)))
+
+    if ((trend <= STABLE_BAND && err <= CTRLDEADBAND)); then
+      # HOLDS: stable and at/below target. Record it and probe lower.
+      floor="$pct"
+      ((pct <= MIN_PCT)) && break
+      ((pct -= CAL_STEP_MAX))
+    else
+      # Does NOT hold (rising or above target): needs more air.
+      ((floor >= 0)) && break     # the minimum was the last holding step just above
+      ((pct >= MAX_PCT)) && break
+      if ((trend > STABLE_BAND)); then
+        ((pct += CAL_STEP_MAX))
+      else
+        step=$((err))
+        ((step < CAL_STEP_MIN)) && step="$CAL_STEP_MIN"
+        ((step > CAL_STEP_MAX)) && step="$CAL_STEP_MAX"
+        ((pct += step))
+      fi
+    fi
   done
 
-  CAL_PCT="$pct"
+  # The floor IS the operating point at calibration time; under load the live loop
+  # raises the speed above it. Never below MIN_PCT.
+  ((floor < 0)) && floor="$pct"
+  ((floor < MIN_PCT)) && floor="$MIN_PCT"
+  CAL_PCT="$floor"
+  CAL_FLOOR="$floor"
   CAL_INLET="$INLET"
   save_calibration
   DRIFT_COUNT=0
-  log "calibrated:" \
-    "pct=${CAL_PCT}% slope=${CAL_SLOPE}C/% (gain=$(current_gain)%/C)"
+  log "calibrated: pct=${CAL_PCT}% floor=${CAL_FLOOR}%" \
+    "slope=${CAL_SLOPE}C/% (gain=$(current_gain)%/C)"
 }
 
 # read_metrics wrapper that assigns the CTRL*/CRIT*/INLET/NCTRL globals. All
@@ -722,8 +802,11 @@ do_check() {
   fi
   echo "--- Metrics ---"
   if read_metrics_into; then
-    echo "  driver=${CTRLLABEL} ${CTRLTEMP}C (target ${CTRLTARGET}C)" \
-      "bypass=${CRITHIT}${CRITHIT:+ (${CRITLABEL})} components=${NCTRL} inlet=${INLET}C"
+    echo "  driver=${CTRLLABEL} ${CTRLTEMP}C (target ${CTRLTARGET}C," \
+      "deadzone +/-${CTRLDEADBAND}C, recal ${CTRLRECAL}C)" \
+      "fan-bypass=${CRITHIT} floor=${CAL_FLOOR}% components=${NCTRL} inlet=${INLET}C"
+    echo "  closest to survival: ${SURVLABEL} ${SURVTEMP}C (${SURVOVER}C vs Tjmax;" \
+      "notify/soft/hard at +${CRIT_SURVIVE_NOTIFY}/+${CRIT_SURVIVE_SOFT}/+${CRIT_SURVIVE_HARD})"
   else
     echo "  (no readable sensors)"
   fi
@@ -745,69 +828,143 @@ do_restore() {
 }
 
 #######################################
-# One regulation cycle: hard-safety bypass, then proportional tracking of the
-# driving component toward its target, plus drift/crit-driven recalibration.
+# Warn every logged-in user that a component is over its survival limit and the
+# machine is about to power off. wall + journal are guaranteed; desktop toasts
+# are opportunistic (best-effort per active graphical session).
+# Arguments:
+#   $1 - message text
+#######################################
+notify_user() {
+  local msg="$1"
+  logger -t fanctl -p daemon.crit "$msg" 2>/dev/null
+  wall "fanctl: $msg" 2>/dev/null
+  local bus uid user
+  for bus in /run/user/*/bus; do
+    [[ -S "$bus" ]] || continue
+    uid=${bus#/run/user/}
+    uid=${uid%/bus}
+    user=$(id -nu "$uid" 2>/dev/null) || continue
+    runuser -u "$user" -- env DBUS_SESSION_BUS_ADDRESS="unix:path=${bus}" \
+      notify-send -u critical "fanctl — OVERHEAT" "$msg" 2>/dev/null || true
+  done
+}
+
+#######################################
+# Clean, orderly poweroff (a component passed survival + CRIT_SURVIVE_SOFT).
 # Globals:
-#   CTRLTEMP, CTRLTARGET, CRITHIT, CRITLABEL, INLET, CAL_PCT, CAL_INLET,
-#   DRIFT_COUNT and tuning.
+#   SURVLABEL, SURVTEMP, SURVOVER (read)
+#######################################
+soft_poweroff() {
+  log "SOFT POWEROFF: ${SURVLABEL} ${SURVTEMP}C," \
+    "+${SURVOVER}C over its survival crit -> clean shutdown"
+  notify_user "OVERHEAT ${SURVLABEL} ${SURVTEMP}C -- powering off cleanly NOW"
+  systemctl poweroff 2>/dev/null || shutdown -h now 2>/dev/null \
+    || poweroff 2>/dev/null || true
+}
+
+#######################################
+# Violent instant power cut (a component passed survival + CRIT_SURVIVE_HARD): no
+# sync, no shutdown sequence. SysRq 'o' cuts power immediately, like holding the
+# power button -- the last resort before the hardware thermal trip.
+# Globals:
+#   SURVLABEL, SURVTEMP, SURVOVER (read)
+#######################################
+hard_poweroff() {
+  log "HARD POWEROFF: ${SURVLABEL} ${SURVTEMP}C," \
+    "+${SURVOVER}C over its survival crit -> INSTANT power cut"
+  echo 1 >/proc/sys/kernel/sysrq 2>/dev/null || true
+  echo o >/proc/sysrq-trigger 2>/dev/null
+  systemctl --force --force poweroff 2>/dev/null || poweroff -f 2>/dev/null || true
+}
+
+#######################################
+# One regulation cycle: hard-safety bypass and poweroff escalation, then a dead
+# zone (anti-yoyo) around the driver's target, else a bounded nudge toward it
+# floored at CAL_FLOOR, plus per-component recal and crit-driven recalibration.
+# Globals:
+#   CTRLTEMP, CTRLTARGET, CTRLDEADBAND, CTRLRECAL, CRITHIT, CRITLABEL, SURVOVER,
+#   SURVTEMP, SURVLABEL, INLET, CAL_PCT, CAL_FLOOR, CAL_INLET, DRIFT_COUNT,
+#   NOTIFY_SENT, POWEROFF_INITIATED and tuning.
 #######################################
 regulate() {
   local err gain step pct base inlet_delta
 
-  # Hard safety bypass (bare, no margin): a component reached ITS OWN crit. This
-  # must never happen in normal use -- the real-time curve holds every component
-  # at its target -- so a repeated trip means the calibration is off.
+  # Reset the one-shot warning latch once back below the warn threshold.
+  ((SURVOVER < CRIT_SURVIVE_NOTIFY)) && NOTIFY_SENT=0
+
+  # Hard fan bypass (bare, no margin): a component reached ITS OWN knee. This must
+  # never happen in normal use -- the real-time curve holds every component at its
+  # target -- so a repeated trip means the calibration is off.
   if ((CRITHIT == 1)); then
-    # Cumulative with the target-drift check below. Reaching a crit is proof the
-    # curve is wrong, so: force 100% now AND recalibrate immediately (no waiting
-    # for it to repeat). Calibration restarts from the current fan speed (100%
-    # here), so it never eases off while a component is still critical.
     apply_pct "$MAX_PCT"
-    log "CRITICAL bypass: ${CRITLABEL} reached its crit -> max cooling + recalibrate"
+    log "CRITICAL bypass: ${CRITLABEL} reached its knee -> max cooling"
+
+    # Last-resort thermal escalation, keyed off SURVIVAL (Tjmax), NOT the knee, so
+    # a normal load spike never powers off. Fans are already at 100%; these only
+    # fire if temperature keeps climbing past the hardware limit. Most-severe first.
+    if ((SURVOVER >= CRIT_SURVIVE_HARD)); then
+      hard_poweroff # violent, does not return
+    elif ((SURVOVER >= CRIT_SURVIVE_SOFT)); then
+      ((POWEROFF_INITIATED == 0)) && {
+        POWEROFF_INITIATED=1
+        soft_poweroff
+      }
+      return
+    elif ((SURVOVER >= CRIT_SURVIVE_NOTIFY)); then
+      ((NOTIFY_SENT == 0)) && {
+        NOTIFY_SENT=1
+        notify_user "OVERHEAT ${SURVLABEL} ${SURVTEMP}C -- SAVE NOW, imminent poweroff"
+      }
+    fi
+
+    # Reaching the knee is proof the curve is wrong, so recalibrate immediately
+    # (cumulative with the target-drift check below). Calibration restarts from
+    # the current 100%, so it never eases off while a component is critical.
     calibrate
     return
   fi
 
-  # Track the driving component (furthest above its optimal target) toward it.
+  # Error of the driving component against its own optimal target.
   err=$((CTRLTEMP - CTRLTARGET))
+  local abs_err=$((err < 0 ? -err : err))
 
-  # Gentle incremental (integral) tracking: nudge the current speed toward the
-  # target by a bounded step. Bounding the per-cycle change keeps it stable and
-  # free of the oscillation an unbounded proportional term would cause.
-  gain=$(current_gain)
-  step=$((err * gain))
-  ((step > TRIM_MAX)) && step="$TRIM_MAX"
-  ((step < -TRIM_MAX)) && step=$((-TRIM_MAX))
-  if ((step == 0)); then
-    ((err > DEADBAND)) && step=1
-    ((err < -DEADBAND)) && step=-1
-  fi
-  base=$((LAST_PCT >= 0 ? LAST_PCT : CAL_PCT))
-  pct=$((base + step))
-  apply_pct "$pct"
-
-  # Keep the persisted operating point fresh while sitting on target.
-  if ((err <= DEADBAND && err >= -DEADBAND && LAST_PCT != CAL_PCT)); then
-    CAL_PCT="$LAST_PCT"
-    CAL_INLET="$INLET"
-    save_calibration
-  fi
-
-  # A large error the gentle tracking cannot absorb, or a shifted inlet, means
-  # the operating point moved a lot: run a fast full recalibration.
+  # Recalibration: the error stayed past the driver's RECAL band -> the curve is
+  # wrong (cooling too much or too little). Persist a few cycles so a transient
+  # spike does not trigger it. Also on an inlet-air shift.
   inlet_delta=$((INLET > CAL_INLET ? INLET - CAL_INLET : CAL_INLET - INLET))
-  if ((err > DRIFT || err < -DRIFT)); then
+  if ((abs_err >= CTRLRECAL)); then
     ((DRIFT_COUNT++))
   else
     DRIFT_COUNT=0
   fi
   if ((DRIFT_COUNT >= DRIFT_CYCLES)); then
-    log "sustained drift (err=${err}C) -> recalibrate"
+    log "sustained drift (${CTRLLABEL} err=${err}C >= recal ${CTRLRECAL}C) -> recalibrate"
+    DRIFT_COUNT=0
     calibrate
-  elif ((inlet_delta > INLET_DRIFT)); then
+    return
+  fi
+  if ((inlet_delta > INLET_DRIFT)); then
     log "inlet shifted (${CAL_INLET}C -> ${INLET}C) -> recalibrate"
     calibrate
+    return
   fi
+
+  # Anti-yoyo dead zone: within the driver's DEADBAND of its target, hold the fans
+  # perfectly steady and ignore the noise. This is what kills the oscillation.
+  ((abs_err < CTRLDEADBAND)) && return
+
+  # Between DEADBAND and RECAL: nudge the speed toward the target by a bounded
+  # step (gain from the calibrated slope). Never fall below the calibrated
+  # constant floor, so the machine idles at one steady speed instead of yoyo-ing.
+  gain=$(current_gain)
+  step=$((err * gain))
+  ((step > TRIM_MAX)) && step="$TRIM_MAX"
+  ((step < -TRIM_MAX)) && step=$((-TRIM_MAX))
+  ((step == 0)) && step=$((err > 0 ? 1 : -1))
+  base=$((LAST_PCT >= 0 ? LAST_PCT : CAL_PCT))
+  pct=$((base + step))
+  ((CAL_FLOOR > 0 && pct < CAL_FLOOR)) && pct="$CAL_FLOOR"
+  apply_pct "$pct"
 }
 
 run_daemon() {
