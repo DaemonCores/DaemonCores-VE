@@ -1,8 +1,7 @@
 name: Full Pipeline
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+# No concurrency lock: parallel runs are allowed and a cancel takes effect
+# immediately (the jobs below gate on !cancelled(), never always()).
 
 on:
   schedule:
@@ -81,9 +80,9 @@ jobs:
   debs:
     name: Build .deb packages
     needs: [base, build_env]
-    # always() lets debs run even when base/build_env were skipped (dev runs).
+    # !cancelled() lets debs run (but stops on cancel) even when base/build_env were skipped (dev runs).
     if: |
-      always() &&
+      !cancelled() &&
       (github.event_name == 'schedule' || inputs.run_debs) &&
       (needs.base.result == 'success' || needs.base.result == 'skipped') &&
       (needs.build_env.result == 'success' || needs.build_env.result == 'skipped')
@@ -93,10 +92,10 @@ jobs:
   image:
     name: Build container image
     needs: [debs, base]
-    # always() forces evaluation even when the debs/base jobs were skipped.
+    # !cancelled() runs the job (but stops on cancel) even when the debs/base jobs were skipped.
     # image runs if: checked AND (base ok OR skipped) AND (debs ok OR skipped).
     if: |
-      always() &&
+      !cancelled() &&
       (github.event_name == 'schedule' || inputs.run_image) &&
       (needs.base.result == 'success' || needs.base.result == 'skipped') &&
       (needs.debs.result == 'success' || needs.debs.result == 'skipped')
@@ -110,11 +109,11 @@ jobs:
   iso:
     name: Build ISO
     needs: [debs, image, meta, base]
-    # always() forces evaluation even when debs, image or base were skipped.
+    # !cancelled() runs the job (but stops on cancel) even when debs, image or base were skipped.
     # iso runs if: checked AND (base ok OR skipped) AND (debs ok OR skipped)
     # AND (image ok OR skipped).
     if: |
-      always() &&
+      !cancelled() &&
       (github.event_name == 'schedule' || inputs.run_iso) &&
       (needs.base.result == 'success' || needs.base.result == 'skipped') &&
       (needs.debs.result == 'success' || needs.debs.result == 'skipped') &&
