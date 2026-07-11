@@ -40,6 +40,10 @@ cooldown=30
 max_devices=16
 drift_percent=25
 recal_min_gap=3600
+# Minimum physical zram use (KiB) before a ratio drift is trusted. Below this the
+# device is near-empty and the measured ratio is statistical noise (a few KiB of
+# data), which would trigger endless useless recalibrations on an idle host.
+recal_min_used_kb=65536
 
 # Calibration outputs (from CALIB) and derived budget, filled at startup.
 increment_kb=262144
@@ -360,7 +364,10 @@ maybe_shrink() {
 maybe_recalibrate() {
   local now="$1" phys live
   phys=$(zram_phys_used_kb)
-  ((phys > 0)) || {
+  # Only trust the measured ratio once the device holds enough data. Below
+  # recal_min_used_kb it is near-empty and the ratio is statistical noise (a few
+  # KiB), which otherwise triggers endless useless recalibrations on an idle host.
+  ((phys >= recal_min_used_kb)) || {
     drift_since=0
     return 0
   }
