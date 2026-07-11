@@ -93,9 +93,15 @@ TEMP_SANE_MAX=150             # Above this a reading/threshold is discarded.
 AMBIENT_MATCH='Inlet|Ambient' # Regex for the inlet-air sensor (excluded from control).
 HYST_PCT=3                    # Minimum percent change before issuing a command.
 TRIM_MAX=4                    # Max fan change per cycle while holding, percent.
-INEFFECTIVE_MAX=3             # Fan rises with no cooling before easing back (anti-windup).
+INEFFECTIVE_MAX=3             # Fan rises with no cooling before a component is learned insensitive.
+AUTOTUNE_EVERY=60            # Cycles between compensation-gain auto-tune adjustments.
+GAINP_MIN=1                  # Compensation gain floor (% fan per deg C).
+GAINP_MAX=12                # Compensation gain ceiling (% fan per deg C).
 MAX_FAIL=3                    # Consecutive IPMI read errors before failsafe.
 REQUIRE_KNOWN_VENDOR=0        # 1 = exit on unknown vendor; 0 = monitor mode.
+FUSE_SENSORS=1                # 1 = union every sensor source for reads (a sparse BMC
+                              # is completed by hwmon, and vice versa); 0 = read only
+                              # the control backend. Control/writing stays on BACKEND.
 
 # Calibration and drift tuning. (The deadband and the recalibration threshold are
 # per component -- see classify_sensor; a hot-running part tolerates a wider swing
@@ -138,6 +144,13 @@ CAL_PCT=0   # Calibrated operating fan speed, percent.
 CAL_SLOPE=0 # Measured response, deg C per percent (negative).
 CAL_INLET=0 # Inlet temperature at calibration time, deg C.
 CAL_FLOOR=0 # Calibrated constant floor: lowest speed that still holds stability.
+CAL_INSENSITIVE='' # Space-separated labels the fans cannot cool (learned, not hardcoded).
+CAL_GAINP=3 # Compensation gain (% fan per deg C of insensitive excess), auto-tuned.
+AUTOTUNE_TICK=0 # Cycles counted toward the next compensation-gain auto-tune.
+
+# Compensation metrics from the last read (heat an insensitive part radiates).
+COMPEXCESS=0   # Hottest insensitive component's excess above its target, deg C.
+COMPLABEL=none # That component's name (for logs).
 
 # Metrics from the last read (set by eval of read_metrics).
 CTRLTEMP=0     # Driving component temperature, deg C (furthest above its target).
@@ -459,7 +472,8 @@ read_metrics_ipmi() {
   awk -F'|' -v amb="$AMBIENT_MATCH" \
     -v tmin="$TEMP_SANE_MIN" -v tmax="$TEMP_SANE_MAX" \
     -v gtarget="$GENERIC_TARGET" -v gcritmin="$GENERIC_CRIT_MIN" \
-    -v gdband="$GENERIC_DEADBAND" -v grecal="$GENERIC_RECAL" '
+    -v gdband="$GENERIC_DEADBAND" -v grecal="$GENERIC_RECAL" \
+    -v insens="$CAL_INSENSITIVE" '
     function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
     function sane(v) { return (v >= tmin && v <= tmax) }
     # Same sourced profiles as classify_sensor(); sets g_t/g_c/g_s (target, knee,
@@ -478,7 +492,7 @@ read_metrics_ipmi() {
       if (l ~ /hdd|drive/)                                   { g_t=42; g_d=3;  g_r=6;  g_c=55; g_s=65;  return 1 }
       return 0
     }
-    BEGIN { best = -1000; survover = -1000 }
+    BEGIN { best = -1000; survover = -1000; compexcess = 0; complabel = "none" }
     { name = trim($1); reading = trim($2); unit = trim($3); ucr = trim($9) }
     unit ~ /degrees C/ && reading ~ /^[0-9]+(\.[0-9]+)?$/ {
       r = reading + 0
@@ -495,8 +509,14 @@ read_metrics_ipmi() {
         next
       }
       nctrl++
+      cl = name; gsub(/[^A-Za-z0-9_-]/, "_", cl)
       press = r - g_t
-      if (press > best) { best = press; ctemp = r; ctarget = g_t; cdband = g_d; crecal = g_r; clabel = name }
+      if (index(" " insens " ", " " cl " ") > 0) {
+        # Learned insensitive: never the driver; feed its overshoot as compensation.
+        if (press > compexcess) { compexcess = press; complabel = cl }
+      } else if (press > best) {
+        best = press; ctemp = r; ctarget = g_t; cdband = g_d; crecal = g_r; clabel = name
+      }
       if (r >= g_c) { crithit = 1; crlabel = name }   # bare hard fan threshold
       over = r - g_s
       if (over > survover) { survover = over; survtemp = r; survlabel = name }
@@ -507,10 +527,11 @@ read_metrics_ipmi() {
       if (clabel == "") clabel = "none"
       if (crlabel == "") crlabel = "none"
       if (survlabel == "") survlabel = "none"
-      printf "CTRLTEMP=%d CTRLTARGET=%d CTRLDEADBAND=%d CTRLRECAL=%d CTRLLABEL=%s CRITHIT=%d CRITLABEL=%s SURVOVER=%d SURVTEMP=%d SURVLABEL=%s INLET=%d NCTRL=%d\n", \
+      if (compexcess < 0) compexcess = 0
+      printf "CTRLTEMP=%d CTRLTARGET=%d CTRLDEADBAND=%d CTRLRECAL=%d CTRLLABEL=%s CRITHIT=%d CRITLABEL=%s SURVOVER=%d SURVTEMP=%d SURVLABEL=%s COMPEXCESS=%d COMPLABEL=%s INLET=%d NCTRL=%d\n", \
         int(ctemp + 0.5), ctarget + 0, cdband + 0, crecal + 0, clabel, crithit + 0, crlabel, \
         (survover == -1000 ? -1000 : int(survover + 0.5)), int(survtemp + 0.5), survlabel, \
-        int(inlet + 0.5), nctrl + 0
+        int(compexcess + 0.5), complabel, int(inlet + 0.5), nctrl + 0
     }' <<<"$out"
 }
 
@@ -528,10 +549,10 @@ read_metrics_ipmi() {
 #   0 if any temperature was read, 1 otherwise.
 #######################################
 read_metrics_hwmon() {
-  local ti base val label chip key crit ccrit prof tgt dband recal surv tdeg press over
+  local ti base val label chip key crit ccrit prof tgt dband recal surv tdeg press over cleanlabel
   local inlet=0 nctrl=0 any=0
   local best=-1000 ctemp=0 ctarget=0 cdband=0 crecal=0 clabel=none crithit=0 crlabel=none
-  local survover=-1000 survtemp=0 survlabel=none
+  local survover=-1000 survtemp=0 survlabel=none compexcess=-1000 complabel=none
   for ti in /sys/class/hwmon/hwmon*/temp[0-9]*_input; do
     [[ -r "$ti" ]] || continue
     val=$(cat "$ti" 2>/dev/null)
@@ -580,32 +601,42 @@ read_metrics_hwmon() {
     else
       continue # Nothing usable (no class, no crit).
     fi
-    # Regulated component: drive the curve, arm the fan bypass, and track the
-    # worst overshoot above SURVIVAL for the last-resort poweroff escalation.
+    # Component in the control loop: bypass + survival watch it, and it either
+    # drives the curve (if the fans can cool it) or, if it is a learned insensitive
+    # part, contributes its excess heat as a compensation demand instead.
     ((nctrl++))
+    cleanlabel=${key//[^A-Za-z0-9_-]/_}
     press=$((tdeg - tgt))
-    if ((press > best)); then
+    if [[ " $CAL_INSENSITIVE " == *" $cleanlabel "* ]]; then
+      # Fans cannot cool it -> never the driver; track how far it overshoots its
+      # target so the loop can add proportional airflow for the heat it radiates.
+      ((press > compexcess)) && {
+        compexcess=$press
+        complabel=$cleanlabel
+      }
+    elif ((press > best)); then
       best=$press
       ctemp=$tdeg
       ctarget=$tgt
       cdband=$dband
       crecal=$recal
-      clabel=${key//[^A-Za-z0-9_-]/_}
+      clabel=$cleanlabel
     fi
     ((tdeg >= crit)) && {
       crithit=1
-      crlabel=${key//[^A-Za-z0-9_-]/_}
+      crlabel=$cleanlabel
     }
     over=$((tdeg - surv))
     if ((over > survover)); then
       survover=$over
       survtemp=$tdeg
-      survlabel=${key//[^A-Za-z0-9_-]/_}
+      survlabel=$cleanlabel
     fi
   done
   ((any == 0)) && return 1
-  printf "CTRLTEMP=%d CTRLTARGET=%d CTRLDEADBAND=%d CTRLRECAL=%d CTRLLABEL=%s CRITHIT=%d CRITLABEL=%s SURVOVER=%d SURVTEMP=%d SURVLABEL=%s INLET=%d NCTRL=%d\n" \
-    "$ctemp" "$ctarget" "$cdband" "$crecal" "$clabel" "$crithit" "$crlabel" "$survover" "$survtemp" "$survlabel" "$inlet" "$nctrl"
+  ((compexcess < 0)) && compexcess=0
+  printf "CTRLTEMP=%d CTRLTARGET=%d CTRLDEADBAND=%d CTRLRECAL=%d CTRLLABEL=%s CRITHIT=%d CRITLABEL=%s SURVOVER=%d SURVTEMP=%d SURVLABEL=%s COMPEXCESS=%d COMPLABEL=%s INLET=%d NCTRL=%d\n" \
+    "$ctemp" "$ctarget" "$cdband" "$crecal" "$clabel" "$crithit" "$crlabel" "$survover" "$survtemp" "$survlabel" "$compexcess" "$complabel" "$inlet" "$nctrl"
 }
 
 #######################################
@@ -615,12 +646,79 @@ read_metrics_hwmon() {
 #   BACKEND, IPMITOOL (read)
 #######################################
 read_metrics() {
-  case "$BACKEND" in
-    ipmi) read_metrics_ipmi ;;
-    ec) read_metrics_hwmon ;;
-    hwmon) read_metrics_hwmon ;;
-    *) read_metrics_ipmi || read_metrics_hwmon ;;
+  # Fusion off: read only the control backend's own source (legacy behaviour).
+  if [[ "$FUSE_SENSORS" != 1 ]]; then
+    case "$BACKEND" in
+      ipmi) read_metrics_ipmi ;;
+      ec | hwmon) read_metrics_hwmon ;;
+      *) read_metrics_ipmi || read_metrics_hwmon ;;
+    esac
+    return
+  fi
+  # Fusion on: union every available source so a machine with a sparse BMC (few
+  # IPMI sensors) has its gaps filled by hwmon, and an EC/hwmon host still picks up
+  # a BMC's board sensors. Each source is a no-op when absent. Control/writing is
+  # unchanged -- it still happens only on BACKEND.
+  local line
+  local -a lines=()
+  if [[ "$BACKEND" == ipmi ]] || ls /dev/ipmi* >/dev/null 2>&1; then
+    command -v "$IPMITOOL" >/dev/null 2>&1 &&
+      { line=$(read_metrics_ipmi) && lines+=("$line"); }
+  fi
+  line=$(read_metrics_hwmon) && lines+=("$line")
+  case "${#lines[@]}" in
+    0) return 1 ;;
+    1) printf '%s\n' "${lines[0]}" ;;
+    *) fuse_metrics "${lines[@]}" ;;
   esac
+}
+
+#######################################
+# Merge several metrics lines (one per sensor source) into one, so temperature
+# coverage is the UNION of every backend. The regulation decisions are combined
+# conservatively: the driver is the component furthest above its own target across
+# all sources; the fan bypass and the survival escalation fire if ANY source says
+# so; the compensation demand is the largest seen; the inlet is the first source
+# that reports one; component counts add up. Purely additive -- with a single
+# source it returns that source unchanged.
+# Arguments:
+#   One metrics line ("KEY=VAL KEY=VAL ...") per source.
+# Outputs:
+#   A single merged metrics line on stdout.
+#######################################
+fuse_metrics() {
+  printf '%s\n' "$@" | awk '
+    BEGIN {
+      bestpress = -100000; survover = -100000; compexcess = 0
+      crithit = 0; nctrl = 0; inlet = 0
+      ctlabel = "none"; crlabel = "none"; survlabel = "none"; complabel = "none"
+      ctemp = 0; ctarget = 0; cdband = 0; crecal = 0; survtemp = 0
+    }
+    {
+      delete f
+      for (i = 1; i <= NF; i++) { split($i, kv, "="); f[kv[1]] = kv[2] }
+      nctrl += f["NCTRL"] + 0
+      if (inlet == 0 && (f["INLET"] + 0) != 0) inlet = f["INLET"] + 0
+      if (f["CTRLLABEL"] != "none" && f["CTRLLABEL"] != "") {
+        press = (f["CTRLTEMP"] + 0) - (f["CTRLTARGET"] + 0)
+        if (press > bestpress) {
+          bestpress = press
+          ctemp = f["CTRLTEMP"] + 0; ctarget = f["CTRLTARGET"] + 0
+          cdband = f["CTRLDEADBAND"] + 0; crecal = f["CTRLRECAL"] + 0
+          ctlabel = f["CTRLLABEL"]
+        }
+      }
+      if ((f["CRITHIT"] + 0) == 1) { crithit = 1; if (crlabel == "none") crlabel = f["CRITLABEL"] }
+      if ((f["SURVOVER"] + 0) > survover) {
+        survover = f["SURVOVER"] + 0; survtemp = f["SURVTEMP"] + 0; survlabel = f["SURVLABEL"]
+      }
+      if ((f["COMPEXCESS"] + 0) > compexcess) { compexcess = f["COMPEXCESS"] + 0; complabel = f["COMPLABEL"] }
+    }
+    END {
+      printf "CTRLTEMP=%d CTRLTARGET=%d CTRLDEADBAND=%d CTRLRECAL=%d CTRLLABEL=%s CRITHIT=%d CRITLABEL=%s SURVOVER=%d SURVTEMP=%d SURVLABEL=%s COMPEXCESS=%d COMPLABEL=%s INLET=%d NCTRL=%d\n", \
+        ctemp, ctarget, cdband, crecal, ctlabel, crithit, crlabel, \
+        survover, survtemp, survlabel, compexcess, complabel, inlet, nctrl
+    }'
 }
 
 #######################################
@@ -656,12 +754,14 @@ load_calibration() {
 save_calibration() {
   mkdir -p "$STATE_DIR"
   cat >"$STATE_FILE" <<EOF
-# Written by fanctl --calibrate. Do not edit by hand.
+# Written by fanctl. Do not edit by hand.
 CAL_PCT=${CAL_PCT}
 CAL_FLOOR=${CAL_FLOOR}
 CAL_SLOPE=${CAL_SLOPE}
 CAL_INLET=${CAL_INLET}
 CAL_TARGET=${CTRLTARGET}
+CAL_INSENSITIVE='${CAL_INSENSITIVE}'
+CAL_GAINP=${CAL_GAINP}
 CAL_TS=$(date '+%Y-%m-%dT%H:%M:%S%z')
 EOF
 }
@@ -776,6 +876,10 @@ calibrate() {
 read_metrics_into() {
   local line
   line=$(read_metrics) || return 1
+  # Reset the per-read compensation metrics so a backend that emits nothing for
+  # them cannot carry a stale value into the next regulation cycle.
+  COMPEXCESS=0
+  COMPLABEL=none
   # shellcheck disable=SC2086
   eval "$line"
   return 0
@@ -832,11 +936,22 @@ do_check() {
       "fan-bypass=${CRITHIT} floor=${CAL_FLOOR}% components=${NCTRL} inlet=${INLET}C"
     echo "  closest to survival: ${SURVLABEL} ${SURVTEMP}C (${SURVOVER}C vs Tjmax;" \
       "notify/soft/hard at +${CRIT_SURVIVE_NOTIFY}/+${CRIT_SURVIVE_SOFT}/+${CRIT_SURVIVE_HARD})"
+    if ((COMPEXCESS > 0)); then
+      echo "  compensation: ${COMPLABEL} +${COMPEXCESS}C over target ->" \
+        "floor raised by $((CAL_GAINP * COMPEXCESS))% (gain ${CAL_GAINP}%/C)"
+    fi
   else
     echo "  (no readable sensors)"
   fi
   echo "--- Calibration ---"
-  if load_calibration; then :; else echo "  (not calibrated yet)"; fi
+  if load_calibration; then
+    if [[ -n "$CAL_INSENSITIVE" ]]; then
+      echo "  learned insensitive (compensated, not driven): ${CAL_INSENSITIVE}"
+      echo "  compensation gain: ${CAL_GAINP}%/C (auto-tuned)"
+    fi
+  else
+    echo "  (not calibrated yet)"
+  fi
   echo "--- Active control available? ---"
   if can_control; then echo "  yes (backend=${BACKEND})"; else
     echo "  no -> monitor mode (backend=${BACKEND})"
@@ -958,9 +1073,8 @@ regulate() {
   # only when the driver CHANGES (a new component must be re-evaluated), and it
   # updates ONLY on a real fan RISE (raised without cooling => ineffective; raised
   # and cooled => effective). Temperature moving on its own (ambient heat, no fan
-  # change) leaves the memory intact -- so a component the fans cannot cool stays
-  # flagged across dead-zone dips instead of forgetting and re-triggering the ramp
-  # and recalibration each time it warms up again.
+  # change) leaves the memory intact. This is the sole, behavioural evidence used
+  # to LEARN that a component cannot be cooled by the fans -- never its name.
   if [[ "$CTRLLABEL" != "$REG_PREV_LABEL" ]]; then
     REG_INEFFECTIVE=0
   elif ((REG_PREV_PCT >= 0 && LAST_PCT > REG_PREV_PCT)); then
@@ -974,13 +1088,28 @@ regulate() {
   REG_PREV_PCT=$LAST_PCT
   REG_PREV_LABEL=$CTRLLABEL
 
+  # LEARN an insensitive component. The fans rose INEFFECTIVE_MAX times without ever
+  # cooling this driver -> they have no grip on it. Record it (persisted, measured,
+  # never hardcoded). From the next read it is EXCLUDED from driving and instead
+  # feeds the proportional compensation below: its radiated heat is compensated on
+  # the components the fans CAN cool, rather than uselessly ramping its own loop to
+  # 100%. The component stays fully watched -- its knee still trips the bypass and
+  # survival still escalates. This is the only place insensitivity is decided.
+  if ((REG_INEFFECTIVE >= INEFFECTIVE_MAX)) && [[ "$CTRLLABEL" != none ]] \
+    && [[ " $CAL_INSENSITIVE " != *" $CTRLLABEL "* ]]; then
+    CAL_INSENSITIVE="${CAL_INSENSITIVE:+$CAL_INSENSITIVE }$CTRLLABEL"
+    save_calibration
+    log "learned: fans cannot cool ${CTRLLABEL} -> compensation mode (gain ${CAL_GAINP}%/C)"
+    REG_INEFFECTIVE=0
+    return # next read picks a regulable driver; this part now compensates
+  fi
+
   # Recalibration: the error stayed past the driver's RECAL band -> the curve is
   # wrong (cooling too much or too little). Persist a few cycles so a transient
-  # spike does not trigger it. Also on an inlet-air shift. But NOT when the fans
-  # have no grip on the driver (REG_INEFFECTIVE maxed): recalibrating a component
-  # the fans cannot cool is sterile -- it re-measures the same floor and loops.
+  # spike does not trigger it. Also on an inlet-air shift. The driver here is always
+  # regulable (insensitive parts are excluded upstream), so recalibration is sound.
   inlet_delta=$((INLET > CAL_INLET ? INLET - CAL_INLET : CAL_INLET - INLET))
-  if ((abs_err >= CTRLRECAL && REG_INEFFECTIVE < INEFFECTIVE_MAX)); then
+  if ((abs_err >= CTRLRECAL)); then
     ((DRIFT_COUNT++))
   else
     DRIFT_COUNT=0
@@ -991,44 +1120,72 @@ regulate() {
     calibrate
     return
   fi
-  if ((inlet_delta > INLET_DRIFT && REG_INEFFECTIVE < INEFFECTIVE_MAX)); then
+  if ((inlet_delta > INLET_DRIFT)); then
     log "inlet shifted (${CAL_INLET}C -> ${INLET}C) -> recalibrate"
     calibrate
     return
   fi
 
-  # Anti-yoyo dead zone: within the driver's DEADBAND of its target, hold the fans
-  # perfectly steady and ignore the noise. This is what kills the oscillation.
-  # (REG_INEFFECTIVE is NOT reset here -- the fans-have-no-grip verdict must persist
-  # through dead-zone dips, else an insensitive driver is re-probed every warm-up.)
+  # Proportional compensation floor. For every degree the hottest insensitive
+  # component overshoots its own target (COMPEXCESS), raise the effective floor by
+  # CAL_GAINP percent. This adds exactly the airflow needed to carry that radiated
+  # heat off the regulable parts -- proportional (P), bounded, never the runaway
+  # 0-to-100 an integral loop produced on a component it could not cool. With no hot
+  # insensitive part (COMPEXCESS=0) it collapses to the plain calibrated floor.
+  local comp_floor=$((CAL_FLOOR + CAL_GAINP * COMPEXCESS))
+  ((comp_floor < CAL_FLOOR)) && comp_floor="$CAL_FLOOR"
+  ((comp_floor > MAX_PCT)) && comp_floor="$MAX_PCT"
+
+  # Auto-tune CAL_GAINP from the machine's own behaviour (measured, not fixed; the
+  # built-in default only covers the first minutes before enough evidence exists).
+  # Only while compensation is actually active, and rate-limited. If a regulable
+  # driver is pushed ABOVE its target while an insensitive part is hot, the
+  # compensation is too weak -> raise the gain. If it sits well BELOW target, the
+  # compensation is overshooting -> ease the gain down. A wide neutral band (a
+  # regulable part idles below its target by design) keeps the gain from drifting.
+  if ((COMPEXCESS > 0)); then
+    if ((++AUTOTUNE_TICK >= AUTOTUNE_EVERY)); then
+      AUTOTUNE_TICK=0
+      if ((err > CTRLDEADBAND && CAL_GAINP < GAINP_MAX)); then
+        ((CAL_GAINP++)); save_calibration
+        log "auto-tune: compensation weak (${CTRLLABEL} +${err}C) -> gain ${CAL_GAINP}%/C"
+      elif ((err < -2 * CTRLDEADBAND && CAL_GAINP > GAINP_MIN)); then
+        ((CAL_GAINP--)); save_calibration
+        log "auto-tune: compensation strong (${CTRLLABEL} ${err}C) -> gain ${CAL_GAINP}%/C"
+      fi
+    fi
+  else
+    AUTOTUNE_TICK=0
+  fi
+
+  # Anti-yoyo dead zone: within the driver's DEADBAND of its target, do not chase
+  # the driver's noise -- but still honour the compensation floor, converging to it
+  # by a bounded monotonic step (no yoyo). When nothing insensitive is hot this is
+  # just the plain calibrated floor; when it is, the fans hold the compensating
+  # speed steadily instead of oscillating.
   if ((abs_err < CTRLDEADBAND)); then
-    # If the driver is one the fans cannot cool, ease steadily back to the floor
-    # (no reason to keep airflow it does not use); a monotonic descent, no yoyo.
-    if ((REG_INEFFECTIVE >= INEFFECTIVE_MAX && CAL_FLOOR > 0 && LAST_PCT > CAL_FLOOR)); then
-      pct=$((LAST_PCT - TRIM_MAX))
-      ((pct < CAL_FLOOR)) && pct="$CAL_FLOOR"
+    base=$((LAST_PCT >= 0 ? LAST_PCT : CAL_PCT))
+    if ((base > comp_floor)); then
+      pct=$((base - TRIM_MAX)); ((pct < comp_floor)) && pct="$comp_floor"
+      apply_pct "$pct"
+    elif ((base < comp_floor)); then
+      pct=$((base + TRIM_MAX)); ((pct > comp_floor)) && pct="$comp_floor"
       apply_pct "$pct"
     fi
     return
   fi
 
   # Between DEADBAND and RECAL: nudge the speed toward the target by a bounded
-  # step (gain from the calibrated slope). Never fall below the calibrated
-  # constant floor, so the machine idles at one steady speed instead of yoyo-ing.
+  # step (gain from the calibrated slope). Never fall below the compensation floor,
+  # so the machine idles at one steady speed instead of yoyo-ing.
   gain=$(current_gain)
   step=$((err * gain))
   ((step > TRIM_MAX)) && step="$TRIM_MAX"
   ((step < -TRIM_MAX)) && step=$((-TRIM_MAX))
   ((step == 0)) && step=$((err > 0 ? 1 : -1))
-  # Anti-windup: raising is proven useless on this driver -> stop wasting airflow
-  # and ease back to the floor. The component stays fully watched -- its knee still
-  # trips the 100% bypass and survival still escalates if it ever really overheats.
-  if ((step > 0 && REG_INEFFECTIVE >= INEFFECTIVE_MAX)); then
-    step=$((-TRIM_MAX))
-  fi
   base=$((LAST_PCT >= 0 ? LAST_PCT : CAL_PCT))
   pct=$((base + step))
-  ((CAL_FLOOR > 0 && pct < CAL_FLOOR)) && pct="$CAL_FLOOR"
+  ((pct < comp_floor)) && pct="$comp_floor"
   apply_pct "$pct"
 }
 
