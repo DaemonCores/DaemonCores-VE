@@ -41,6 +41,16 @@ packages:
       chmod +x /output/ifupdown2/usr/sbin/ifupdown2-autoconf \
         /output/ifupdown2/usr/sbin/domain-set
 
+      # Content check: version bumped and our helpers present + executable.
+      grep -qF "Version: 2:${ORIG_VER}+bootc5" \
+        /output/ifupdown2/DEBIAN/control \
+        || { echo "ERROR: ifupdown2 version not rewritten" >&2; exit 1; }
+      for s in ifupdown2-autoconf domain-set; do
+        test -s "/output/ifupdown2/usr/sbin/${s}" \
+          && test -x "/output/ifupdown2/usr/sbin/${s}" \
+          || { echo "ERROR: ifupdown2 ${s} missing/not exec" >&2; exit 1; }
+      done
+
       dpkg-deb --build /output/ifupdown2 \
         /debs/ifupdown2_${ORIG_VER}+bootc5_all.deb
 
@@ -73,6 +83,11 @@ packages:
       sed -i "s/^Version: .*/Version: 1:${ORIG_VER}+bootc2/" \
         /output/chrony/DEBIAN/control
 
+      # Content check: version rewritten in control.
+      grep -qF "Version: 1:${ORIG_VER}+bootc2" \
+        /output/chrony/DEBIAN/control \
+        || { echo "ERROR: chrony version not rewritten" >&2; exit 1; }
+
       dpkg-deb --build /output/chrony \
         /debs/chrony_${ORIG_VER}+bootc2_${ARCH}.deb
 
@@ -104,6 +119,11 @@ packages:
 
       sed -i "s/^Version: .*/Version: 1:${ORIG_VER}+bootc1/" \
         /output/openipmi/DEBIAN/control
+
+      # Content check: version rewritten in control.
+      grep -qF "Version: 1:${ORIG_VER}+bootc1" \
+        /output/openipmi/DEBIAN/control \
+        || { echo "ERROR: openipmi version not rewritten" >&2; exit 1; }
 
       dpkg-deb --build /output/openipmi \
         /debs/openipmi_${ORIG_VER}+bootc1_${ARCH}.deb
@@ -334,6 +354,19 @@ packages:
         -e "s|, {{ DEPS }}||g" \
         /output/fanctl/DEBIAN/control
 
+      # Content check: template expanded + scripts present/executable/valid.
+      o=/output/fanctl
+      ! grep -q '{{' "${o}/DEBIAN/control" \
+        || { echo "ERROR: fanctl control has unexpanded template" >&2; exit 1; }
+      for f in "${o}/usr/sbin/fanctl" "${o}/DEBIAN/postinst"; do
+        test -x "${f}" \
+          || { echo "ERROR: fanctl ${f} missing/not exec" >&2; exit 1; }
+        if head -1 "${f}" | grep -qE '^#!.*sh'; then
+          bash -n "${f}" \
+            || { echo "ERROR: fanctl ${f} shell syntax" >&2; exit 1; }
+        fi
+      done
+
       dpkg-deb --build /output/fanctl \
         /debs/fanctl_${FANCTL_VER}_all.deb
 
@@ -355,6 +388,19 @@ packages:
         -e "s|{{ VER }}|${POWERCTL_VER}|g" \
         -e "s|, {{ DEPS }}||g" \
         /output/powerctl/DEBIAN/control
+
+      # Content check: template expanded + scripts present/executable/valid.
+      o=/output/powerctl
+      ! grep -q '{{' "${o}/DEBIAN/control" \
+        || { echo "ERROR: powerctl control has unexpanded template" >&2; exit 1; }
+      for f in "${o}/usr/sbin/powerctl" "${o}/DEBIAN/postinst"; do
+        test -x "${f}" \
+          || { echo "ERROR: powerctl ${f} missing/not exec" >&2; exit 1; }
+        if head -1 "${f}" | grep -qE '^#!.*sh'; then
+          bash -n "${f}" \
+            || { echo "ERROR: powerctl ${f} shell syntax" >&2; exit 1; }
+        fi
+      done
 
       dpkg-deb --build /output/powerctl \
         /debs/powerctl_${POWERCTL_VER}_all.deb
@@ -378,6 +424,19 @@ packages:
         -e "s|, {{ DEPS }}||g" \
         /output/dc-firewall-seed/DEBIAN/control
 
+      # Content check: template expanded + scripts present/executable/valid.
+      o=/output/dc-firewall-seed
+      ! grep -q '{{' "${o}/DEBIAN/control" \
+        || { echo "ERROR: dc-firewall-seed control unexpanded template" >&2; exit 1; }
+      for f in "${o}/usr/sbin/dc-firewall-seed" "${o}/DEBIAN/postinst"; do
+        test -x "${f}" \
+          || { echo "ERROR: dc-firewall-seed ${f} missing/not exec" >&2; exit 1; }
+        if head -1 "${f}" | grep -qE '^#!.*sh'; then
+          bash -n "${f}" \
+            || { echo "ERROR: dc-firewall-seed ${f} shell syntax" >&2; exit 1; }
+        fi
+      done
+
       dpkg-deb --build /output/dc-firewall-seed \
         /debs/dc-firewall-seed_${DC_FIREWALL_SEED_VER}_all.deb
 
@@ -399,6 +458,19 @@ packages:
         -e "s|{{ VER }}|${DC_CONFIG_ZFS_VER}|g" \
         -e "s|, {{ DEPS }}||g" \
         /output/dc-config-zfs/DEBIAN/control
+
+      # Content check: template expanded + scripts present/executable/valid.
+      o=/output/dc-config-zfs
+      ! grep -q '{{' "${o}/DEBIAN/control" \
+        || { echo "ERROR: dc-config-zfs control unexpanded template" >&2; exit 1; }
+      for f in "${o}/usr/sbin/dc-config-zfs" "${o}/DEBIAN/postinst"; do
+        test -x "${f}" \
+          || { echo "ERROR: dc-config-zfs ${f} missing/not exec" >&2; exit 1; }
+        if head -1 "${f}" | grep -qE '^#!.*sh'; then
+          bash -n "${f}" \
+            || { echo "ERROR: dc-config-zfs ${f} shell syntax" >&2; exit 1; }
+        fi
+      done
 
       dpkg-deb --build /output/dc-config-zfs \
         /debs/dc-config-zfs_${DC_CONFIG_ZFS_VER}_all.deb
@@ -423,6 +495,20 @@ packages:
         -e "s|, {{ DEPS }}||g" \
         /output/dc-zramctl/DEBIAN/control
 
+      # Content check: template expanded + scripts present/executable/valid.
+      o=/output/dc-zramctl
+      ! grep -q '{{' "${o}/DEBIAN/control" \
+        || { echo "ERROR: dc-zramctl control unexpanded template" >&2; exit 1; }
+      for f in "${o}/usr/sbin/dc-zramctl" \
+        "${o}/usr/lib/dc-zramctl/calibrate" "${o}/DEBIAN/postinst"; do
+        test -x "${f}" \
+          || { echo "ERROR: dc-zramctl ${f} missing/not exec" >&2; exit 1; }
+        if head -1 "${f}" | grep -qE '^#!.*sh'; then
+          bash -n "${f}" \
+            || { echo "ERROR: dc-zramctl ${f} shell syntax" >&2; exit 1; }
+        fi
+      done
+
       dpkg-deb --build /output/dc-zramctl \
         /debs/dc-zramctl_${DC_ZRAMCTL_VER}_all.deb
 
@@ -445,6 +531,19 @@ packages:
         -e "s|, {{ DEPS }}||g" \
         /output/pvect-ostree/DEBIAN/control
 
+      # Content check: template expanded + scripts present/executable/valid.
+      o=/output/pvect-ostree
+      ! grep -q '{{' "${o}/DEBIAN/control" \
+        || { echo "ERROR: pvect-ostree control unexpanded template" >&2; exit 1; }
+      for f in "${o}/usr/sbin/pvect-ostree" "${o}/DEBIAN/postinst"; do
+        test -x "${f}" \
+          || { echo "ERROR: pvect-ostree ${f} missing/not exec" >&2; exit 1; }
+        if head -1 "${f}" | grep -qE '^#!.*sh'; then
+          bash -n "${f}" \
+            || { echo "ERROR: pvect-ostree ${f} shell syntax" >&2; exit 1; }
+        fi
+      done
+
       dpkg-deb --build /output/pvect-ostree \
         /debs/pvect-ostree_${PVECT_OSTREE_VER}_all.deb
 
@@ -466,6 +565,19 @@ packages:
         -e "s|{{ VER }}|${COMPOSE2BOOTC_VER}|g" \
         -e "s|, {{ DEPS }}||g" \
         /output/compose2bootc/DEBIAN/control
+
+      # Content check: template expanded + scripts present/executable/valid.
+      o=/output/compose2bootc
+      ! grep -q '{{' "${o}/DEBIAN/control" \
+        || { echo "ERROR: compose2bootc control unexpanded template" >&2; exit 1; }
+      for f in "${o}/usr/sbin/compose2bootc" "${o}/DEBIAN/postinst"; do
+        test -x "${f}" \
+          || { echo "ERROR: compose2bootc ${f} missing/not exec" >&2; exit 1; }
+        if head -1 "${f}" | grep -qE '^#!.*sh'; then
+          bash -n "${f}" \
+            || { echo "ERROR: compose2bootc ${f} shell syntax" >&2; exit 1; }
+        fi
+      done
 
       dpkg-deb --build /output/compose2bootc \
         /debs/compose2bootc_${COMPOSE2BOOTC_VER}_all.deb
