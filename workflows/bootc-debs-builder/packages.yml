@@ -280,18 +280,18 @@ packages:
       ORIG_VER=$(dpkg-deb -f /tmp/proxmox-kernel-helper_*.deb Version)
       ARCH=$(dpkg-deb -f /tmp/proxmox-kernel-helper_*.deb Architecture)
 
-      # In a bootc/ostree image the ESP is owned by bootupd, not by
-      # proxmox-boot-tool. Stock proxmox-kernel-helper diverts
-      # /usr/sbin/grub-install to a proxmox-boot-tool wrapper and registers
-      # dpkg triggers on /usr/lib/grub, /usr/lib/shim and /usr/lib/systemd/boot
-      # that run `proxmox-boot-tool reinit` on every grub/shim change. On bootc
-      # that reinit repeatedly calls grub-install and relocates the Debian
-      # signed grub, producing the noisy
-      # "mv: cannot stat '.../grubx64.efi.signed'" error and a boot path that
-      # competes with bootupd. Strip that whole grub/boot integration; keep
-      # only the kernel NeverAutoRemove hooks (proxmox-auto-removal) and the
-      # now-inert helper binaries so the proxmox-ve dependency stays satisfied.
-      # grub itself is left untouched.
+      # proxmox-boot-tool's job — owning the ESP bootloader and syncing kernels
+      # onto it (incl. multi-ESP redundancy) — is exactly bootupd's job, and
+      # bootc MANDATES bootupd (it runs it on every install). Two ESP managers
+      # are mutually exclusive, so on a bootc image proxmox-boot-tool is
+      # superseded and can never be the active bootloader manager: it is out of
+      # scope here. We therefore drop only its automatic boot integration (the
+      # grub-install diversion, the grub.d / initramfs / kernel ESP-sync hooks,
+      # and the dpkg triggers that fire them) which would otherwise contend with
+      # bootupd over the ESP. The proxmox-boot-tool binary itself and the kernel
+      # NeverAutoRemove hooks (proxmox-auto-removal) are kept, and the proxmox-ve
+      # dependency stays satisfied. The deb's md5sums are regenerated below so the
+      # repacked package stays consistent (re-signed).
 
       # 1. Drop the grub-install wrapper and the proxmox-boot-tool hooks.
       rm -f \
