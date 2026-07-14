@@ -100,8 +100,12 @@ tests:
     expect: +bootc
 
   # ── libtemplate-perl mtime fix (the HTTP 500 root cause) ───────────────
+  # libtemplate-perl is an arch package: its modules install under
+  # /usr/lib/<triplet>/perl5/<ver>/Template, not /usr/share/perl5. Locate
+  # Provider.pm the same robust way the repack patches it, then assert the
+  # mtime fix is present in the installed file.
   - name: libtemplate-perl mtime patch applied
-    run: grep -q 'arr\[9\] || 1' /usr/share/perl5/Template/Provider.pm
+    run: grep -q 'arr\[9\] || 1' "$(find /usr/lib /usr/share -path '*/Template/Provider.pm' 2>/dev/null | head -1)"
 
   # ── proxmox-kernel-helper bootc-hostile bits stripped ──────────────────
   - name: no proxmox-boot-tool grub-install wrapper

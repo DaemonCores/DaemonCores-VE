@@ -67,19 +67,19 @@ RUN chmod +x /usr/sbin/policy-rc.d \
     && KVER=$(ls -1v /usr/lib/modules | tail -1) \
     && find /usr/lib/modules -mindepth 1 -maxdepth 1 ! -name "${KVER}" -exec rm -rf {} +
 
-COPY ./assets/banner/etc /etc/
-
 # Post install patch
-# COPY ships /etc/network/interfaces with a pre-configured vmbr0 (and extra
-# bridges) carrying a {{ WAN_DEVICE }} placeholder. Pre-configure default
-# bridge for Proxmox VE networking — proxmox-firstboot resolves the
-# placeholder to the real WAN interface at first boot.
+# COPY ships /etc/hostname (a baked default so pmxcfs can create the node dir
+# and pve-ssl.pem on the very first boot, before the first-boot wizard renames
+# the host), a matching bootstrap /etc/hosts entry, and the Proxmox drop-in
+# configs. The WAN interface + default bridges are (re)generated on boot by
+# ifupdown2-autoconf; /etc/hosts is refined to the real IP by domain-set.
 COPY ./src/pvepostinstall /
+# NOTE: the WAN-interface autoconf and /etc/hosts FQDN pinning that used to live
+# in the standalone proxmox-firstboot.service / pve-domain-set.service now run as
+# networking.service drop-ins shipped by the ifupdown2 repack
+# (ExecStartPre=/usr/sbin/ifupdown2-autoconf, ExecStartPost=/usr/sbin/domain-set),
+# so no target.wants symlinks are needed for them here.
 RUN mkdir -p /etc/systemd/system/multi-user.target.wants \
-    && ln -sf /etc/systemd/system/pve-domain-set.service \
-        /etc/systemd/system/multi-user.target.wants/pve-domain-set.service \
-    && ln -sf /etc/systemd/system/proxmox-firstboot.service \
-        /etc/systemd/system/multi-user.target.wants/proxmox-firstboot.service \
     # Guard: abort if pve-manager is missing (proxmox-ve install failed earlier).
     && dpkg -s pve-manager >/dev/null 2>&1 \
         || { echo "ERROR: pve-manager not installed; proxmox-ve install failed." >&2; exit 1; } \
