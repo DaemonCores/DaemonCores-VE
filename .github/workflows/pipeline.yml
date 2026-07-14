@@ -1,9 +1,28 @@
 name: Full Pipeline
 
-# No concurrency lock: parallel runs are allowed and a cancel takes effect
-# immediately (the jobs below gate on !cancelled(), never always()).
+# Thin caller: this repo only declares its triggers and concurrency. The whole
+# job graph (change plan / auto-skip, optional base rebuild, env, debs, image,
+# iso) lives in the shared reusable workflow
+# DaemonCores-CI/.github/workflows/full-pipeline.yml.
+#
+# Triggers:
+#   push (main)        full pipeline, but untouched stages auto-skip (the plan
+#                      job diffs the push) on top of the per-deb content cache.
+#   workflow_dispatch  the checkboxes decide, verbatim.
+#   schedule (monthly) rebuild everything.
+#
+# concurrency cancels an in-progress run when a newer push arrives (triggers and
+# concurrency must live in the caller — GitHub evaluates them here, not in the
+# reusable workflow). `update_base` (rebuild the debian-bootc base) is a
+# manual-dispatch-only knob; a push never triggers it.
 
 on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - '.github/workflows/docs-wiki-sync.yml'
   schedule:
     - cron: '0 5 1 * *'
   workflow_dispatch:
@@ -36,90 +55,18 @@ permissions:
   id-token: write
   issues: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  meta:
-      name: Compute product name
-      runs-on: ubuntu-latest
-      outputs:
-        product_name: ${{ steps.name.outputs.product_name }}
-      steps:
-        - id: name
-          run: |
-            name="${GITHUB_REPOSITORY##*/}"   # cut at the slash -> repo name
-            name="${name//-/ }"               # replace dashes with spaces
-            echo "product_name=$name" >> "$GITHUB_OUTPUT"
-
-  base:
-    name: Rebuild debian-bootc base first
-    # Optional: only when the checkbox is ticked on manual dispatch. Rebuilds
-    # the upstream base image so the Proxmox image below builds on top of a
-    # fresh base. If this fails, the downstream jobs are skipped (they gate on
-    # base success/skipped), so the run goes red instead of shipping on a
-    # stale base.
-    if: ${{ inputs.update_base }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Trigger debian-bootc pipeline and wait
-        uses: DaemonCores/DaemonCores-CI/trigger-pipeline@main
-        with:
-          repo: DaemonCores/debian-bootc
-          workflow: pipeline.yml
-          ref: main
-          # PAT with Actions read+write on debian-bootc (GITHUB_TOKEN cannot
-          # dispatch cross-repo). Add it as a repo/org secret.
-          token: ${{ secrets.PAT_DISPATCH }}
-
-  build_env:
-    name: Rebuild the deb-builder env image
-    # Monthly (schedule) or on demand via the checkbox. Dev runs otherwise reuse
-    # the cached :buildenv image (zero setup time).
-    if: ${{ github.event_name == 'schedule' || inputs.rebuild_env }}
-    uses: DaemonCores/DaemonCores-CI/.github/workflows/build-env.yml@main
-    secrets: inherit
-
-  debs:
-    name: Build .deb packages
-    needs: [base, build_env]
-    # !cancelled() lets debs run (but stops on cancel) even when base/build_env were skipped (dev runs).
-    if: |
-      !cancelled() &&
-      (github.event_name == 'schedule' || inputs.run_debs) &&
-      (needs.base.result == 'success' || needs.base.result == 'skipped') &&
-      (needs.build_env.result == 'success' || needs.build_env.result == 'skipped')
-    uses: DaemonCores/DaemonCores-CI/.github/workflows/bootc-debs-builder.yml@main
-    secrets: inherit
-
-  image:
-    name: Build container image
-    needs: [debs, base]
-    # !cancelled() runs the job (but stops on cancel) even when the debs/base jobs were skipped.
-    # image runs if: checked AND (base ok OR skipped) AND (debs ok OR skipped).
-    if: |
-      !cancelled() &&
-      (github.event_name == 'schedule' || inputs.run_image) &&
-      (needs.base.result == 'success' || needs.base.result == 'skipped') &&
-      (needs.debs.result == 'success' || needs.debs.result == 'skipped')
-    uses: DaemonCores/DaemonCores-CI/.github/workflows/bootc-build.yml@main
+  run:
+    uses: DaemonCores/DaemonCores-CI/.github/workflows/full-pipeline.yml@main
     with:
-      # Force a no-cache image rebuild when at least one .deb was rebuilt
-      # (schedule already forces no-cache inside bootc-build.yml).
-      force_no_cache: ${{ needs.debs.outputs.any_rebuilt == 'true' }}
-    secrets: inherit
-
-  iso:
-    name: Build ISO
-    needs: [debs, image, meta, base]
-    # !cancelled() runs the job (but stops on cancel) even when debs, image or base were skipped.
-    # iso runs if: checked AND (base ok OR skipped) AND (debs ok OR skipped)
-    # AND (image ok OR skipped).
-    if: |
-      !cancelled() &&
-      (github.event_name == 'schedule' || inputs.run_iso) &&
-      (needs.base.result == 'success' || needs.base.result == 'skipped') &&
-      (needs.debs.result == 'success' || needs.debs.result == 'skipped') &&
-      (needs.image.result == 'success' || needs.image.result == 'skipped') &&
-      needs.meta.result == 'success'
-    uses: DaemonCores/DaemonCores-CI/.github/workflows/iso-builder.yml@main
-    with:
-      product_name: ${{ needs.meta.outputs.product_name }}
+      enable_base: true
+      update_base: ${{ inputs.update_base }}
+      rebuild_env: ${{ inputs.rebuild_env }}
+      run_debs: ${{ inputs.run_debs }}
+      run_image: ${{ inputs.run_image }}
+      run_iso: ${{ inputs.run_iso }}
     secrets: inherit
