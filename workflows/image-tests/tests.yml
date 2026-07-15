@@ -214,17 +214,15 @@ tests:
     diag: |
       systemctl status dc-zramctl --no-pager -l 2>&1 | tail -n 12
       journalctl -b -u dc-zramctl --no-pager 2>&1 | tail -n 20
-      echo "--- modprobe zram ---"
-      modprobe zram 2>&1 && echo "modprobe OK" || echo "modprobe FAILED"
+      echo "--- modprobe zram num_devices=0 ---"
+      modprobe zram num_devices=0 2>&1 && echo "modprobe OK" || echo "modprobe FAILED"
       echo "--- /sys/class/zram-control ---"; ls -l /sys/class/zram-control/ 2>&1
+      echo "--- /sys/block/zram* ---"; ls -l /sys/block/zram* 2>&1 || echo "no zram device"
       echo "--- zram.ko in module tree ---"
       ls /usr/lib/modules/*/kernel/drivers/block/zram/ 2>&1 || echo "no zram module in tree"
-  - name: a zram device exists
-    run: test -e /dev/zram0
-    diag: |
-      ls -l /sys/block/zram* 2>&1 || echo "no /sys/block/zram*"
-      zramctl 2>&1
-      journalctl -b -u dc-zramctl --no-pager 2>&1 | tail -n 15
+  # NOTE: no separate "a zram device exists" test — with num_devices=0 the module
+  # creates no default device, so /dev/zram0 exists only once the daemon has
+  # seeded it as swap, which "swap is zram-only" below already asserts (stronger).
   - name: swap is zram-only
     run: swapon --show=NAME --noheadings | grep -qx /dev/zram0
     diag: |
