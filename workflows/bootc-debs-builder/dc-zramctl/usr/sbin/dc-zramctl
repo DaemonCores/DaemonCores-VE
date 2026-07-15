@@ -253,13 +253,35 @@ ratio_drifted() {
 # Returns:
 #   0 if a device was added, 1 otherwise.
 #######################################
+# Return the id of a zram device to configure: reuse an existing idle one
+# (disksize 0 and not already a swap) before creating a new one. The kernel
+# auto-creates zram0 at module load (num_devices defaults to 1); without this we
+# would hot_add a parallel device and strand that empty zram0, and the seed guard
+# (which counts device nodes) would then never seed a swap at all.
+# Outputs:
+#   The numeric id to use.
+claim_device_id() {
+  local dev id
+  for dev in /sys/block/zram*; do
+    [[ -e "${dev}" ]] || continue
+    id=$(basename "${dev}" | tr -dc 0-9)
+    if [[ "$(cat "${dev}/disksize" 2>/dev/null || echo 0)" == "0" ]] \
+      && ! swapon --show=NAME --noheadings 2>/dev/null \
+        | grep -qx "/dev/zram${id}"; then
+      printf '%s\n' "${id}"
+      return 0
+    fi
+  done
+  cat "${CONTROL}/hot_add"
+}
+
 add_device() {
   local committed_kb remaining_kb ml_kb id disksize_b memlimit_b
   committed_kb=$(zram_memlimit_kb)
   remaining_kb=$((cap_kb - committed_kb))
   ((remaining_kb >= MIN_DEVICE_KB)) || return 1
   ml_kb=$((increment_kb < remaining_kb ? increment_kb : remaining_kb))
-  id=$(cat "${CONTROL}/hot_add") || return 1
+  id=$(claim_device_id) || return 1
   echo zstd >"/sys/block/zram${id}/comp_algorithm" 2>/dev/null || true
   disksize_b=$((ml_kb * 1024 * ratio_x100 / 100))
   memlimit_b=$((ml_kb * 1024))
@@ -423,7 +445,10 @@ run_daemon() {
   [[ -r "${CALIB}" ]] || calibrate
   load_calibration
   cap_kb=$(($(ram_kb) * physical_cap_percent / 100))
-  (($(zram_count) == 0)) && add_device
+  # Seed one swap device when none is active yet. Guard on an active zram *swap*,
+  # not the device count: the kernel's idle default zram0 must not be mistaken
+  # for an already-seeded swap (that stranded the swap on an empty device).
+  swapon --show=NAME --noheadings 2>/dev/null | grep -q '^/dev/zram' || add_device
   run_loop
 }
 
