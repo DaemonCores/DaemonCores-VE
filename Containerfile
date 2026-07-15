@@ -16,6 +16,10 @@ LABEL ostree.bootable=1
 # SHA-256 checksums of the APT repository signing keys fetched below.
 ARG DAEMONCORES_VE_GPG_SHA256=4920000cfcd8f5a618822c8e57222a3c10768d2efb8c0250a71a19ba0c76ff55
 ARG PVE_GPG_SHA256=136673be77aba35dcce385b28737689ad64fd785a797e57897589aed08db6e45
+# Product display name, injected by the CI from the repo name (dashes -> spaces).
+# Overrides the base's value so bootc-finalize (re-run by the pve-kernel install)
+# brands the UEFI boot-entry label with this product; empty keeps the base value.
+ARG PRODUCT_NAME=""
 # Setup all environement variables
 ENV DEBIAN_FRONTEND=noninteractive
 # Default shell: fail build on error. Honored with `--format docker` in CI.
@@ -37,6 +41,9 @@ RUN chmod +x /usr/sbin/policy-rc.d \
     && echo "postfix postfix/main_mailer_type string Local only" | debconf-set-selections \
     && echo "postfix postfix/mailname string proxmox.local" | debconf-set-selections \
     && echo "grub-pc grub-pc/install_devices_empty boolean true" | debconf-set-selections \
+    && mkdir -p /usr/lib/bootc \
+    && { [ -z "${PRODUCT_NAME}" ] \
+        || printf '%s' "${PRODUCT_NAME}" > /usr/lib/bootc/product-name; } \
     && apt update \
     && apt full-upgrade -y \
     && apt update \
