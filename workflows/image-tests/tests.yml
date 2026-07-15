@@ -2,10 +2,14 @@
 # to a virtual disk + QEMU/KVM), executed over SSH before the image is pushed.
 # A failing test blocks the push.
 #
-#   boot_timeout   seconds to wait for the VM to answer SSH
-#   tests[].name   label shown in the CI log
-#   tests[].run    command executed on the VM; passes on exit 0
-#   tests[].expect optional: pass instead when this string is in the output
+#   boot_timeout      seconds to wait for the VM to answer SSH
+#   tests[].name      label shown in the CI log
+#   tests[].run       command executed on the VM; passes on exit 0
+#   tests[].expect    optional: pass instead when this string is in the output
+#   tests[].diag      REQUIRED: command run over SSH when this test fails, to
+#                     capture the runtime state behind the failure. The harness
+#                     refuses to run (fails the build) if any test lacks a diag,
+#                     so a failure can never be undiagnosable.
 
 boot_timeout: 900
 
@@ -14,90 +18,176 @@ tests:
   - name: booted through bootc
     run: bootc status --format=json
     expect: booted
+    diag: |
+      bootc status 2>&1 | head -n 30
+      echo "--- boot journal tail ---"
+      journalctl -b --no-pager 2>&1 | tail -n 30
   - name: root is a composefs/overlay mount
     run: findmnt -no FSTYPE / | grep -qiE 'overlay|composefs'
+    diag: |
+      findmnt / 2>&1
+      echo "--- /proc/cmdline ---"; cat /proc/cmdline 2>&1
   - name: no failed systemd units
     run: test "$(systemctl --failed --no-legend | wc -l)" -eq 0
+    diag: |
+      systemctl --failed --no-pager 2>&1
 
   # ── pmxcfs / cluster ───────────────────────────────────────────────────
   - name: pmxcfs mounted at /etc/pve
     run: mountpoint -q /etc/pve
+    diag: |
+      mount 2>&1 | grep -i pve || echo "/etc/pve not mounted"
+      systemctl status pve-cluster --no-pager -l 2>&1 | tail -n 15
+      journalctl -b -u pve-cluster --no-pager 2>&1 | tail -n 25
   - name: pve-cluster active
     run: systemctl is-active pve-cluster
+    diag: |
+      systemctl status pve-cluster --no-pager -l 2>&1 | tail -n 20
+      journalctl -b -u pve-cluster --no-pager 2>&1 | tail -n 30
   - name: node directory /etc/pve/local resolves
     run: test -d /etc/pve/local
+    diag: |
+      echo "kernel hostname: $(hostname)"
+      echo "static /etc/hostname: $(cat /etc/hostname 2>&1)"
+      echo "--- /etc/hosts ---"; cat /etc/hosts 2>&1
+      echo "--- getent hosts (current hostname) ---"
+      getent hosts "$(hostname)" || echo "HOSTNAME DOES NOT RESOLVE"
+      echo "/etc/pve/local -> $(readlink /etc/pve/local 2>&1)"
+      echo "--- /etc/pve/nodes/ ---"; ls -la /etc/pve/nodes/ 2>&1
+      echo "--- pvecm status ---"; pvecm status 2>&1 | head -n 20
   - name: pmxcfs config db present
     run: test -f /var/lib/pve-cluster/config.db
+    diag: |
+      ls -la /var/lib/pve-cluster/ 2>&1
+      journalctl -b -u pve-cluster --no-pager 2>&1 | tail -n 20
 
   # ── proxmox services ───────────────────────────────────────────────────
   - name: pveproxy active
     run: systemctl is-active pveproxy
+    diag: |
+      systemctl status pveproxy --no-pager -l 2>&1 | tail -n 15
+      echo "--- /etc/pve/local (SSL cert dir) ---"; ls -la /etc/pve/local/ 2>&1
+      journalctl -b -u pveproxy --no-pager 2>&1 | tail -n 25
   - name: pvedaemon active
     run: systemctl is-active pvedaemon
+    diag: |
+      systemctl status pvedaemon --no-pager -l 2>&1 | tail -n 15
+      journalctl -b -u pvedaemon --no-pager 2>&1 | tail -n 25
   - name: pvestatd active
     run: systemctl is-active pvestatd
+    diag: |
+      systemctl status pvestatd --no-pager -l 2>&1 | tail -n 15
+      journalctl -b -u pvestatd --no-pager 2>&1 | tail -n 25
   - name: pve-firewall active
     run: systemctl is-active pve-firewall
+    diag: |
+      systemctl status pve-firewall --no-pager -l 2>&1 | tail -n 15
+      journalctl -b -u pve-firewall --no-pager 2>&1 | tail -n 25
 
   # ── web UI (libtemplate-perl mtime fix => no HTTP 500) ─────────────────
   - name: web UI answers on 8006
     run: curl -skf https://localhost:8006/ -o /dev/null
+    diag: |
+      ss -tlnp 2>&1 | grep -E ':8006' || echo "nothing listening on 8006"
+      systemctl status pveproxy --no-pager -l 2>&1 | tail -n 12
+      curl -skv https://localhost:8006/ 2>&1 | head -n 25
   - name: web UI serves the login page (not a 500)
     run: curl -sk https://localhost:8006/ | grep -qi proxmox
+    diag: |
+      curl -sk https://localhost:8006/ 2>&1 | head -n 40
+      journalctl -b -u pveproxy --no-pager 2>&1 | tail -n 25
 
   # ── no-subscription popup patched ──────────────────────────────────────
   - name: Subscription.pm patched to active
     run: grep -q 'status => "active"' /usr/share/perl5/PVE/API2/Subscription.pm
+    diag: |
+      grep -n 'status =>' /usr/share/perl5/PVE/API2/Subscription.pm 2>&1 | head -n 15
+      dpkg-query -W -f='${Version}\n' pve-manager 2>&1
 
   # ── qemu-server backend VM defaults (7 patches) ────────────────────────
   - name: backend default BIOS is OVMF
     run: grep -q "default => 'ovmf'," /usr/share/perl5/PVE/QemuServer.pm
+    diag: |
+      grep -ni ovmf /usr/share/perl5/PVE/QemuServer.pm 2>&1 | head -n 10
+      dpkg-query -W -f='${Version}\n' qemu-server 2>&1
   - name: backend default machine is q35
     run: grep -q "x86_64 => 'q35'," /usr/share/perl5/PVE/QemuServer/Machine.pm
+    diag: |
+      grep -ni q35 /usr/share/perl5/PVE/QemuServer/Machine.pm 2>&1 | head -n 10
   - name: backend default CPU is x86-64-v2-AES
     run: grep -q "x86-64-v2-AES" /usr/share/perl5/PVE/QemuServer/CPUConfig.pm
+    diag: |
+      grep -ni "x86-64-v2" /usr/share/perl5/PVE/QemuServer/CPUConfig.pm 2>&1 | head -n 10
   - name: backend NIC firewall on by default
     run: grep -A4 'firewall => {' /usr/share/perl5/PVE/QemuServer/Network.pm | grep -q 'default => 1,'
+    diag: |
+      grep -n -A5 'firewall => {' /usr/share/perl5/PVE/QemuServer/Network.pm 2>&1 | head -n 12
   - name: backend disk cache writethrough by default
     run: grep -A4 'cache => {' /usr/share/perl5/PVE/QemuServer/Drive.pm | grep -q "default => 'writethrough',"
+    diag: |
+      grep -n -A5 'cache => {' /usr/share/perl5/PVE/QemuServer/Drive.pm 2>&1 | head -n 12
   - name: backend guest agent on by default
     run: grep -B2 'default_key => 1,' /usr/share/perl5/PVE/QemuServer/Agent.pm | grep -q 'default => 1,'
+    diag: |
+      grep -n -B2 'default_key => 1,' /usr/share/perl5/PVE/QemuServer/Agent.pm 2>&1 | head -n 12
   - name: backend EFI vars disk auto-provision injected
     run: grep -q 'auto-provision an EFI' /usr/share/perl5/PVE/API2/Qemu.pm
+    diag: |
+      grep -ni "auto-provision" /usr/share/perl5/PVE/API2/Qemu.pm 2>&1 | head -n 10
 
   # ── pve-manager GUI wizard defaults (3 JS patches) ─────────────────────
   - name: GUI guest agent default on
     run: |
       grep -A3 "name: 'agent'," /usr/share/pve-manager/js/pvemanagerlib.js | grep -q 'defaultValue: 1,'
+    diag: |
+      grep -n -A3 "name: 'agent'," /usr/share/pve-manager/js/pvemanagerlib.js 2>&1 | head -n 12
   - name: GUI default BIOS OVMF
     run: |
       grep -q "'OVMF (UEFI)' : 'OVMF (UEFI)'" /usr/share/pve-manager/js/pvemanagerlib.js
+    diag: |
+      grep -ni ovmf /usr/share/pve-manager/js/pvemanagerlib.js 2>&1 | head -n 10
   - name: GUI default machine q35
     run: |
       grep -A2 defaultMachines /usr/share/pve-manager/js/pvemanagerlib.js | grep -q "x86_64: 'q35'"
+    diag: |
+      grep -n -A2 defaultMachines /usr/share/pve-manager/js/pvemanagerlib.js 2>&1 | head -n 10
 
   # ── repacked package versions (+bootc) ─────────────────────────────────
   - name: pve-manager repacked
     run: dpkg-query -W -f='${Version}' pve-manager
     expect: +bootc
+    diag: |
+      dpkg-query -W -f='${Version}\n' pve-manager 2>&1; apt-cache policy pve-manager 2>&1 | head -n 6
   - name: qemu-server repacked
     run: dpkg-query -W -f='${Version}' qemu-server
     expect: +bootc
+    diag: |
+      dpkg-query -W -f='${Version}\n' qemu-server 2>&1; apt-cache policy qemu-server 2>&1 | head -n 6
   - name: libtemplate-perl repacked
     run: dpkg-query -W -f='${Version}' libtemplate-perl
     expect: +bootc
+    diag: |
+      dpkg-query -W -f='${Version}\n' libtemplate-perl 2>&1; apt-cache policy libtemplate-perl 2>&1 | head -n 6
   - name: chrony repacked
     run: dpkg-query -W -f='${Version}' chrony
     expect: +bootc
+    diag: |
+      dpkg-query -W -f='${Version}\n' chrony 2>&1; apt-cache policy chrony 2>&1 | head -n 6
   - name: openipmi repacked
     run: dpkg-query -W -f='${Version}' openipmi
     expect: +bootc
+    diag: |
+      dpkg-query -W -f='${Version}\n' openipmi 2>&1; apt-cache policy openipmi 2>&1 | head -n 6
   - name: proxmox-kernel-helper repacked
     run: dpkg-query -W -f='${Version}' proxmox-kernel-helper
     expect: +bootc
+    diag: |
+      dpkg-query -W -f='${Version}\n' proxmox-kernel-helper 2>&1; apt-cache policy proxmox-kernel-helper 2>&1 | head -n 6
   - name: ifupdown2 repacked
     run: dpkg-query -W -f='${Version}' ifupdown2
     expect: +bootc
+    diag: |
+      dpkg-query -W -f='${Version}\n' ifupdown2 2>&1; apt-cache policy ifupdown2 2>&1 | head -n 6
 
   # ── libtemplate-perl mtime fix (the HTTP 500 root cause) ───────────────
   # libtemplate-perl is an arch package: its modules install under
@@ -106,39 +196,85 @@ tests:
   # mtime fix is present in the installed file.
   - name: libtemplate-perl mtime patch applied
     run: grep -q 'arr\[9\] || 1' "$(find /usr/lib /usr/share -path '*/Template/Provider.pm' 2>/dev/null | head -1)"
+    diag: |
+      f=$(find /usr/lib /usr/share -path '*/Template/Provider.pm' 2>/dev/null | head -1)
+      echo "Provider.pm = ${f:-NOT FOUND}"
+      [ -n "$f" ] && grep -n "stat" "$f" 2>&1 | head -n 10
 
   # ── proxmox-kernel-helper bootc-hostile bits stripped ──────────────────
   - name: no proxmox-boot-tool grub-install wrapper
     run: "! grep -rqi proxmox-boot-tool /usr/sbin/grub-install 2>/dev/null"
+    diag: |
+      ls -la /usr/sbin/grub-install 2>&1
+      head -n 20 /usr/sbin/grub-install 2>&1
 
   # ── dc-zramctl / swap ──────────────────────────────────────────────────
   - name: dc-zramctl active
     run: systemctl is-active dc-zramctl
+    diag: |
+      systemctl status dc-zramctl --no-pager -l 2>&1 | tail -n 12
+      journalctl -b -u dc-zramctl --no-pager 2>&1 | tail -n 20
+      echo "--- modprobe zram ---"
+      modprobe zram 2>&1 && echo "modprobe OK" || echo "modprobe FAILED"
+      echo "--- /sys/class/zram-control ---"; ls -l /sys/class/zram-control/ 2>&1
+      echo "--- zram.ko in module tree ---"
+      ls /usr/lib/modules/*/kernel/drivers/block/zram/ 2>&1 || echo "no zram module in tree"
   - name: a zram device exists
     run: test -e /dev/zram0
+    diag: |
+      ls -l /sys/block/zram* 2>&1 || echo "no /sys/block/zram*"
+      zramctl 2>&1
+      journalctl -b -u dc-zramctl --no-pager 2>&1 | tail -n 15
   - name: swap is zram-only
     run: swapon --show=NAME --noheadings | grep -qx /dev/zram0
+    diag: |
+      swapon --show 2>&1
+      echo "--- /proc/swaps ---"; cat /proc/swaps 2>&1
   - name: no disk or file swap
     run: "! swapon --show=NAME --noheadings | grep -qv zram"
+    diag: |
+      swapon --show 2>&1
+      echo "--- /proc/swaps ---"; cat /proc/swaps 2>&1
 
   # ── dc-firewall-seed ───────────────────────────────────────────────────
   - name: cluster firewall seeded into pmxcfs
     run: test -f /etc/pve/firewall/cluster.fw
+    diag: |
+      ls -la /etc/pve/firewall/ 2>&1
+      systemctl status dc-firewall-seed --no-pager -l 2>&1 | tail -n 12
+      journalctl -b -u dc-firewall-seed --no-pager 2>&1 | tail -n 20
   - name: node firewall seeded into pmxcfs
     run: test -f /etc/pve/local/host.fw
+    diag: |
+      echo "/etc/pve/local -> $(readlink /etc/pve/local 2>&1)"
+      ls -la /etc/pve/local/ 2>&1
+      journalctl -b -u dc-firewall-seed --no-pager 2>&1 | tail -n 20
 
   # ── KSM / ballooning ───────────────────────────────────────────────────
   - name: ksmtuned active
     run: systemctl is-active ksmtuned
+    diag: |
+      systemctl status ksmtuned --no-pager -l 2>&1 | tail -n 12
+      journalctl -b -u ksmtuned --no-pager 2>&1 | tail -n 15
 
   # ── custom tools shipped ───────────────────────────────────────────────
   - name: dc-config-zfs present
     run: command -v dc-config-zfs
+    diag: |
+      command -v dc-config-zfs 2>&1 || echo absent; dpkg -l 2>&1 | grep -i dc-config-zfs
   - name: fanctl present
     run: command -v fanctl
+    diag: |
+      command -v fanctl 2>&1 || echo absent; dpkg -l 2>&1 | grep -i fanctl
   - name: powerctl present
     run: command -v powerctl
+    diag: |
+      command -v powerctl 2>&1 || echo absent; dpkg -l 2>&1 | grep -i powerctl
   - name: compose2bootc present
     run: command -v compose2bootc
+    diag: |
+      command -v compose2bootc 2>&1 || echo absent; dpkg -l 2>&1 | grep -i compose2bootc
   - name: pvect-ostree present
     run: command -v pvect-ostree
+    diag: |
+      command -v pvect-ostree 2>&1 || echo absent; dpkg -l 2>&1 | grep -i pvect-ostree
