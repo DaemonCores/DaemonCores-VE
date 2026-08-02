@@ -1,5 +1,15 @@
 # DaemonCores-VE
 
+> **⚠️ Work in Progress**
+>
+> This repository is still under development.
+>
+> A stable release (or a separate stable branch) is not available yet, so please expect bugs and breaking changes.
+>
+> The documentation (README and other files) currently reflects the original goals of the project more than its current state, so it may not always match the code. Feedback and reports about any inconsistencies are always welcome.
+>
+> A development version is already available. Thanks to everyone who takes the time to test it and share feedback—it's greatly appreciated! :)
+
 **Atomic / bootc (OSTree) image for Proxmox VE, based on Debian 13 (Trixie), built on top of [debian-bootc](https://github.com/DaemonCores/debian-bootc).**
 
 DaemonCores-VE delivers a complete, transactional Proxmox VE deployment that inherits the bootc/OSTree infrastructure from debian-bootc and layers the Proxmox hypervisor stack on top. The entire OS is managed as an OCI container image: build, push, deploy, rollback — no manual package management on the host.
