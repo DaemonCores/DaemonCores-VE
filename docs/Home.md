@@ -1,12 +1,13 @@
-# DaemonCores-VE
+# DaemonCores-VE documentation
 
-**Atomic / bootc (OSTree) image for Proxmox VE, built on Debian 13 (Trixie) and layered on top of [debian-bootc](https://github.com/DaemonCores/debian-bootc).**
+DaemonCores-VE packages Proxmox VE as a bootc/OSTree image derived from `debian-bootc`.
 
-DaemonCores-VE delivers a complete, transactional Proxmox VE deployment as an OCI container image. Build, push, deploy, rollback — no manual package management on the host. The entire OS is atomic and rollback-capable from the bootloader.
+## Documentation map
 
-This wiki is kept in sync with the repository via CI. For the full project documentation, see the [README](https://github.com/DaemonCores/DaemonCores-VE/blob/main/README.md).
+- [Architecture](architecture.md) — image layers, package pipeline, first boot, networking, storage, tests, and publication.
+- [Design decisions](justifications.md) — operational and security trade-offs implemented by the current code.
+- [Repository README](https://github.com/DaemonCores/DaemonCores-VE#readme) — status, installation, packages, and required configuration.
+- [Support](https://github.com/DaemonCores/DaemonCores-VE/blob/main/SUPPORT.md) — support channels and issue requirements.
+- [Security policy](https://github.com/DaemonCores/DaemonCores-VE/blob/main/SECURITY.md) — private vulnerability reporting.
 
-## Wiki Pages
-
-- [Architecture](architecture.md) — Layered composition, CI/CD build pipeline, runtime first-boot flow, and key design decisions.
-- [Justifications](justifications.md) — Honest explanations for controversial or non-obvious design choices (default root password, no-subscription popup removal, privileged container, and more).
+The Markdown files in `docs/` are the source of truth. The documentation workflow mirrors them to the GitHub wiki.
