@@ -1,200 +1,79 @@
-# Justifications
+# Design decisions and trade-offs
 
-**Honest explanations for controversial or non-obvious design choices in DaemonCores-VE.**
+## Proxmox as a bootc image
 
-This document follows the same transparency principle as debian-bootc: every decision that could be questioned is documented here with its rationale, its risks, and the alternatives.
+DaemonCores-VE assembles the host in CI and deploys it as a versioned image. This makes the operating-system tree transactional and rollback-oriented, but it also means conventional host-side `apt` customization is not the source of truth. Persistent changes belong in a Containerfile, package, or documented mutable configuration path.
 
----
+The approach is most valuable when hosts are expected to converge on a reviewed image. It is less suitable when every host is intentionally modified by hand.
 
-## 1. Default Root Password (`BootcDebug@0`)
+## Replacing the Debian kernel
 
-### What we do
+The image installs `proxmox-default-kernel` and removes Debian's standard kernel packages and stale module trees. Proxmox features such as ZFS and the supported virtualization stack are expected to track that kernel.
 
-The Kickstart installer sets a temporary default root password: `BootcDebug@0`.
+Kernel replacement increases integration risk around boot finalization and module availability. The build aborts when core Proxmox packages are missing, and the runtime test boots the resulting image rather than accepting an image-only build.
 
-### Why it exists
+## Targeted package repacks
 
-This is a **deliberate fallback**, not an oversight. The `firstboot-user-setup` wizard (inherited from debian-bootc) runs on first boot before the login prompt and asks the user to set a root password. If that wizard fails to run — because the TTY is unavailable, the service crashes, or the boot is interrupted — the system would be completely inaccessible without a known fallback credential.
+Several upstream packages are repacked because their default behaviour assumes a mutable Debian installation rather than an OSTree deployment.
 
-The password serves the same role as the default passwords on Raspberry Pi OS, cloud images, and virtually every other pre-installed Linux image: it guarantees you are not locked out of your own machine before you've had a chance to configure it.
+Each repack should remain narrow, carry a `+bootc` version suffix, and have a runtime or file-level test. Broad source forks would make update review and patch-drift detection harder.
 
-### What happens on first boot
+## Template Toolkit zero-mtime handling
 
-1. The `firstboot-user-setup` wizard prompts for a root password
-2. The user-supplied password replaces `BootcDebug@0`
-3. `chage -d 0` is applied, forcing the root account to change its password on the next login
-4. The temporary password never survives first boot
+OSTree deployments can expose `/usr` files with an epoch mtime. Template Toolkit treats a falsey mtime as if a template is absent, which can make the Proxmox web interface fail even though the file exists.
 
-### Risks
+The `libtemplate-perl` repack maps an existing zero mtime to a non-zero sentinel while preserving the missing-file case. The CI verifies the installed patch and requests the live web page, covering both implementation and outcome.
 
-- If the wizard is bypassed and the user does not log in as root, the temporary password remains active until someone does. This is why the wizard is wired into `getty@tty1.service` as `ExecStartPre` — it is nearly impossible to reach a login prompt without passing through it.
-- The password is documented in the README and in this file. This is intentional: security through obscurity would be worse. The password is meant to be temporary and replaced, not secret.
+## Subscription-status patch
 
-### Alternative
+The repacked `pve-manager` changes the no-subscription response used by the web interface. This is a local product choice, not an Enterprise subscription and not a substitute for vendor support or repository access.
 
-Remove the fallback entirely and trust that `firstboot-user-setup` will never fail. We rejected this because a single failure mode (e.g., serial console without `tty1`) would render the installed system unrecoverable without physical access to the boot media.
+The change should stay isolated and easy to revert. Users with a Proxmox subscription should evaluate removing the patch and enabling the appropriate vendor repository.
 
-This default is **identical to debian-bootc**. The root password is never meant to survive first boot.
+## Network configuration through service drop-ins
 
----
+First-boot network generation and hostname reconciliation run as `networking.service` pre- and post-start hooks. Keeping them in the ifupdown2 integration ensures they run at the point where their inputs and outputs matter.
 
-## 2. Proxmox VE Web UI Fixes (repacked `pve-manager` and `libtemplate-perl`)
+This replaces two standalone services that could drift from the actual network lifecycle. The trade-off is tighter coupling to ifupdown2 and the unit's ordering contract.
 
-Two web-UI defects are fixed by repacking an upstream package with a minimal overlay and republishing it (`+bootc1`) to the DaemonCores-VE APT repository — the same mechanism used for `ifupdown2`, `chrony`, and `openipmi`. apt installs the patched packages at image-build time. There is no standalone script and no apt hook (this replaces the former `removepvepopup` script and its apt `Post-Invoke` hook, which are no longer shipped).
+## Persisting pmxcfs on ZFS
 
-### 2a. No-subscription popup (`pve-manager`)
+`dc-config-zfs` can place the pmxcfs database on a configured ZFS dataset. The feature is opt-in because an incorrect dataset or import order could prevent the Proxmox configuration filesystem from starting.
 
-**What we do.** The repacked `pve-manager` flips `status => "notfound"` to `status => "active"` in `/usr/share/perl5/PVE/API2/Subscription.pm`.
+The service must complete before `pve-cluster`. Operators should verify backups and recovery independently; relocating the database is not itself a backup strategy.
 
-**Why it is necessary.** The image ships **without a Proxmox Enterprise subscription**. Without this patch, every login to the web UI triggers a "You do not have a valid subscription for this server" modal that the user must dismiss manually. In an atomic/bootc model rebuilt from a container image, requiring manual dismissal on every login is not acceptable.
+## Seeding firewall state after pmxcfs
 
-**Proven track record.** This is **not** an experimental hack. The change has run in production for over four years on the author's own servers and those of friends and collaborators, without a single failure — across every Proxmox VE update in that period. It flips a single boolean in the Proxmox VE Perl code, nothing else; that simplicity is why it has stayed stable across versions. Folding it into the repacked package means apt prefers the `+bootc1` version and reapplies the change automatically at every image build.
+Files cannot be baked directly into `/etc/pve` because pmxcfs mounts there at runtime. `dc-firewall-seed` stores templates under `/usr/share` and copies them only after pmxcfs is available.
 
-**Alternative.** Buying a [Proxmox VE Support Subscription](https://www.proxmox.com/en/services/proxmox-ve-support) is a valid choice — it removes the popup without any local patch and grants a legitimate key, Enterprise repository access, and vendor support. Either path is acceptable; revert this patch if you switch to a paid subscription. Running it on a host that already holds a paid subscription would mask legitimate subscription warnings — prefer the subscription path there.
+The seed is intended for initial policy. Ongoing cluster policy remains Proxmox-managed state and should not be overwritten blindly on every boot.
 
-### 2b. Web UI HTTP 500 on ostree (`libtemplate-perl`)
+## Adaptive zram, fan, and power services
 
-**What we do.** The repacked `libtemplate-perl` patches Template Toolkit's `_template_modified` (`Template/Provider.pm`) to map a real-but-zero file mtime to `1`, while still returning `undef` for genuinely missing files.
+The hardware-control packages calibrate against the running machine rather than shipping one universal threshold. This can adapt better across dissimilar hosts, but it creates a responsibility to reject implausible sensors, unsupported write interfaces, and unsafe configuration.
 
-**Why it is necessary.** ostree canonicalizes every `/usr` file mtime to `0` (epoch) at deploy time. Template Toolkit uses that mtime as the "does this template exist?" truth value; a zero mtime is falsy, so **every** template shipped under `/usr` is reported missing and the web UI answers HTTP 500 (`index.html.tpl: not found`). This is intrinsic to the ostree deployment layer — it appears only after deployment, not in the OCI image (which has real mtimes), so it is not a Containerfile mistake. The fix restores correct existence detection on ostree without disturbing Template Toolkit's freshness cache, and applies to every Template Toolkit template, not just the Proxmox UI.
+Virtual-machine tests can validate packaging and service startup. They cannot validate real IPMI commands, embedded controllers, PWM paths, RAPL behaviour, disk policy, or thermal response. Physical qualification is required before enabling write control on a new platform.
 
----
+## Immutable Proxmox containers
 
-## 3. Privileged Container in ISO Workflow
+`pvect-ostree` keeps the image root immutable while attaching writable `/etc` and `/var` state for an unprivileged container. `compose2bootc` builds service images around Podman and Quadlet instead of exposing a Docker daemon socket.
 
-### What we do
+This preserves the versioned-image model inside workloads. It also introduces custom storage and lifecycle code that must be tested during Proxmox and OSTree upgrades.
 
-The ISO generation job (`.github/workflows/iso.yml`) runs inside an `almalinux:10` container with `options: --privileged`.
+## Keyless image signing
 
-### Why it is necessary
+The image workflow uses cosign with GitHub Actions OIDC. The current pipeline does not require a long-lived cosign private key or password.
 
-The ISO build process requires `mount -o loop` to extract and repack the Fedora netinstall ISO's squashfs and EFI partitions. In a standard unprivileged container, loop device access is blocked by the kernel's mount namespace restrictions. `--privileged` grants the necessary capabilities (`CAP_SYS_ADMIN`) and device access to perform loop mounts.
+Verification policy must match the expected repository and reusable-workflow identity. Signature presence alone is not a complete trust policy.
 
-### What we do to mitigate the risk
+## Privileged installer jobs
 
-- The privileged container is **isolated to a single dedicated job** (`build-iso`). No other jobs in the pipeline run privileged.
-- The job does not process untrusted input. The only external data fetched is:
-  - The Fedora netinstall ISO from `archives.fedoraproject.org`
-  - The OCI image from GHCR (verified with `cosign verify` before embedding)
-  - The `cosign` RPM from GitHub Releases (SHA-256 verified)
-- The container image is pinned to `almalinux:10`, not `latest`.
-- The job runs on GitHub-hosted `ubuntu-latest` runners, which are ephemeral and destroyed after the job completes.
+Installer generation and image installation require mounts, loop devices, partitioning, and access to block-device tooling. Those jobs run with elevated privileges.
 
-### Alternative
+Do not execute untrusted pull-request code in the same permission context, and do not expose release or package credentials to such runs.
 
-Run the ISO build on a self-hosted runner with `/dev/loop*` pre-configured and pass `--device /dev/loop0` instead of `--privileged`. This would require maintaining a self-hosted runner infrastructure, which we consider higher overhead than accepting the isolated privileged container for this single job.
+## Shared workflows at `@main`
 
----
+The product currently consumes DaemonCores-CI from its main branch. This keeps active development synchronized, but an incompatible CI change can affect product builds without a product-repository commit.
 
-## 4. Debian Trixie (Testing) as Base
-
-### What we do
-
-DaemonCores-VE is built on Debian 13 (Trixie), which is currently the **testing** distribution, not stable.
-
-### Why testing instead of stable
-
-1. **Kernel recency** — Proxmox VE requires a relatively recent kernel for ZFS and KVM features. Debian Stable (Bookworm, 12) ships a kernel that is too old for Proxmox VE 9's requirements. Trixie provides a kernel new enough to satisfy the dependency chain.
-2. **bootc/ostree evolution** — The bootc and ostree ecosystems are evolving rapidly. bootc 1.x, composefs integration, and dracut module changes are all landing in Debian testing before they reach stable. Building on stable would mean backporting a significant fraction of the base infrastructure, defeating the purpose of using a standard Debian base.
-3. **Proxmox VE 9 targets Trixie** — The upstream Proxmox repositories already publish packages for Trixie. Building on stable would require mixing repositories or waiting for the next stable release.
-
-### Risks
-
-- Testing packages can change without notice. The monthly automated rebuilds (`cron: '0 4 1 * *'`) mitigate this by rebuilding from scratch with the latest testing snapshot.
-- Security updates in testing are not as strictly coordinated as in stable. The trade-off is accepted for the features gained.
-
-### Alternative
-
-Wait for Debian 14 (the next stable release) and freeze on it. This would delay the project by 1–2 years. The current approach is to track Trixie and migrate to the next stable release when it is published.
-
----
-
-## 5. Kernel Replacement (Removing Debian Standard Kernels)
-
-### What we do
-
-The Containerfile removes all generic Debian kernels (`linux-image-amd64`, `os-prober`, and any `linux-image-*` package that is not `proxmox-default-kernel`) and prunes `/usr/lib/modules` so only the Proxmox kernel remains.
-
-### Why we replace the kernel
-
-1. **ZFS integration** — The Proxmox kernel (`proxmox-default-kernel`) ships with ZFS modules built-in. The generic Debian kernel requires ZFS to be compiled via DKMS, which is incompatible with the bootc model: DKMS modules must be rebuilt on every kernel update, and bootc images are meant to be immutable and self-contained.
-2. **KVM optimizations** — The Proxmox kernel includes scheduler and I/O optimizations specifically tuned for virtualization workloads.
-3. **Single kernel image** — bootc systems are designed to have exactly one kernel per deployment. Having multiple kernel packages complicates the bootloader configuration and increases image size.
-
-### Risks
-
-- If Proxmox discontinues `proxmox-default-kernel` or changes its packaging, the build breaks. The monthly rebuilds catch such breakage early.
-- The Proxmox kernel may lag behind the Debian kernel in non-virtualization features (e.g., new hardware support). For a hypervisor host, this is usually acceptable.
-
-### Alternative
-
-Keep the generic Debian kernel and compile ZFS via DKMS at boot. Rejected because it violates the bootc immutability principle and would require runtime compilation, which is fragile and slow.
-
----
-
-## 6. No SHA Pinning for GitHub Actions
-
-### What we do
-
-GitHub Actions in this repository use version tags (e.g., `actions/checkout@v7`, `sigstore/cosign-installer@v3`) instead of pinning to specific commit SHAs.
-
-### Why we use tags instead of SHAs
-
-Pinning actions to commit SHAs provides supply-chain immutability against tag mutation, but shifts the **entire maintenance burden onto the repository owner**: every dependency update requires a manual SHA rotation. In practice this leads to perpetually outdated pins — which provide false security rather than real security.
-
-This repository instead relies on **Dependabot** (`.github/dependabot.yml`) for weekly automated pull requests covering both GitHub Actions and the Docker base image. Updates are reviewed and merged explicitly, providing full auditability without manual tracking overhead. All actions used are from well-established, high-visibility namespaces (`actions/*`, `sigstore/*`, `morph027/*`) where tag mutation would be immediately detected by the community.
-
-### Risks
-
-- A compromised action in a trusted namespace could inject malicious code. Dependabot would surface the update, but a human must review it before merge.
-- Tag mutation by a malicious insider at GitHub or a third-party action maintainer is theoretically possible. The namespaces chosen have high community scrutiny.
-
-### Alternative
-
-Pin every action to a SHA and maintain a manual rotation schedule. Rejected because the maintenance overhead is not justified for a project with a single maintainer and monthly rebuild cadence. The Dependabot + review model provides a better trade-off.
-
----
-
-## 7. `COSIGN_EXPERIMENTAL: 1`
-
-### What we do
-
-The ISO workflow sets the environment variable `COSIGN_EXPERIMENTAL=1` before running `cosign verify`.
-
-### Why it is enabled
-
-`COSIGN_EXPERIMENTAL=1` enables experimental features in the cosign CLI. Historically, this flag was required for keyless Sigstore verification workflows (OIDC-based certificate identity verification) before they were promoted to stable in later cosign versions. The project started using cosign when keyless signing was still experimental, and the flag was retained for compatibility with the specific cosign version pinned in the ISO workflow.
-
-The flag may become unnecessary as cosign matures, but its presence is harmless: it simply opts in to features that are stable in newer releases and experimental in older ones.
-
-### Risks
-
-- Experimental features may change behaviour across cosign versions. The cosign version is pinned via the SHA-256 verified RPM download in the ISO workflow, so the behaviour is deterministic within a given build.
-- The flag could mask deprecation warnings. Monthly rebuilds surface any CLI changes.
-
-### Alternative
-
-Remove the flag and rely on the stable cosign verification path. This would require verifying that the pinned cosign version supports keyless verification without the flag. Given that the flag is harmless and the version is pinned, we have not prioritized removing it.
-
----
-
-## Summary Table
-
-| Decision | Justification | Risk Level | Alternative |
-|---|---|---|---|
-| Default root password | Fallback if firstboot wizard fails | Low (temporary, replaced immediately) | Remove fallback; risk lockout |
-| `pve-manager` subscription patch (repacked) | Maintained by author, 4+ years production, single-boolean patch folded into the package | Low (single stable field, re-applied at build time) | Buy Proxmox subscription |
-| `libtemplate-perl` mtime patch (repacked) | Fixes ostree `mtime=0` breaking Template Toolkit → web UI HTTP 500 | Low (2-line change, guarded by build-time asserts) | Patch Proxmox templates individually |
-| Privileged ISO container | Required for `mount -o loop` | Low (isolated to single job, ephemeral runner) | Self-hosted runner with loop devices |
-| Debian Trixie (testing) | Kernel recency, bootc evolution, Proxmox VE 9 target | Medium (testing instability) | Wait for Debian 14 stable |
-| Kernel replacement | ZFS built-in, KVM optimizations, bootc immutability | Low (Proxmox kernel is stable) | Keep Debian kernel + DKMS ZFS |
-| No SHA pinning for Actions | Dependabot + review > manual SHA rotation | Low (trusted namespaces) | Pin all SHAs manually |
-| `COSIGN_EXPERIMENTAL: 1` | Historical requirement for keyless verification | Very low (pinned cosign version) | Verify stable path and remove |
-
----
-
-## Related Documents
-
-- [`README.md`](../README.md) — Full project documentation
-- [`docs/architecture.md`](architecture.md) — Architecture overview, build pipeline, first-boot flow
-- [`Containerfile`](../Containerfile) — Image composition definition
+Versioned workflow tags or commit pins are the appropriate next step when the shared interface is declared stable.
