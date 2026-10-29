@@ -23,21 +23,29 @@
 #   knobs the host needs, and each addition must re-verify the applicability
 #   on the PVE packaging tree.
 #
-# Generated from the live GitLab tree on 2026-10-30 (series 7.3): every URL
-# below was verified to exist. The PVE 9.2 packaging (proxmox-kernel-7.0,
-# 7.0.14-26) tracks the 7.0.x series — archived upstream (eol/), so the
-# effective series directory at build time is eol/linux-7.0.y-xanmod unless
-# the packaging moves to a newer series; {seriesdir} is resolved by
-# lib/kernel-pve-patches.sh. A new series means a new manifest review, not
-# a blind bump of {seriesdir}.
+# Generated from the live GitLab tree on 2026-10-30 (series 7.3), reviewed
+# 2026-10-29 for the series the PVE 9.2 packaging actually tracks:
+# proxmox-kernel-7.0 (7.0.14-26) → the ARCHIVED 7.0 series, eol/linux-7.0.y-
+# xanmod ({seriesdir} resolved by lib/kernel-pve-patches.sh). 21 patches:
+# 18 xanmod + 3 clearlinux; 0004-ata-before-graphics (clearlinux) does not
+# apply to the 7.0.x tree in either series (dry-run verified). The build
+# hard-fails on any patch that cannot be downloaded or applied. A new
+# packaging series means a new manifest review, not a blind bump.
 patches:
   # ── xanmod topic (applied in file-number order) ─────────────────────────
   - name: 0001-x86-cflags
     url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0001-XANMOD-x86-build-Add-more-CFLAGS-optimizations.patch
     topic: xanmod
     stage: common
+  # 0002-kbuild-llvm-plo: PINNED to the active 7.3 file on 2026-10-29
+  # (series 7.0 review): the EOL 7.0 sibling does not apply to the 7.0.x
+  # tree — it depends on an XanMod-side 0001 Makefile context (dry-run
+  # verified on the pristine and the 0001-patched tree), while the 7.3
+  # file applies cleanly on the same tree (dry-run verified). The URL is
+  # absolute (no {seriesdir}) so the series bump does not silently move
+  # it; re-review on a series bump.
   - name: 0002-kbuild-llvm-plo
-    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0002-XANMOD-kbuild-Add-LLVM-polyhedral-loop-optimizer-fla.patch
+    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/linux-7.3.y-xanmod/xanmod/0002-XANMOD-kbuild-Add-LLVM-polyhedral-loop-optimizer-fla.patch
     topic: xanmod
     stage: common
   - name: 0003-kbuild-sms-pipelining
@@ -118,7 +126,7 @@ patches:
     url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0003-locking-rwsem-spin-faster.patch
     topic: clearlinux
     stage: common
-  - name: 0004-ata-before-graphics
-    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0004-drivers-initialize-ata-before-graphics.patch
-    topic: clearlinux
-    stage: common
+  # 0004-ata-before-graphics REMOVED 2026-10-29 (series 7.0 review): the
+  # file downloads but no longer applies to the 7.0.x tree (verified by
+  # dry-run against BOTH the active 7.3 and the EOL 7.0 series) — drivers
+  # initialize ata before graphics upstream now.
