@@ -9,8 +9,10 @@
 #
 # Fields:
 #   name   unique label used in logs
-#   url    official upstream location; {series} is replaced by the kernel
-#          series (7.3 for a 7.3.0 kernel), {topic} by the topic directory
+#   url    official upstream location; {seriesdir} is replaced by the series
+#          directory (linux-7.3.y-xanmod for the 7.3 series, eol/linux-7.0.y-
+#          xanmod for the archived 7.0 series the PVE packaging tracks),
+#          {topic} by the topic directory
 #   stage  common (every architecture) or an architecture (amd64, arm64)
 #
 # Official source: https://gitlab.com/xanmod/linux-patches
@@ -22,97 +24,101 @@
 #   on the PVE packaging tree.
 #
 # Generated from the live GitLab tree on 2026-10-30 (series 7.3): every URL
-# below was verified to exist. A new series means a new manifest review, not
-# a blind bump of {series}.
+# below was verified to exist. The PVE 9.2 packaging (proxmox-kernel-7.0,
+# 7.0.14-26) tracks the 7.0.x series — archived upstream (eol/), so the
+# effective series directory at build time is eol/linux-7.0.y-xanmod unless
+# the packaging moves to a newer series; {seriesdir} is resolved by
+# lib/kernel-pve-patches.sh. A new series means a new manifest review, not
+# a blind bump of {seriesdir}.
 patches:
   # ── xanmod topic (applied in file-number order) ─────────────────────────
   - name: 0001-x86-cflags
-    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/linux-{series}.y-xanmod/{topic}/0001-XANMOD-x86-build-Add-more-CFLAGS-optimizations.patch
+    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0001-XANMOD-x86-build-Add-more-CFLAGS-optimizations.patch
     topic: xanmod
     stage: common
   - name: 0002-kbuild-llvm-plo
-    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/linux-{series}.y-xanmod/{topic}/0002-XANMOD-kbuild-Add-LLVM-polyhedral-loop-optimizer-fla.patch
+    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0002-XANMOD-kbuild-Add-LLVM-polyhedral-loop-optimizer-fla.patch
     topic: xanmod
     stage: common
   - name: 0003-kbuild-sms-pipelining
-    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/linux-{series}.y-xanmod/{topic}/0003-XANMOD-kbuild-Add-SMS-based-software-pipelining-flag.patch
+    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0003-XANMOD-kbuild-Add-SMS-based-software-pipelining-flag.patch
     topic: xanmod
     stage: common
   - name: 0004-kbuild-debpkg-dbg
-    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/linux-{series}.y-xanmod/{topic}/0004-XANMOD-kbuild-deb-pkg-Create-dbg-when-make-DEB_DEBUG.patch
+    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0004-XANMOD-kbuild-deb-pkg-Create-dbg-when-make-DEB_DEBUG.patch
     topic: xanmod
     stage: common
   - name: 0005-kbuild-sign-external-cfg
-    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/linux-{series}.y-xanmod/{topic}/0005-kbuild-Re-add-.config-file-required-to-sign-external.patch
+    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0005-kbuild-Re-add-.config-file-required-to-sign-external.patch
     topic: xanmod
     stage: common
   - name: 0006-fair-unscaled-tunables
-    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/linux-{series}.y-xanmod/{topic}/0006-XANMOD-fair-Set-scheduler-tunable-latencies-to-unsca.patch
+    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0006-XANMOD-fair-Set-scheduler-tunable-latencies-to-unsca.patch
     topic: xanmod
     stage: common
   - name: 0007-mq-deadline-write-prio
-    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/linux-{series}.y-xanmod/{topic}/0007-XANMOD-block-mq-deadline-Increase-write-priority-to-.patch
+    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0007-XANMOD-block-mq-deadline-Increase-write-priority-to-.patch
     topic: xanmod
     stage: common
   - name: 0008-mq-deadline-front-merges
-    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/linux-{series}.y-xanmod/{topic}/0008-XANMOD-block-mq-deadline-Disable-front_merges-by-def.patch
+    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0008-XANMOD-block-mq-deadline-Disable-front_merges-by-def.patch
     topic: xanmod
     stage: common
   - name: 0009-block-rq-affinity
-    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/linux-{series}.y-xanmod/{topic}/0009-XANMOD-block-Set-rq_affinity-to-force-complete-I-O-r.patch
+    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0009-XANMOD-block-Set-rq_affinity-to-force-complete-I-O-r.patch
     topic: xanmod
     stage: common
   - name: 0010-blk-wbt-latency
-    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/linux-{series}.y-xanmod/{topic}/0010-XANMOD-blk-wbt-Set-wbt_default_latency_nsec-to-2msec.patch
+    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0010-XANMOD-blk-wbt-Set-wbt_default_latency_nsec-to-2msec.patch
     topic: xanmod
     stage: common
   - name: 0011-kconfig-500hz
-    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/linux-{series}.y-xanmod/{topic}/0011-XANMOD-kconfig-add-500Hz-timer-interrupt-kernel-conf.patch
+    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0011-XANMOD-kconfig-add-500Hz-timer-interrupt-kernel-conf.patch
     topic: xanmod
     stage: common
   - name: 0012-vfs-cache-pressure
-    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/linux-{series}.y-xanmod/{topic}/0012-XANMOD-vfs-Decrease-rate-at-which-vfs-caches-are-rec.patch
+    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0012-XANMOD-vfs-Decrease-rate-at-which-vfs-caches-are-rec.patch
     topic: xanmod
     stage: common
   - name: 0013-mm-max-map-count
-    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/linux-{series}.y-xanmod/{topic}/0013-XANMOD-mm-Raise-max_map_count-default-value.patch
+    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0013-XANMOD-mm-Raise-max_map_count-default-value.patch
     topic: xanmod
     stage: common
   - name: 0014-mm-vmscan-swappiness
-    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/linux-{series}.y-xanmod/{topic}/0014-XANMOD-mm-vmscan-Reduce-amount-of-swapping.patch
+    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0014-XANMOD-mm-vmscan-Reduce-amount-of-swapping.patch
     topic: xanmod
     stage: common
   - name: 0015-cpufreq-governor-tunes
-    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/linux-{series}.y-xanmod/{topic}/0015-XANMOD-cpufreq-tunes-ondemand-and-conservative-gover.patch
+    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0015-XANMOD-cpufreq-tunes-ondemand-and-conservative-gover.patch
     topic: xanmod
     stage: common
   - name: 0016-kconfig-symbolic-err
-    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/linux-{series}.y-xanmod/{topic}/0016-XANMOD-lib-kconfig.debug-disable-default-SYMBOLIC_ER.patch
+    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0016-XANMOD-lib-kconfig.debug-disable-default-SYMBOLIC_ER.patch
     topic: xanmod
     stage: common
   - name: 0017-setlocalversion-tag
-    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/linux-{series}.y-xanmod/{topic}/0017-XANMOD-scripts-setlocalversion-remove-tag-for-git-re.patch
+    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0017-XANMOD-scripts-setlocalversion-remove-tag-for-git-re.patch
     topic: xanmod
     stage: common
   - name: 0018-setlocalversion-file
-    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/linux-{series}.y-xanmod/{topic}/0018-XANMOD-scripts-setlocalversion-Move-localversion-fil.patch
+    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0018-XANMOD-scripts-setlocalversion-Move-localversion-fil.patch
     topic: xanmod
     stage: common
 
   # ── clearlinux topic ────────────────────────────────────────────────────
   - name: 0001-wait-lifo
-    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/linux-{series}.y-xanmod/{topic}/0001-sched-wait-Do-accept-in-LIFO-order-for-cache-efficie.patch
+    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0001-sched-wait-Do-accept-in-LIFO-order-for-cache-efficie.patch
     topic: clearlinux
     stage: common
   - name: 0002-firmware-stateless
-    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/linux-{series}.y-xanmod/{topic}/0002-firmware-Enable-stateless-firmware-loading.patch
+    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0002-firmware-Enable-stateless-firmware-loading.patch
     topic: clearlinux
     stage: common
   - name: 0003-rwsem-spin
-    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/linux-{series}.y-xanmod/{topic}/0003-locking-rwsem-spin-faster.patch
+    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0003-locking-rwsem-spin-faster.patch
     topic: clearlinux
     stage: common
   - name: 0004-ata-before-graphics
-    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/linux-{series}.y-xanmod/{topic}/0004-drivers-initialize-ata-before-graphics.patch
+    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0004-drivers-initialize-ata-before-graphics.patch
     topic: clearlinux
     stage: common
