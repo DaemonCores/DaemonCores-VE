@@ -173,6 +173,60 @@ packages:
       dpkg-deb --build /output/libtemplate-perl \
         /debs/libtemplate-perl_${ORIG_VER}+bootc1_${ARCH}.deb
 
+  - name: libpve-storage-perl
+    upstream: libpve-storage-perl
+    sources:
+      - libpve-storage-perl
+    build: |
+      SAVE_PWD=$(pwd)
+
+      apt update
+      # The guarded patch script compile-checks two PVE:: Perl modules after
+      # patching; their sibling modules (libpve-common-perl and friends) must
+      # be present in the builder for `perl -c` to be meaningful.
+      apt install -y --no-install-recommends \
+        libpve-common-perl libjson-perl libnet-ip-perl
+      cd /tmp
+      apt-get download libpve-storage-perl
+
+      mkdir -p /output/libpve-storage-perl
+      dpkg-deb -R /tmp/libpve-storage-perl_*.deb /output/libpve-storage-perl
+
+      ORIG_VER=$(dpkg-deb -f /tmp/libpve-storage-perl_*.deb Version)
+      ARCH=$(dpkg-deb -f /tmp/libpve-storage-perl_*.deb Architecture)
+
+      # Guarded patches: mount every zpool created through the API/GUI under
+      # /mnt/<pool> (the bootc root is read-only) and align the ZFSPoolPlugin
+      # path() fallback. Exit 3 => a patch anchor drifted upstream: skip this
+      # deb (keep the last-good +bootc build, never ship the unpatched
+      # upstream) without failing the pipeline; the script already surfaced
+      # the reason in the step summary + a GitHub issue.
+      set +e
+      bash "${SAVE_PWD}/workflows/bootc-debs-builder/libpve-storage-perl/patch-defaults.sh" \
+        /output/libpve-storage-perl
+      rc=$?
+      set -e
+      if [ "$rc" -eq 3 ]; then
+        echo "libpve-storage-perl skipped (patch drift) — last-good +bootc build retained."
+        exit 0
+      elif [ "$rc" -ne 0 ]; then
+        exit "$rc"
+      fi
+
+      # Regenerate md5sums after content modification
+      find /output/libpve-storage-perl -not -path '*/DEBIAN/*' -type f \
+        | xargs md5sum \
+        | sed "s|/output/libpve-storage-perl/||" \
+        > /output/libpve-storage-perl/DEBIAN/md5sums
+
+      # The +dcve suffix marks the ZFS mountpoint patch (distinct from the
+      # plain +bootc repacks) so hosts can hold/pin on it via version checks.
+      sed -i "s/^Version: .*/Version: 1:${ORIG_VER}+dcve1/" \
+        /output/libpve-storage-perl/DEBIAN/control
+
+      dpkg-deb --build /output/libpve-storage-perl \
+        /debs/libpve-storage-perl_${ORIG_VER}+dcve1_${ARCH}.deb
+
   - name: pve-manager
     upstream: pve-manager
     sources:
