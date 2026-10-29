@@ -11,6 +11,11 @@
 #   pvect-ostree mount    <vmid>
 #   pvect-ostree list
 #   pvect-ostree destroy  <vmid>
+#   pvect-ostree build    <compose.yml> [--name N]
+#   pvect-ostree publish  <compose.yml> [--name N] [--timer]
+#   pvect-ostree templates [<name>]
+#   pvect-ostree refresh  <vmid>
+#   pvect-ostree adopt    <vmid>
 #
 # What it does:
 #   A bootc image is an OCI image carrying a whole OS. This tool deploys such an
@@ -35,6 +40,13 @@
 #   The read-only base means a bad update is undone by pointing back at the
 #   prior deployment, never by mutating a live root.
 #
+#   Compose stacks: `build` and `publish` turn a docker-compose stack into a
+#   published LXC template on the pvect-ostree storage (via compose2bootc,
+#   smoke-gated); `pct create <vmid> ostree:vztmpl/<stack>.tar.zst` is then the
+#   standard entry point — the seed template is adopted at first activation.
+#   `refresh` rebuilds a CT from its recorded compose source; `templates` lists
+#   the published stacks.
+#
 # Why the rootfs mount is re-established on boot:
 #   The composefs view is a runtime mount; it does not survive a host reboot.
 #   The pvect-ostree.service unit runs `remount-all` before pve-guests.service
@@ -58,9 +70,14 @@ USERNS=/run/pvect-ostree/userns
 ALLOC_TEMPLATE_MATCH=alpine
 GUEST_MASK_UNITS=""
 PLUGIN_STORAGE=ostree # storeid auto-registered for the pvect-ostree plugin
+COMPOSE_DIR=/var/lib/pvect-ostree/compose # recorded compose sources per stack
+TEMPLATE_DIR= # derived from SYSROOT (below); settable in the CONF
 
 # shellcheck source=/dev/null
 [[ -r $CONF ]] && . "$CONF"
+# Derive the template directory from the sysroot unless the CONF set it.
+TEMPLATE_DIR=${TEMPLATE_DIR:-$SYSROOT/vztmpl}
+COMPOSE_DIR=${COMPOSE_DIR:-/var/lib/pvect-ostree/compose}
 
 readonly REG_DIR="$STATE_DIR" # per-CT registry: $REG_DIR/<vmid>.env
 
@@ -123,6 +140,20 @@ need_tools() {
   for t in ostree mount.composefs pct pvesm unshare; do
     command -v "$t" >/dev/null 2>&1 || die "missing required tool: $t"
   done
+}
+
+#######################################
+# Verify the compose toolchain is on PATH (build/publish path only).
+# Globals:
+#   PROG
+# Outputs:
+#   Error via die() naming the missing command.
+# Returns:
+#   Exits 1 when compose2bootc is not found.
+#######################################
+need_compose() {
+  command -v compose2bootc >/dev/null 2>&1 \
+    || die "missing required tool: compose2bootc (install the compose2bootc package)"
 }
 
 #######################################
@@ -271,12 +302,13 @@ reg_load() {
 #   Creates $REG_DIR/<vmid>.env.
 #######################################
 reg_write() {
-  local vmid=$1 stateroot=$2 imgref=$3
+  local vmid=$1 stateroot=$2 imgref=$3 compose=${4:-}
   mkdir -p "$REG_DIR"
   cat >"$(reg_file "$vmid")" <<EOF
 VMID=$vmid
 STATEROOT=$stateroot
 IMGREF='$imgref'
+COMPOSE='$compose'
 EOF
 }
 
@@ -291,11 +323,15 @@ EOF
 #######################################
 subvol_path() {
   local vmid=$1 base
-  base=$(pvesm path "$STORAGE:$vmid/subvol-$vmid-disk-0.subvol" 2>/dev/null)
-  if [[ -n $base ]]; then
-    echo "$base"
-    return 0
-  fi
+  # Prefer the plugin storage (self-contained layout), then the classic dir
+  # storage configured in the CONF.
+  for s in "$PLUGIN_STORAGE" "$STORAGE"; do
+    base=$(pvesm path "$s:$vmid/subvol-$vmid-disk-0.subvol" 2>/dev/null)
+    if [[ -n $base ]]; then
+      echo "$base"
+      return 0
+    fi
+  done
   # Fall back to the documented dir-storage layout, honouring the storage's
   # configured path (defaulting to /var/lib/vz if it cannot be resolved).
   local dir
@@ -569,6 +605,8 @@ cmd_create() {
 cmd_update() {
   local vmid=${1:?usage: $PROG update <vmid> [<image-ref>]}
   reg_load "$vmid"
+  # shellcheck disable=SC2153  # COMPOSE comes from the sourced registry entry.
+  local compose_saved=$COMPOSE # preserved across the update (used by refresh).
   local imgref=${2:-$IMGREF}
   need_root
   need_tools
@@ -578,7 +616,7 @@ cmd_update() {
   [[ $running -eq 1 ]] && pct shutdown "$vmid" --timeout 60 2>/dev/null
 
   cmd_deploy "$imgref" "$STATEROOT"
-  reg_write "$vmid" "$STATEROOT" "$imgref"
+  reg_write "$vmid" "$STATEROOT" "$imgref" "$compose_saved"
   umount_rootfs "$vmid"
   mount_rootfs "$vmid"
   [[ $running -eq 1 ]] && pct start "$vmid"
@@ -633,6 +671,16 @@ cmd_mount() {
   local vmid=${1:?usage: $PROG mount <vmid>}
   need_root
   need_tools
+  # A CT created from a published seed template is not registered yet; adopt
+  # it first so the plugin's plain `mount ` activates the whole compose path.
+  if [[ ! -r $(reg_file "$vmid") ]]; then
+    local payload
+    payload="$(subvol_path "$vmid")/pvect-ostree/payload.env"
+    [[ -r $payload ]] || die "container $vmid is not managed by pvect-ostree"
+    info "seed template detected for CT $vmid; adopting"
+    cmd_adopt "$vmid"
+    return 0
+  fi
   mount_rootfs "$vmid"
   info "rootfs mounted for CT $vmid"
 }
@@ -672,10 +720,14 @@ cmd_seed() {
     # `&& info || warn`: info never fails, so this reports success/failure of
     # the pvesm add (A); warn (C) only runs when A fails.
     # shellcheck disable=SC2015
-    pvesm add pvect-ostree "$PLUGIN_STORAGE" --content rootdir \
+    pvesm add pvect-ostree "$PLUGIN_STORAGE" --content rootdir,vztmpl \
       --pvect-sysroot "$SYSROOT" 2>/dev/null \
       && info "registered storage '$PLUGIN_STORAGE' (type pvect-ostree)" \
       || warn "could not register storage '$PLUGIN_STORAGE' (plugin loaded?)"
+  else
+    # Older registrations may lack the vztmpl content; keep it current.
+    pvesm set "$PLUGIN_STORAGE" --content rootdir,vztmpl 2>/dev/null \
+      || true
   fi
 }
 
@@ -698,7 +750,7 @@ cmd_remount_all() {
   for f in "$REG_DIR"/*.env; do
     vmid=$(basename "$f" .env)
     if [[ -f "/etc/pve/lxc/$vmid.conf" ]]; then
-      if mount_rootfs "$vmid"; then
+      if cmd_mount "$vmid"; then
         info "remounted CT $vmid"
       else
         warn "failed to remount CT $vmid"
@@ -759,6 +811,230 @@ cmd_destroy() {
 }
 
 #######################################
+# Parse --name (and, for publish, --timer) after a positional compose file.
+# Globals:
+#   STACK, WITH_TIMER (set)
+# Arguments:
+#   $@ - the remaining arguments
+#######################################
+parse_stack_args() {
+  local want_timer=$1
+  shift
+  STACK=""
+  WITH_TIMER=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name)
+        STACK=$2
+        shift 2
+        ;;
+      --timer)
+        [ "$want_timer" -eq 1 ] || die "unknown option: --timer"
+        WITH_TIMER=1
+        shift
+        ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  [[ $STACK =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ || -z $STACK ]] \
+    || die "invalid stack name: $STACK"
+}
+
+#######################################
+# Build a compose stack into a bootc image (smoke-gated) and record the
+# compose source the rebuilt stack derives from.
+# Globals:
+#   COMPOSE_DIR, CONF (sourced)
+# Arguments:
+#   $1 - compose file
+#   $2+ - [--name N]
+# Outputs:
+#   Progress via info(); the image reference on stdout.
+# Returns:
+#   Exits 1 (via compose2bootc) when the smoke test fails.
+#######################################
+cmd_build() {
+  local compose=${1:?usage: $PROG build <compose.yml> [--name N]}
+  shift
+  need_root
+  need_compose
+  parse_stack_args 0 "$@"
+  [[ -n $STACK ]] || STACK=$(basename "$(cd "$(dirname "$compose")" && pwd)")
+  [[ -f $compose ]] || die "compose file not found: $compose"
+
+  local imgref="localhost/$STACK:latest"
+  # stdout stays reserved for the image reference; narration goes to stderr.
+  echo "$PROG: building stack $STACK (compose2bootc: transpile, build, lint, smoke test)" >&2
+  compose2bootc convert "$compose" --name "$STACK" --registry "$imgref" --keep \
+    >/dev/null \
+    || die "compose2bootc build failed (smoke test not passed; image not published)"
+
+  mkdir -p "$COMPOSE_DIR/$STACK"
+  [[ $compose == "$COMPOSE_DIR/$STACK/docker-compose.yml" ]] \
+    || cp "$compose" "$COMPOSE_DIR/$STACK/docker-compose.yml"
+  # stdout stays clean (callers capture the image reference); tell the user on stderr.
+  echo "$PROG: BUILD OK: $imgref (compose source: $COMPOSE_DIR/$STACK/docker-compose.yml)" >&2
+  echo "$imgref"
+}
+
+#######################################
+# Publish a compose stack as an LXC seed template on the pvect-ostree
+# storage: build (smoke-gated), then write <stack>.tar.gz plus the
+# relocation report and a listing sidecar. `pct create <vmid>
+# ostree:vztmpl/<stack>.tar.gz` is the standard entry point.
+# Globals:
+#   TEMPLATE_DIR, COMPOSE_DIR
+# Arguments:
+#   $1 - compose file
+#   $2+ - [--name N] [--timer]
+# Outputs:
+#   Progress via info().
+#######################################
+cmd_publish() {
+  local compose=${1:?usage: $PROG publish <compose.yml> [--name N] [--timer]}
+  shift
+  need_root
+  parse_stack_args 1 "$@"
+  local imgref
+  if [[ -n $STACK ]]; then
+    imgref=$(cmd_build "$compose" --name "$STACK") || exit 1
+  else
+    imgref=$(cmd_build "$compose") || exit 1
+  fi
+  # Re-derive the stack name when only the compose file was given: the build
+  # record and the payload must carry the same name.
+  [[ -n $STACK ]] || STACK=$(basename "$(cd "$(dirname "$compose")" && pwd)")
+
+  if [[ $WITH_TIMER -eq 1 ]]; then
+    info "installing the 7-day rebuild timer for $STACK"
+    compose2bootc install-timer "$compose" --name "$STACK" || \
+      warn "could not install the rebuild timer"
+  fi
+
+  local tmp
+  tmp=$(mktemp -d)
+  mkdir -p "$tmp/pvect-ostree" "$tmp/etc" "$TEMPLATE_DIR"
+  cat >"$tmp/pvect-ostree/payload.env" <<EOF
+STACK=$STACK
+IMGREF=$imgref
+COMPOSE=$COMPOSE_DIR/$STACK/docker-compose.yml
+EOF
+  # /etc/os-release lets the standard pct create path run its OS detection;
+  # it must name a distribution PVE::LXC::Setup knows (Debian) — adopt
+  # afterwards rewrites the config to the pvect-ostree posture (ostype: unmanaged).
+  cat >"$tmp/etc/os-release" <<'EOF'
+PRETTY_NAME="DaemonCores bootc compose stack (seed)"
+NAME="Debian GNU/Linux"
+ID=debian
+VERSION_ID="12"
+VERSION_CODENAME=bookworm
+EOF
+  # PVE::LXC::Setup::Debian reads /etc/debian_version next.
+  cat >"$tmp/etc/debian_version" <<'EOF'
+12/bookworm
+EOF
+  tar -czf "$TEMPLATE_DIR/$STACK.tar.gz" -C "$tmp" pvect-ostree etc \
+    || die "seed template tar failed"
+  cp "$tmp/pvect-ostree/payload.env" "$TEMPLATE_DIR/$STACK.payload.env"
+  # Keep the relocation report beside the template when compose2bootc wrote one.
+  cp "/var/lib/compose2bootc/$STACK/context/RELOCATIONS.txt" \
+    "$TEMPLATE_DIR/$STACK.RELOCATIONS.txt" 2>/dev/null \
+    || warn "no RELOCATIONS.txt found (kept report absent)"
+  rm -rf "$tmp"
+  info "published template: pct create <vmid> ostree:vztmpl/$STACK.tar.gz"
+}
+
+#######################################
+# List the published compose templates with their image and compose source.
+# Globals:
+#   TEMPLATE_DIR
+# Arguments:
+#   $1 - optional stack name filter
+#######################################
+cmd_templates() {
+  need_root
+  local f stack
+  printf '%-16s %-28s %s\n' STACK IMAGE COMPOSE
+  shopt -s nullglob
+  for f in "$TEMPLATE_DIR"/*.payload.env; do
+    # shellcheck source=/dev/null
+    . "$f"
+    # STACK/IMGREF/COMPOSE come from the sourced payload above.
+    # shellcheck disable=SC2153
+    [[ -z ${1:-} || $STACK == "$1" ]] || continue
+    printf '%-16s %-28s %s\n' "$STACK" "$IMGREF" "$COMPOSE"
+  done
+}
+
+#######################################
+# Rebuild a CT from its recorded compose source and update it, keeping the
+# previous deployment for rollback.
+# Globals:
+#   REG_DIR, COMPOSE_DIR
+# Arguments:
+#   $1 - vmid
+#######################################
+cmd_refresh() {
+  local vmid=${1:?usage: $PROG refresh <vmid>}
+  need_root
+  reg_load "$vmid"
+  local compose=$COMPOSE # COMPOSE comes from the sourced registry entry.
+  [[ -n ${compose:-} && -f $compose ]] \
+    || die "CT $vmid has no recorded compose source ($compose)"
+  local stack=${IMGREF#localhost/}
+  stack=${stack%%:*}
+  info "rebuilding CT $vmid from $compose"
+  local imgref
+  imgref=$(cmd_build "$compose" --name "$stack") || exit 1
+  reg_write "$vmid" "$STATEROOT" "$imgref" "$compose"
+  cmd_update "$vmid" "$imgref"
+}
+
+#######################################
+# Wire a CT created from a published seed template into the pvect-ostree
+# registry: read the payload, deploy the image, mount the composefs view.
+# Globals:
+#   REG_DIR, TEMPLATE_DIR
+# Arguments:
+#   $1 - vmid
+#######################################
+cmd_adopt() {
+  local vmid=${1:?usage: $PROG adopt <vmid>}
+  need_root
+  need_tools
+  [[ -f "/etc/pve/lxc/$vmid.conf" ]] || die "CT $vmid does not exist"
+  local root
+  root=$(subvol_path "$vmid")
+  local payload="$root/pvect-ostree/payload.env"
+  [[ -r $payload ]] || die "no seed payload for CT $vmid at $payload"
+
+  local stack imgref compose
+  # shellcheck source=/dev/null
+  . "$payload"
+  info "adopting CT $vmid from seed template (stack ${stack:-?}, image $imgref)"
+  cmd_deploy "$imgref" "ct$vmid"
+  reg_write "$vmid" "ct$vmid" "$imgref" "${compose:-}"
+  mount_rootfs "$vmid"
+  normalise_conf "$vmid"
+  info "CT $vmid adopted; start it from the Web UI or: pct start $vmid"
+}
+
+#######################################
+# Print the rootfs subvol path PVE allocated for a CT (plugin helper).
+# Globals:
+#   STORAGE
+# Arguments:
+#   $1 - vmid
+# Outputs:
+#   Subvol path on stdout.
+#######################################
+cmd_subvol_path() {
+  local vmid=${1:?usage: $PROG subvol-path <vmid>}
+  need_root
+  subvol_path "$vmid"
+}
+
+#######################################
 # Print the usage synopsis extracted from this file's header.
 # Arguments:
 #   $1 - exit code (default: 0)
@@ -768,7 +1044,7 @@ cmd_destroy() {
 #   Exits with the given code.
 #######################################
 usage() {
-  sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '3,18p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -799,6 +1075,12 @@ main() {
     seed) cmd_seed "$@" ;;
     list) cmd_list "$@" ;;
     destroy) cmd_destroy "$@" ;;
+    build) cmd_build "$@" ;;
+    publish) cmd_publish "$@" ;;
+    templates) cmd_templates "$@" ;;
+    refresh) cmd_refresh "$@" ;;
+    adopt) cmd_adopt "$@" ;;
+    subvol-path) cmd_subvol_path "$@" ;;
     -h | --help | help) usage 0 ;;
     *) die "unknown command '$cmd' (try: $PROG --help)" ;;
   esac
