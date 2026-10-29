@@ -247,6 +247,47 @@ def env_pairs(env):
         return [f"{k}={'' if v is None else v}" for k, v in env.items()]
     return [str(e) for e in as_list(env)]
 
+def load_env_file(p, acc):
+    # Shell-ish env file (host-side secrets/wiring); missing file is fine.
+    try:
+        with open(p) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k = line.split("=", 1)[0].strip()
+                if k and k not in acc:
+                    acc[k] = line.split("=", 1)[1].strip().strip("'\"")
+    except (IOError, OSError):
+        pass
+    return acc
+
+def host_env(stack, spec, compose_dir):
+    # Publish ports are host wiring, not guest secrets: resolve ${VAR} against
+    # the generator environment, the compose side .env and any env_file: list.
+    acc = dict(os.environ)
+    load_env_file(os.path.join(compose_dir, ".env"), acc)
+    for f in as_list(spec.get("env_file")):
+        load_env_file(f, acc)
+    return acc
+
+def resolve_publish(p, envm):
+    # Compose interpolation for publish ports; ${VAR:?message} must resolve to
+    # an existing host value or the generator fails loudly instead of emitting
+    # a quadlet directive systemd cannot expand.
+    def sub(match):
+        name, modifier = match.group(1), match.group(2)
+        val = envm.get(name, "")
+        if (val == "" or val is None) and modifier is not None:
+            if modifier.startswith("?"):
+                sys.exit(f"publish port '{p}': '{name}' required: {modifier[1:].strip()}")
+            val = modifier
+        return val
+    resolved = re.sub(r"\$\{([A-Za-z0-9_]+)(?::([-?][^}]*))?\}", sub, str(p))
+    if "${" in resolved:
+        sys.exit(f"publish port '{p}': nested/unsupported placeholder")
+    return resolved.strip(chr(34))
+
 def parse_healthcheck(hc):
     if not hc or hc.get("disable"):
         return None
@@ -345,8 +386,9 @@ for svc, spec in services.items():
               f"Network={network}.network",
               # bootc-owned store, per logically-bound-images guidance.
               "GlobalArgs=--storage-opt=additionalimagestore=/usr/lib/bootc/storage"]
+    _envm = host_env(stack, spec, os.path.dirname(compose_path))
     for p in as_list(spec.get("ports")):
-        lines.append(f"PublishPort={str(p).strip(chr(34))}")
+        lines.append(f"PublishPort={resolve_publish(p, _envm)}")
     _unresolved = []
     for e in env_pairs(spec.get("environment")):
         if "${" in e:
