@@ -17,6 +17,9 @@ LABEL org.opencontainers.image.source="https://github.com/DaemonCores/DaemonCore
 LABEL org.opencontainers.image.licenses="LGPL-2.1"
 LABEL containers.bootc=1
 LABEL ostree.bootable=1
+# The -nvidia twin (opt-in, gpu_driver_images input): same layers plus the
+# NVIDIA proprietary driver/libs after the install-time EULA acceptance.
+LABEL org.daemoncores.nvidia-image="true"
 
 # SHA-256 checksums of the APT repository signing keys fetched below.
 ARG DAEMONCORES_VE_GPG_SHA256=4920000cfcd8f5a618822c8e57222a3c10768d2efb8c0250a71a19ba0c76ff55
@@ -111,3 +114,26 @@ RUN mkdir -p /etc/systemd/system/multi-user.target.wants \
 
 # bootc images are updated in-place via ostree; no runtime healthcheck applies.
 HEALTHCHECK NONE
+
+#####################################################################################
+# NVIDIA proprietary layer — opt-in `-nvidia` twin only
+#####################################################################################
+# The public image never carries the NVIDIA proprietary user-space: the EULA
+# requires an acceptance step, which happens at install time (bootc-installer
+# offers the NVIDIA variant after an explicit consent, see the wiki
+# GPU-Support page). The CI builds the `<tag>-nvidia` twin of every
+# Containerfile carrying `LABEL org.daemoncores.nvidia-image` ONLY when its
+# gpu_driver_images input is set: the same layers, one extra RUN. The twin is
+# otherwise identical — bootc upgrade follows the same suite.
+ARG GPU_EXTRA_PKGS=""
+RUN if [ -n "${GPU_EXTRA_PKGS}" ]; then \
+      kver=$(ls -1v /usr/lib/modules | tail -1) \
+      && apt update \
+      # Headers must match the kernel IN THE IMAGE: nvidia-kernel-dkms builds
+      # against /lib/modules/<kver>/build. Debian names, proxmox fallback
+      # (the pairing is verified on the first real twin build — PENDING).
+      && { apt install -y "linux-headers-${kver}" \
+           || apt install -y "proxmox-headers-${kver}"; } \
+      && apt install -y dkms ${GPU_EXTRA_PKGS} \
+      && rm -f /var/tmp/* /tmp/*; \
+    fi
