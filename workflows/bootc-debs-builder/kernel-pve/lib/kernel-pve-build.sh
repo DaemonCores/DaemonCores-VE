@@ -66,7 +66,8 @@ echo "PVE kernel packaging version: ${KERNEL_VERSION}"
 apt-get install -y --no-install-recommends \
   build-essential dpkg-dev devscripts curl git yq patch \
   bc bison flex libncurses-dev libssl-dev libelf-dev rsync kmod python3 \
-  fakeroot ca-certificates
+  fakeroot ca-certificates \
+  debhelper libdw-dev
 [[ "${KERNEL_ARCH}" = "arm64" ]] && \
   apt-get install -y --no-install-recommends crossbuild-essential-arm64 gcc-aarch64-linux-gnu
 
