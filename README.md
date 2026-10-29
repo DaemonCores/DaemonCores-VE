@@ -98,8 +98,8 @@ Container images are signed keylessly with cosign through GitHub Actions OIDC. N
 
 ## Documentation
 
-- [Architecture](docs/architecture.md)
-- [Design decisions and trade-offs](docs/justifications.md)
+- [Architecture](docs/Handoff-Architecture.md)
+- [Design decisions and trade-offs](docs/Handoff-Decisions.md)
 - [Support](SUPPORT.md)
 - [Security policy](SECURITY.md)
 
