@@ -5,133 +5,306 @@
 #   upstream   apt package to repack (omit for from-source / custom packages)
 #   deps       packages that must be built+installed first (creates a wave)
 #   sources    paths under workflows/bootc-debs-builder/ hashed for change
-#   deb-glob   output deb glob when it differs from <name>_*
+#   deb-glob   output deb glob when it differs from <name>_* (also per-variant)
 #   env        non-secret KEY: VALUE exported for the build (also hashed)
 #   secret-env ENV_VAR: SECRET_NAME injected from secrets (never hashed)
 #   build      the exact build script, verbatim
-# Gabriel spec 2026-10-30: repacked upstreams call the shared helpers in
-# DaemonCores-CI/scripts (repack_deb.sh = mirror overlay + git .patch apply;
-# overlay_tree_deb.sh = pure file-tree overlay; custom_deb.sh = whole custom
-# DEBIAN/+usr/ tree). Package dirs mirror the deb tree; modified files are
-# git-format .patch at the mirror path of the file they patch.
+# Shared repack logic lives in lib/deb-overlays.sh (debian-bootc lib/ convention:
+# sourced, hashed via sources). Package dirs mirror the deb tree: new files are
+# real files, modified upstream files are git .patch at the mirrored path,
+# applied by deb_overlay_apply (all-or-nothing dry-run first, .patch never
+# shipped). Overlay trees without patches use ifupdown2postinstall-style copy
+# (deb_overlay_tree); whole-tree custom packages use deb_custom.
 packages:
   - name: ifupdown2
     upstream: ifupdown2
     sources:
       - ifupdown2postinstall
+      - lib/deb-overlays.sh
     build: |
-      $CI_SCRIPTS/overlay_tree_deb.sh ifupdown2 ifupdown2postinstall +bootc5 \
+      set -euo pipefail
+      SAVE_PWD=$(pwd)
+
+      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
+
+      apt-get update
+      cd /tmp
+      apt-get download ifupdown2
+
+      ORIG_VER=$(dpkg-deb -f /tmp/ifupdown2_*.deb Version)
+      ARCH=$(dpkg-deb -f /tmp/ifupdown2_*.deb Architecture)
+
+      deb_overlay_tree ifupdown2 "${ORIG_VER}" "${ARCH}" +bootc5 \
+        ifupdown2postinstall \
         usr/sbin/ifupdown2-autoconf usr/sbin/domain-set
+
   - name: chrony
     upstream: chrony
     sources:
       - chronypostinstall
+      - lib/deb-overlays.sh
     build: |
-      $CI_SCRIPTS/overlay_tree_deb.sh chrony chronypostinstall +bootc2
+      set -euo pipefail
+      SAVE_PWD=$(pwd)
+
+      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
+
+      apt-get update
+      cd /tmp
+      apt-get download chrony
+
+      ORIG_VER=$(dpkg-deb -f /tmp/chrony_*.deb Version)
+      ARCH=$(dpkg-deb -f /tmp/chrony_*.deb Architecture)
+
+      deb_overlay_tree chrony "${ORIG_VER}" "${ARCH}" +bootc2 chronypostinstall
+
   - name: openipmi
     upstream: openipmi
     sources:
       - openipmipostinstall
+      - lib/deb-overlays.sh
     build: |
-      $CI_SCRIPTS/overlay_tree_deb.sh openipmi openipmipostinstall +bootc1
+      set -euo pipefail
+      SAVE_PWD=$(pwd)
+
+      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
+
+      apt-get update
+      cd /tmp
+      apt-get download openipmi
+
+      ORIG_VER=$(dpkg-deb -f /tmp/openipmi_*.deb Version)
+      ARCH=$(dpkg-deb -f /tmp/openipmi_*.deb Architecture)
+
+      deb_overlay_tree openipmi "${ORIG_VER}" "${ARCH}" +bootc1 openipmipostinstall
+
   - name: libtemplate-perl
     upstream: libtemplate-perl
     sources:
       - libtemplate-perl
+      - lib/deb-overlays.sh
     build: |
-      $CI_SCRIPTS/repack_deb.sh libtemplate-perl libtemplate-perl +bootc1
+      set -euo pipefail
+      SAVE_PWD=$(pwd)
+
+      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
+
+      apt-get update
+      cd /tmp
+      apt-get download libtemplate-perl
+
+      ORIG_VER=$(dpkg-deb -f /tmp/libtemplate-perl_*.deb Version)
+      ARCH=$(dpkg-deb -f /tmp/libtemplate-perl_*.deb Architecture)
+
+      deb_repack libtemplate-perl "${ORIG_VER}" "${ARCH}" +bootc1 libtemplate-perl
+
   - name: libpve-storage-perl
     upstream: libpve-storage-perl
     sources:
       - libpve-storage-perl
+      - lib/deb-overlays.sh
     build: |
-      $CI_SCRIPTS/repack_deb.sh libpve-storage-perl libpve-storage-perl +dcve1
+      set -euo pipefail
+      SAVE_PWD=$(pwd)
+
+      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
+
+      apt-get update
+      cd /tmp
+      apt-get download libpve-storage-perl
+
+      ORIG_VER=$(dpkg-deb -f /tmp/libpve-storage-perl_*.deb Version)
+      ARCH=$(dpkg-deb -f /tmp/libpve-storage-perl_*.deb Architecture)
+
+      deb_repack libpve-storage-perl "${ORIG_VER}" "${ARCH}" +dcve1 libpve-storage-perl
+
   - name: pve-manager
     upstream: pve-manager
     sources:
       - pve-manager
+      - lib/deb-overlays.sh
     build: |
-      $CI_SCRIPTS/repack_deb.sh pve-manager pve-manager +bootc1
+      set -euo pipefail
+      SAVE_PWD=$(pwd)
+
+      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
+
+      apt-get update
+      cd /tmp
+      apt-get download pve-manager
+
+      ORIG_VER=$(dpkg-deb -f /tmp/pve-manager_*.deb Version)
+      ARCH=$(dpkg-deb -f /tmp/pve-manager_*.deb Architecture)
+
+      deb_repack pve-manager "${ORIG_VER}" "${ARCH}" +bootc1 pve-manager
+
   - name: qemu-server
     upstream: qemu-server
     sources:
       - qemu-server
+      - lib/deb-overlays.sh
     build: |
-      $CI_SCRIPTS/repack_deb.sh qemu-server qemu-server +bootc1
+      set -euo pipefail
+      SAVE_PWD=$(pwd)
+
+      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
+
+      apt-get update
+      cd /tmp
+      apt-get download qemu-server
+
+      ORIG_VER=$(dpkg-deb -f /tmp/qemu-server_*.deb Version)
+      ARCH=$(dpkg-deb -f /tmp/qemu-server_*.deb Architecture)
+
+      deb_repack qemu-server "${ORIG_VER}" "${ARCH}" +bootc1 qemu-server
+
   - name: proxmox-kernel-helper
     upstream: proxmox-kernel-helper
+    sources:
+      - lib/deb-overlays.sh
     build: |
-      # bespoke content surgery (grub-install / triggers removal): kept
-      # verbatim until its overlay mirror is generated (PENDING).
+      set -euo pipefail
       SAVE_PWD=$(pwd)
-      apt update
+
+      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
+
+      apt-get update
       cd /tmp
       apt-get download proxmox-kernel-helper
+
+      ORIG_VER=$(dpkg-deb -f /tmp/proxmox-kernel-helper_*.deb Version)
+      ARCH=$(dpkg-deb -f /tmp/proxmox-kernel-helper_*.deb Architecture)
+
+      # Bespoke content surgery (temporary inline, PENDING: becomes a mirror
+      # tree + deletion .patch like the other repacks once generated against a
+      # pristine tree).
       O=/output/proxmox-kernel-helper
       mkdir -p "$O"
       dpkg-deb -R /tmp/proxmox-kernel-helper_*.deb "$O"
-      ORIG_VER=$(dpkg-deb -f /tmp/proxmox-kernel-helper_*.deb Version)
-      ARCH=$(dpkg-deb -f /tmp/proxmox-kernel-helper_*.deb Architecture)
-      rm -f "$O/usr/sbin/grub-install" "$O/etc/grub.d/000_proxmox_boot_header" \
+
+      rm -f \
+        "$O/usr/sbin/grub-install" \
+        "$O/etc/grub.d/000_proxmox_boot_header" \
         "$O/etc/initramfs/post-update.d/proxmox-boot-sync" \
         "$O/etc/kernel/postinst.d/zz-proxmox-boot" \
-        "$O/etc/kernel/postrm.d/zz-proxmox-boot" "$O/DEBIAN/triggers"
+        "$O/etc/kernel/postrm.d/zz-proxmox-boot" \
+        "$O/DEBIAN/triggers"
       for s in preinst postinst prerm postrm; do
-        printf '#!/bin/sh\nset -e\nexit 0\n' > "$O/DEBIAN/$s"; chmod 0755 "$O/DEBIAN/$s"
+        printf '#!/bin/sh\nset -e\nexit 0\n' > "$O/DEBIAN/$s"
+        chmod 0755 "$O/DEBIAN/$s"
       done
-      printf '%s\n' /etc/kernel/postinst.d/proxmox-auto-removal \
-        /etc/kernel/postrm.d/proxmox-auto-removal > "$O/DEBIAN/conffiles"
-      test ! -e "$O/usr/sbin/grub-install" && test ! -e "$O/DEBIAN/triggers"
-      find "$O" -not -path '*/DEBIAN/*' -type f | xargs md5sum | sed "s|$O/||" > "$O/DEBIAN/md5sums"
+      printf '%s\n' \
+        /etc/kernel/postinst.d/proxmox-auto-removal \
+        /etc/kernel/postrm.d/proxmox-auto-removal \
+        > "$O/DEBIAN/conffiles"
+
+      test ! -e "$O/usr/sbin/grub-install" \
+        && test ! -e "$O/DEBIAN/triggers"
+
+      find "$O" -not -path '*/DEBIAN/*' -type f \
+        | xargs md5sum \
+        | sed "s|$O/||" \
+        > "$O/DEBIAN/md5sums"
+
       sed -i "s/^Version: .*/Version: 1:${ORIG_VER}+bootc1/" "$O/DEBIAN/control"
-      dpkg-deb --build "$O" /debs/proxmox-kernel-helper_${ORIG_VER}+bootc1_${ARCH}.deb
+
+      dpkg-deb --build "$O" \
+        /debs/proxmox-kernel-helper_${ORIG_VER}+bootc1_${ARCH}.deb
 
   - name: fanctl
     sources:
       - fanctl
+      - lib/deb-overlays.sh
     env:
-      FANCTL_VER: 1.2.1
+      FANCTL_VER: "1.2.1"
     build: |
-      $CI_SCRIPTS/custom_deb.sh fanctl
+      set -euo pipefail
+      SAVE_PWD=$(pwd)
+
+      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
+
+      deb_custom fanctl "${FANCTL_VER}" fanctl
+
   - name: powerctl
     sources:
       - powerctl
+      - lib/deb-overlays.sh
     env:
-      POWERCTL_VER: 1.1.0
+      POWERCTL_VER: "1.1.0"
     build: |
-      $CI_SCRIPTS/custom_deb.sh powerctl
+      set -euo pipefail
+      SAVE_PWD=$(pwd)
+
+      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
+
+      deb_custom powerctl "${POWERCTL_VER}" powerctl
+
   - name: dc-firewall-seed
     sources:
       - dc-firewall-seed
+      - lib/deb-overlays.sh
     env:
-      DC_FIREWALL_SEED_VER: 1.0.0
+      DC_FIREWALL_SEED_VER: "1.0.0"
     build: |
-      $CI_SCRIPTS/custom_deb.sh dc-firewall-seed
+      set -euo pipefail
+      SAVE_PWD=$(pwd)
+
+      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
+
+      deb_custom dc-firewall-seed "${DC_FIREWALL_SEED_VER}" dc-firewall-seed
+
   - name: dc-config-zfs
     sources:
       - dc-config-zfs
+      - lib/deb-overlays.sh
     env:
-      DC_CONFIG_ZFS_VER: 1.0.0
+      DC_CONFIG_ZFS_VER: "1.0.0"
     build: |
-      $CI_SCRIPTS/custom_deb.sh dc-config-zfs
+      set -euo pipefail
+      SAVE_PWD=$(pwd)
+
+      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
+
+      deb_custom dc-config-zfs "${DC_CONFIG_ZFS_VER}" dc-config-zfs
+
   - name: dc-zramctl
     sources:
       - dc-zramctl
+      - lib/deb-overlays.sh
     env:
-      DC_ZRAMCTL_VER: 1.0.0
+      DC_ZRAMCTL_VER: "1.0.0"
     build: |
-      $CI_SCRIPTS/custom_deb.sh dc-zramctl
+      set -euo pipefail
+      SAVE_PWD=$(pwd)
+
+      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
+
+      deb_custom dc-zramctl "${DC_ZRAMCTL_VER}" dc-zramctl
+
   - name: pvect-ostree
     sources:
       - pvect-ostree
+      - lib/deb-overlays.sh
     env:
-      PVECT_OSTREE_VER: 1.0.0
+      PVECT_OSTREE_VER: "1.0.0"
     build: |
-      $CI_SCRIPTS/custom_deb.sh pvect-ostree
+      set -euo pipefail
+      SAVE_PWD=$(pwd)
+
+      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
+
+      deb_custom pvect-ostree "${PVECT_OSTREE_VER}" pvect-ostree
+
   - name: compose2bootc
     sources:
       - compose2bootc
+      - lib/deb-overlays.sh
     env:
-      COMPOSE2BOOTC_VER: 0.1.0
+      COMPOSE2BOOTC_VER: "0.1.0"
     build: |
-      $CI_SCRIPTS/custom_deb.sh compose2bootc
+      set -euo pipefail
+      SAVE_PWD=$(pwd)
+
+      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
+
+      deb_custom compose2bootc "${COMPOSE2BOOTC_VER}" compose2bootc
