@@ -1,0 +1,37 @@
+diff --git a/DEBIAN/preinst b/DEBIAN/preinst
+index 5dfdc79..6b4dc8e 100644
+--- a/DEBIAN/preinst
++++ b/DEBIAN/preinst
+@@ -1,31 +1,3 @@
+-#! /bin/sh
+-
++#!/bin/sh
+ set -e
+-
+-case "$1" in
+-    install|upgrade)
+-        if ! dpkg -S /usr/sbin/grub-install|grep -q 'diversion by proxmox-kernel-helper'; then
+-            dpkg-divert --package proxmox-kernel-helper --add --rename \
+-                --divert /usr/sbin/grub-install.real /usr/sbin/grub-install
+-        fi
+-    ;;
+-    *)
+-        echo "ignoring unknown preinst command '$1'"
+-    ;;
+-esac
+-
+-# Automatically added by dh_installdeb/13.24.2
+-dpkg-maintscript-helper mv_conffile /etc/initramfs/post-update.d/pve-efiboot-sync /etc/initramfs/post-update.d/proxmox-boot-sync 6.4-1\~ pve-kernel-helper -- "$@"
+-dpkg-maintscript-helper mv_conffile /etc/kernel/postinst.d/pve-auto-removal /etc/kernel/postinst.d/proxmox-auto-removal 6.4-1\~ pve-kernel-helper -- "$@"
+-dpkg-maintscript-helper mv_conffile /etc/kernel/postinst.d/zz-pve-efiboot /etc/kernel/postinst.d/zz-proxmox-boot 6.4-1\~ pve-kernel-helper -- "$@"
+-dpkg-maintscript-helper mv_conffile /etc/kernel/postrm.d/pve-auto-removal /etc/kernel/postrm.d/proxmox-auto-removal 6.4-1\~ pve-kernel-helper -- "$@"
+-dpkg-maintscript-helper mv_conffile /etc/kernel/postrm.d/zz-pve-efiboot /etc/kernel/postrm.d/zz-proxmox-boot 6.4-1\~ pve-kernel-helper -- "$@"
+-# End automatically added section
+-# Automatically added by dh_installsystemd/13.24.2
+-if [ -z "$DPKG_ROOT" ] && [ "$1" = upgrade ] && [ -d /run/systemd/system ] ; then
+-	deb-systemd-invoke stop 'proxmox-boot-cleanup.service' >/dev/null || true
+-fi
+-# End automatically added section
+-
+-
+ exit 0

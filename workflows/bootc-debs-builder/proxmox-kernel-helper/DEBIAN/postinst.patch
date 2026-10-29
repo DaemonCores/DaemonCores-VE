@@ -1,0 +1,64 @@
+diff --git a/DEBIAN/postinst b/DEBIAN/postinst
+index c28cc6f..6b4dc8e 100644
+--- a/DEBIAN/postinst
++++ b/DEBIAN/postinst
+@@ -1,58 +1,3 @@
+-#! /bin/sh
+-
++#!/bin/sh
+ set -e
+-
+-case "$1" in
+-    configure)
+-        if [ -e /etc/kernel/pve-efiboot-uuids ]; then
+-            echo "$0: legacy ESP list /etc/kernel/pve-efiboot-uuids found moving to /etc/kernel/proxmox-boot-uuids" 1>&2
+-            mv /etc/kernel/pve-efiboot-uuids /etc/kernel/proxmox-boot-uuids
+-        fi
+-        if [ -e /etc/kernel/pve-efiboot-manual-kernels ] && [ ! -e /etc/kernel/proxmox-boot-manual-kernels ]; then
+-            echo "$0: legacy manual kernel list /etc/kernel/pve-efiboot-manual-kernels found moving to /etc/kernel/proxmox-boot-manual-kernels" 1>&2
+-            mv /etc/kernel/pve-efiboot-manual-kernels /etc/kernel/proxmox-boot-manual-kernels
+-        fi
+-
+-        proxmox-boot-tool reinit || true
+-    ;;
+-
+-    triggered)
+-        proxmox-boot-tool reinit || true
+-    ;;
+-
+-    abort-upgrade|abort-remove|abort-deconfigure)
+-    ;;
+-
+-    *)
+-        echo "postinst called with unknown argument \`$1'" >&2
+-        exit 1
+-    ;;
+-esac
+-
+-# Automatically added by dh_installdeb/13.24.2
+-dpkg-maintscript-helper mv_conffile /etc/initramfs/post-update.d/pve-efiboot-sync /etc/initramfs/post-update.d/proxmox-boot-sync 6.4-1\~ pve-kernel-helper -- "$@"
+-dpkg-maintscript-helper mv_conffile /etc/kernel/postinst.d/pve-auto-removal /etc/kernel/postinst.d/proxmox-auto-removal 6.4-1\~ pve-kernel-helper -- "$@"
+-dpkg-maintscript-helper mv_conffile /etc/kernel/postinst.d/zz-pve-efiboot /etc/kernel/postinst.d/zz-proxmox-boot 6.4-1\~ pve-kernel-helper -- "$@"
+-dpkg-maintscript-helper mv_conffile /etc/kernel/postrm.d/pve-auto-removal /etc/kernel/postrm.d/proxmox-auto-removal 6.4-1\~ pve-kernel-helper -- "$@"
+-dpkg-maintscript-helper mv_conffile /etc/kernel/postrm.d/zz-pve-efiboot /etc/kernel/postrm.d/zz-proxmox-boot 6.4-1\~ pve-kernel-helper -- "$@"
+-# End automatically added section
+-# Automatically added by dh_installsystemd/13.24.2
+-if [ "$1" = "configure" ] || [ "$1" = "abort-upgrade" ] || [ "$1" = "abort-deconfigure" ] || [ "$1" = "abort-remove" ] ; then
+-	# The following line should be removed in trixie or trixie+1
+-	deb-systemd-helper unmask 'proxmox-boot-cleanup.service' >/dev/null || true
+-
+-	# was-enabled defaults to true, so new installations run enable.
+-	if deb-systemd-helper --quiet was-enabled 'proxmox-boot-cleanup.service'; then
+-		# Enables the unit on first installation, creates new
+-		# symlinks on upgrades if the unit file has changed.
+-		deb-systemd-helper enable 'proxmox-boot-cleanup.service' >/dev/null || true
+-	else
+-		# Update the statefile to add new symlinks (if any), which need to be
+-		# cleaned up on purge. Also remove old symlinks.
+-		deb-systemd-helper update-state 'proxmox-boot-cleanup.service' >/dev/null || true
+-	fi
+-fi
+-# End automatically added section
+-
+-
+ exit 0

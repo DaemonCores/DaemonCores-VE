@@ -1,0 +1,32 @@
+diff --git a/usr/share/perl5/PVE/Cluster.pm b/usr/share/perl5/PVE/Cluster.pm
+index 034b78c..a3b7d0b 100644
+--- a/usr/share/perl5/PVE/Cluster.pm
++++ b/usr/share/perl5/PVE/Cluster.pm
+@@ -67,6 +67,8 @@
+     '/qemu-server/' => 1,
+     '/openvz/' => 1,
+     '/lxc/' => 1,
++    # Variant A: Bootc guests live in nodes/<node>/bootc/<vmid>.conf
++    '/bootc/' => 1,
+     'ha/crm_commands' => 1,
+     'ha/manager_status' => 1,
+     'ha/resources.cfg' => 1,
+@@ -559,7 +561,7 @@
+ 
+     my $version;
+     my $infotag;
+-    if ($filename =~ m!^nodes/[^/]+/(openvz|lxc|qemu-server)/(\d+)\.conf$!) {
++    if ($filename =~ m!^nodes/[^/]+/(openvz|lxc|qemu-server|bootc)/(\d+)\.conf$!) {
+         my ($type, $vmid) = ($1, $2);
+         if ($vmlist && $vmlist->{ids} && $vmlist->{ids}->{$vmid}) {
+             $version = $vmlist->{ids}->{$vmid}->{version};
+@@ -792,7 +794,8 @@
+ 
+     return undef if $noerr;
+ 
+-    my $vmtypestr = $d->{type} eq 'qemu' ? 'VM' : 'CT';
++    # Variant A: bootc is its own guest type, not a VM/CT flavour
++    my $vmtypestr = $d->{type} eq 'qemu' ? 'VM' : ($d->{type} eq 'bootc' ? 'Bootc guest' : 'CT');
+     die "$vmtypestr $vmid already exists on node '$d->{node}'\n";
+ }
+ 
