@@ -1052,10 +1052,11 @@ cmd_list() {
 }
 
 #######################################
-# Stop, unmount, destroy and de-register a container. The ostree deployment is
-# retained on purpose.
+# Stop, unmount, destroy and de-register a container, then purge the ostree
+# stateroot (branch ref, deployment tree, volume dir and cts shadow): a
+# destroy that left the sysroot half-populated made renames a manual sweep.
 # Globals:
-#   PROG, STATE_DIR
+#   PROG, SYSROOT, STATE_DIR
 # Arguments:
 #   $1 - vmid
 # Outputs:
@@ -1065,14 +1066,25 @@ cmd_destroy() {
   local vmid=${1:?usage: $PROG destroy <vmid>}
   need_root
   need_tools
+  local stateroot=ct$vmid
+  # The registry may carry a renamed stateroot (official guests 12x/13x).
+  if [[ -r $(reg_file "$vmid") ]]; then
+    reg_load "$vmid"
+    # STATEROOT comes from the sourced registry .env above.
+    # shellcheck disable=SC2153
+    stateroot=$STATEROOT
+  fi
   pct stop "$vmid" 2>/dev/null
   umount_rootfs "$vmid"
   pct destroy "$vmid" --purge 2>/dev/null
   rm -f "$(reg_file "$vmid")"
-  rm -rf "${STATE_DIR:?}/$vmid"
-  # Deployment left in the sysroot on purpose;
-  # remove with: ostree admin undeploy
-  info "CT $vmid destroyed (ostree deployment for ct$vmid retained)"
+  rm -rf "${STATE_DIR:?}/$vmid" "${STATE_DIR:?}/$vmid.env"
+  # Purge what deploy built for this stateroot: branch ref and deployment
+  # tree. Repo objects stay behind and are collected lazily by ostree.
+  ostree refs --repo="$SYSROOT/ostree/repo" --delete "ostree/$stateroot" \
+    2>/dev/null || true
+  rm -rf "$SYSROOT/ostree/deploy/$stateroot" "$SYSROOT/volumes/$vmid"
+  info "CT $vmid destroyed (stateroot $stateroot purged)"
 }
 
 #######################################
