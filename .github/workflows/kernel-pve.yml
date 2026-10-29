@@ -1,0 +1,22 @@
+name: Kernel PVE + XanMod
+
+# Thin caller: the build lives in DaemonCores-CI. Weekly and by hand — this
+# is a build-only job: the debs land as workflow artifacts, nothing reaches
+# the PVE host without a separate GO (docs/kernel-nvidia-pve-host-plan.md,
+# file of operations K-06/K-07).
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 4 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: DaemonCores/DaemonCores-CI/.github/workflows/kernel-pve.yml@main
+    with:
+      manifest-repo: DaemonCores/DaemonCores-VE
+      manifest-ref: main
+      kernel-series: "7.3"
