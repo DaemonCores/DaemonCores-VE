@@ -20,7 +20,7 @@ packages:
     variant-env: PKG
     variant-source: "{variant}"
     env:
-      HELPERS_VER: 1
+      HELPERS_VER: 2
     build: |
       deb_repack "${PKG}" "${VER_SUFFIX}" "${PKG}"
     deb-glob: "{variant}_*"
@@ -41,12 +41,25 @@ packages:
         env:
           PKG: qemu-server
           VER_SUFFIX: +bootc1
+      proxmox-kernel-helper:
+        env:
+          PKG: proxmox-kernel-helper
+          VER_SUFFIX: +bootc1
+        upstream: proxmox-kernel-helper
+      pve-cluster:
+        env:
+          PKG: pve-cluster
+          VER_SUFFIX: +bootc1
+      libpve-cluster-api-perl:
+        env:
+          PKG: libpve-cluster-api-perl
+          VER_SUFFIX: +bootc1
 
   - name: overlay-tree
     variant-env: PKG
     variant-source: "{variant}"
     env:
-      HELPERS_VER: 1
+      HELPERS_VER: 2
     build: |
       deb_overlay_tree "${PKG}" "${VER_SUFFIX}" "${PKG}" ${EXTRA_EXEC:-}
     deb-glob: "{variant}_*"
@@ -72,7 +85,7 @@ packages:
     variant-env: PKG
     variant-source: "{variant}"
     env:
-      HELPERS_VER: 1
+      HELPERS_VER: 2
     build: |
       deb_custom "${PKG}" "${PKG_VER}" "${PKG}"
     deb-glob: "{variant}_*"
@@ -105,48 +118,3 @@ packages:
         env:
           PKG: compose2bootc
           PKG_VER: 0.1.0
-
-  - name: helper-entry
-    variant-env: PKG
-    variant-source: "{variant}"
-    env:
-      HELPERS_VER: 1
-    build: |
-      # Bespoke content surgery (temporary inline form, PENDING: the grub /
-      # triggers removal becomes a mirror tree + deletion .patch like the
-      # other repacks once generated against a pristine tree).
-      O=/output/${PKG}
-      mkdir -p "$O"
-      dpkg-deb -R /tmp/${PKG}_*.deb "$O"
-      rm -f \
-        "$O/usr/sbin/grub-install" \
-        "$O/etc/grub.d/000_proxmox_boot_header" \
-        "$O/etc/initramfs/post-update.d/proxmox-boot-sync" \
-        "$O/etc/kernel/postinst.d/zz-proxmox-boot" \
-        "$O/etc/kernel/postrm.d/zz-proxmox-boot" \
-        "$O/DEBIAN/triggers"
-      for s in preinst postinst prerm postrm; do
-        printf '#!/bin/sh\nset -e\nexit 0\n' > "$O/DEBIAN/$s"
-        chmod 0755 "$O/DEBIAN/$s"
-      done
-      printf '%s\n' \
-        /etc/kernel/postinst.d/proxmox-auto-removal \
-        /etc/kernel/postrm.d/proxmox-auto-removal \
-        > "$O/DEBIAN/conffiles"
-      test ! -e "$O/usr/sbin/grub-install" \
-        && test ! -e "$O/DEBIAN/triggers"
-      ORIG_VER=$(dpkg-deb -f "/tmp/${PKG}_*.deb" Version)
-      ARCH=$(dpkg-deb -f "/tmp/${PKG}_*.deb" Architecture)
-      find "$O" -not -path '*/DEBIAN/*' -type f \
-        | xargs md5sum \
-        | sed "s|$O/||" \
-        > "$O/DEBIAN/md5sums"
-      sed -i "s/^Version: .*/Version: 1:${ORIG_VER}+bootc1/" "$O/DEBIAN/control"
-      dpkg-deb --build "$O" \
-        "/debs/${PKG}_${ORIG_VER}+bootc1_${ARCH}.deb"
-    deb-glob: "{variant}_*"
-    variants:
-      proxmox-kernel-helper:
-        env:
-          PKG: proxmox-kernel-helper
-        upstream: proxmox-kernel-helper

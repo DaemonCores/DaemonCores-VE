@@ -15,9 +15,16 @@ truth for review; its content is byte-identical to what the patch appends.
 New in S7 plumbing to serve the UI: `pvect-bootc publish/templates/
 compose-read` verbs and `PVE::API2::Bootc` endpoints `compose/{stack}`
 (POST publish), reworked `templates` (TSV from the wrapper) and
-`template/{stack}/compose`. `pve-cluster` (pmxcfs, binary C:
-S1-S4) is **PENDING** — implemented later as its own inline/overlay entry;
-the invented stub lane was removed. British spelling, house comment style,
+`template/{stack}/compose`. `pve-cluster` S1-S4 (pmxcfs C + Perl) are
+**IMPLEMENTED (2026-10-29)**: deb-tree overlays `pve-cluster/` (S4,
+`Cluster.pm`) + `libpve-cluster-api-perl/` (S3 Perl part, `Cluster/Setup.pm`
+`gen_local_dirs`) added to the `repacked` class of `packages.yml`, plus a C
+source lane `workflows/bootc-debs-builder/pve-cluster-src/` (S1-S3 pmxcfs
+patches: `status.h`/`status.c` `VMTYPE_BOOTC`, `memdb.c`
+`dir_contain_vm_config`/vmlist scan, `pmxcfs.c` `create_symlinks` top-level
+`bootc` link — anchored on the upstream tree at 9.1.7, commit `66c87e0`;
+the deb ships binaries so the C hunks cannot ride the deb overlay — see the
+lane README). British spelling, house comment style,
 
 This document supersedes the variant-B recommendation in
 `docs/compose-lxc-proposal.md` (that doc keeps the storage-plugin and
@@ -110,8 +117,21 @@ manière que kernel-patches si besoin).
   `s10-pending/www/bootc-classes.js` = source du payload, reportée dans
   le hunk). Les stubs S9/S10/S10-check de l'ancien .sh n'ont JAMAIS eu de
   corps (aucun câblage JS) — remplacés par les hunks ci-dessus.
-* pve-cluster S1-S4 : **PENDING** (paquet binaire C; quand implémenté,
-  entry dédiée; le stub invéré a été supprimé).
+* pve-cluster S1-S4 : **livrés 2026-10-29** — hunks générés contre
+  l'arbre vierge ; Perl : `Cluster.pm` (S4) ancré sur le deb
+  `pve-cluster 9.1.7`, `Cluster/Setup.pm` `gen_local_dirs` (S3-Perl) sur le
+  deb `libpve-cluster-api-perl 9.1.7` ; C (S1/S2/S3-C) = lane source
+  `workflows/bootc-debs-builder/pve-cluster-src/` ancrée sur le git
+  upstream `pve-cluster` au commit `66c87e0` (= 9.1.7) — les hunks C ne
+  peuvent pas rouler dans l'overlay du deb (binaires). Validé : dry-run +
+  application réelle sur arbres vierges, `patch_guard.py` sur les 3 locks,
+  `perl -c` (stubs PVE) sur les 2 fichiers Perl, compilation objets réelle
+  (`gcc -c`) des 3 unités C patchées avec les en-têtes
+  glib/fuse/sqlite/libqb/rrd/corosync. Build deb complet
+  (dpkg-buildpackage) : **PENDING** (environnement de packaging requis).
+  Anchor vérifié au GO : le set de liens top-level vit dans
+  `src/pmxcfs/pmxcfs.c::create_symlinks` (pas create_pmxcfs_db.c — le
+  binaire importe un arbre, aucun répertoire invité codé en dur).
 * qemu-server : les 7 patchs VM-defaults (ovmf/cpu/firewall/writethrough/
   agent/efidisk/q35) portés verbatim en hunks.
 * `libpve-storage-perl` : 2 hunks ZFS, suffix +dcve1 conservé.

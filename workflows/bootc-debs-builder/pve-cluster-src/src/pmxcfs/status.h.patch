@@ -1,0 +1,13 @@
+diff --git a/src/pmxcfs/status.h b/src/pmxcfs/status.h
+index 6a6b0a7..9ee9d35 100644
+--- a/src/pmxcfs/status.h
++++ b/src/pmxcfs/status.h
+@@ -31,6 +31,8 @@
+ // FIXME: remove openvz stuff for 7.x
+ #define VMTYPE_OPENVZ 2
+ #define VMTYPE_LXC 3
++// Variant A: the bootc guest registry uses its own type slot
++#define VMTYPE_BOOTC 4
+ 
+ #define CFS_MAX_STATUS_SIZE (32 * 1024)
+ 

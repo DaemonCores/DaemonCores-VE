@@ -1,0 +1,33 @@
+diff --git a/src/pmxcfs/status.c b/src/pmxcfs/status.c
+index e1ab438..a50ce31 100644
+--- a/src/pmxcfs/status.c
++++ b/src/pmxcfs/status.c
+@@ -188,6 +188,8 @@ static const char *vminfo_type_to_string(vminfo_t *vminfo) {
+         return "openvz";
+     } else if (vminfo->vmtype == VMTYPE_LXC) {
+         return "lxc";
++    } else if (vminfo->vmtype == VMTYPE_BOOTC) {
++        return "bootc";
+     } else {
+         return "unknown";
+     }
+@@ -615,7 +617,8 @@ gboolean vmlist_hash_insert_vm(
+     g_return_val_if_fail(vmid != 0, FALSE);
+     // FIXME: remove openvz stuff for 7.x
+     g_return_val_if_fail(
+-        vmtype == VMTYPE_QEMU || vmtype == VMTYPE_OPENVZ || vmtype == VMTYPE_LXC, FALSE
++        vmtype == VMTYPE_QEMU || vmtype == VMTYPE_OPENVZ || vmtype == VMTYPE_LXC
++            || vmtype == VMTYPE_BOOTC, FALSE
+     );
+ 
+     if (!replace && g_hash_table_lookup(vmlist, &vmid)) {
+@@ -641,7 +644,8 @@ void vmlist_register_vm(int vmtype, guint32 vmid, const char *nodename) {
+     g_return_if_fail(nodename != NULL);
+     g_return_if_fail(vmid != 0);
+     // FIXME: remove openvz stuff for 7.x
+-    g_return_if_fail(vmtype == VMTYPE_QEMU || vmtype == VMTYPE_OPENVZ || vmtype == VMTYPE_LXC);
++    g_return_if_fail(vmtype == VMTYPE_QEMU || vmtype == VMTYPE_OPENVZ || vmtype == VMTYPE_LXC
++        || vmtype == VMTYPE_BOOTC);
+ 
+     cfs_debug("vmlist_register_vm: %s/%u %d", nodename, vmid, vmtype);
+ 

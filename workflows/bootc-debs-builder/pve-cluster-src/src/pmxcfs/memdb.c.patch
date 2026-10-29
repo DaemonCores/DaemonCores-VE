@@ -1,0 +1,26 @@
+diff --git a/src/pmxcfs/memdb.c b/src/pmxcfs/memdb.c
+index a47bea8..d678d99 100644
+--- a/src/pmxcfs/memdb.c
++++ b/src/pmxcfs/memdb.c
+@@ -256,6 +256,9 @@ static char *dir_contain_vm_config(const char *dirname, int *vmtype_ret) {
+         } else if (strcmp(sa[1], "lxc") == 0) {
+             *vmtype_ret = VMTYPE_LXC;
+             nodename = g_strdup(sa[0]);
++        } else if (strcmp(sa[1], "bootc") == 0) {
++            *vmtype_ret = VMTYPE_BOOTC;
++            nodename = g_strdup(sa[0]);
+         }
+     }
+ 
+@@ -463,6 +466,11 @@ gboolean memdb_recreate_vmlist(memdb_t *memdb) {
+                 ret = FALSE;
+             }
+         }
++        if ((te = g_hash_table_lookup(node_te->data.entries, "bootc"))) {
++            if (!vmlist_add_dir(memdb, vmlist, node_te->name, VMTYPE_BOOTC, te)) {
++                ret = FALSE;
++            }
++        }
+     }
+ 
+     /* always update list - even if we detected duplicates */

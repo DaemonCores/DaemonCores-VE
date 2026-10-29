@@ -1,0 +1,13 @@
+diff --git a/usr/share/perl5/PVE/Cluster/Setup.pm b/usr/share/perl5/PVE/Cluster/Setup.pm
+index 53935dc..fc0c288 100644
+--- a/usr/share/perl5/PVE/Cluster/Setup.pm
++++ b/usr/share/perl5/PVE/Cluster/Setup.pm
+@@ -368,6 +368,8 @@
+         "$pmxcfs_base_dir/nodes/$nodename/lxc",
+         "$pmxcfs_base_dir/nodes/$nodename/qemu-server",
+         "$pmxcfs_base_dir/nodes/$nodename/openvz",
++        # Variant A: per-node Bootc conf directory (registered by the pmxcfs vmlist scanner)
++        "$pmxcfs_base_dir/nodes/$nodename/bootc",
+         "$pmxcfs_base_dir/nodes/$nodename/priv",
+     );
+ 
