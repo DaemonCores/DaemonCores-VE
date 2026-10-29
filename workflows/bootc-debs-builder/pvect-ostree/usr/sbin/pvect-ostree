@@ -9,6 +9,7 @@
 #   pvect-ostree rollback <vmid>
 #   pvect-ostree remount-all
 #   pvect-ostree mount    <vmid>
+#   pvect-ostree normalise <vmid>
 #   pvect-ostree list
 #   pvect-ostree destroy  <vmid>
 #   pvect-ostree build    <compose.yml> [--name N]
@@ -64,10 +65,12 @@ readonly PROG=${0##*/}
 SYSROOT=/var/lib/pvect-ostree/sysroot
 STATE_DIR=/var/lib/pvect-ostree/cts
 STORAGE=local
+TEMPLATE_STORAGE=local-btrfs # vztmpl source for rootfs allocation (local is disabled)
+ROOTFS_STORAGE=SSD-600G-VM-DISKS # rootdir target for pct create
 UID_BASE=100000
 UID_RANGE=65536
 USERNS=/run/pvect-ostree/userns
-ALLOC_TEMPLATE_MATCH=alpine
+ALLOC_TEMPLATE_MATCH=alpine-.*amd64
 GUEST_MASK_UNITS=""
 PLUGIN_STORAGE=ostree # storeid auto-registered for the pvect-ostree plugin
 COMPOSE_DIR=/var/lib/pvect-ostree/compose # recorded compose sources per stack
@@ -257,8 +260,9 @@ ensure_sysroot() {
 #######################################
 deploy_path() {
   local stateroot=$1
-  find "$SYSROOT/ostree/deploy/$stateroot/deploy" \
-    -maxdepth 1 -type d -name '*.0' 2>/dev/null | sort | tail -1
+  # Newest by mtime: commit checksums sort lexicographically, not by age, so
+  # the `.0` suffix alone (find + sort) can pick a stale deployment.
+  ls -td "$SYSROOT/ostree/deploy/$stateroot/deploy"/*.0 2>/dev/null | head -1
 }
 
 #######################################
@@ -272,8 +276,8 @@ deploy_path() {
 #######################################
 deploy_path_prev() {
   local stateroot=$1
-  find "$SYSROOT/ostree/deploy/$stateroot/deploy" \
-    -maxdepth 1 -type d -name '*.1' 2>/dev/null | head -1
+  # Second newest by mtime (same caveat as deploy_path: no lexicographic sort).
+  ls -td "$SYSROOT/ostree/deploy/$stateroot/deploy"/*.0 2>/dev/null | sed -n 2p
 }
 
 #######################################
@@ -420,8 +424,21 @@ build_writable_layers() {
   mkdir -p "$var"
   if [[ ! -d "$etc/systemd" ]]; then
     mkdir -p "$etc/systemd/system"
-    cp -a "$deploy/usr/etc/." "$etc/" 2>/dev/null \
-      || die "cannot seed /etc from $deploy/usr/etc"
+    local seed
+    seed="$deploy/usr/etc"
+    # Bootc images may carry the default /etc either under /usr/etc (composefs
+    # layout) or straight at /etc — seed whichever the deployment actually has.
+    [[ -d $seed ]] || seed="$deploy/etc"
+    cp -a "$seed/." "$etc/" 2>/dev/null \
+      || die "cannot seed /etc from $seed"
+    # /etc/os-release is a symlink into /usr/lib in Debian/bootc images; the
+    # writable seed sits outside the composefs view, so materialise the real
+    # file or PVE::LXC::Setup fails with "can't open /etc/os-release".
+    if [[ -L $etc/os-release ]]; then
+      rm -f "$etc/os-release"
+      cp -L "$seed/os-release" "$etc/os-release" \
+        || die "cannot materialise /etc/os-release from $seed"
+    fi
     for u in $GUEST_MASK_UNITS; do
       ln -sf /dev/null "$etc/systemd/system/$u"
     done
@@ -461,8 +478,13 @@ mount_rootfs() {
   # the composefs view is what the container sees.
   find "$root" -mindepth 1 -delete 2>/dev/null || true
 
+  # The digest store lives inside the deployment (mkcomposefs names its files
+  # by content digest); fall back to the bare repo objects for older layouts.
+  local store="$deploy/.ostree-cfs-store"
+  local basedir="$SYSROOT/ostree/repo/objects"
+  [[ -d $store ]] && basedir="$store"
   mount -t composefs "$deploy/.ostree.cfs" \
-    -o "basedir=$SYSROOT/ostree/repo/objects,idmap=$USERNS" "$root" \
+    -o "basedir=$basedir,idmap=$USERNS" "$root" \
     || die "mount.composefs failed for CT $vmid"
 
   build_writable_layers "$vmid" "$root"
@@ -630,7 +652,10 @@ deployment_write() {
     || die "ostree checkout of $commit failed"
   # libostree's deploy would create an empty var/ (initial-var); mirror it.
   mkdir -p "$dst/var"
-  mkcomposefs "$dst" "$dst/.ostree.cfs" \
+  # The composefs backing files must be named by their content digest; keep
+  # them in a dedicated digest store beside the image (mkcomposefs writes one
+  # entry per unique file content), not the bare repo's `<object>.file` names.
+  mkcomposefs --digest-store="$dst/.ostree-cfs-store" "$dst" "$dst/.ostree.cfs" \
     || die "mkcomposefs failed for $dst"
   {
     echo "[origin]"
@@ -708,7 +733,7 @@ cmd_deploy() {
 #######################################
 alloc_template() {
   local t
-  t=$(pveam list "$STORAGE" 2>/dev/null | awk -v m="$ALLOC_TEMPLATE_MATCH" \
+  t=$(pveam list "$TEMPLATE_STORAGE" 2>/dev/null | awk -v m="$ALLOC_TEMPLATE_MATCH" \
     '$1 ~ m {print $1}' | sed 's#.*/##' | tail -1)
   if [[ -z $t ]]; then
     pveam update >/dev/null 2>&1 || true
@@ -720,9 +745,9 @@ alloc_template() {
     if [[ -z $avail ]]; then
       die "no '$ALLOC_TEMPLATE_MATCH' template available to allocate the rootfs"
     fi
-    pveam download "$STORAGE" "$avail" >/dev/null 2>&1 \
+    pveam download "$TEMPLATE_STORAGE" "$avail" >/dev/null 2>&1 \
       || die "template download failed"
-    t=$(pveam list "$STORAGE" 2>/dev/null | awk -v m="$ALLOC_TEMPLATE_MATCH" \
+    t=$(pveam list "$TEMPLATE_STORAGE" 2>/dev/null | awk -v m="$ALLOC_TEMPLATE_MATCH" \
       '$1 ~ m {print $1}' | sed 's#.*/##' | tail -1)
   fi
   [[ -n $t ]] || die "could not resolve an allocation template"
@@ -758,9 +783,9 @@ cmd_create() {
   local tmpl
   tmpl=$(alloc_template)
   info "allocating rootfs subvol via pct create (template $tmpl, discarded)"
-  pct create "$vmid" "$STORAGE:vztmpl/$tmpl" \
+  pct create "$vmid" "$TEMPLATE_STORAGE:vztmpl/$tmpl" \
     --unprivileged 1 --features nesting=1 \
-    --hostname "ct$vmid" --rootfs "$STORAGE:0" \
+    --hostname "ct$vmid" --rootfs "$ROOTFS_STORAGE:0" \
     --net0 name=eth0,bridge=vmbr0,ip=dhcp,type=veth,firewall=1 \
     "$@" \
     || die "pct create failed"
@@ -1172,6 +1197,20 @@ cmd_refresh() {
 }
 
 #######################################
+# Apply the pvect-ostree posture to a CT config (standalone entry point).
+# Globals:
+#   PROG
+# Arguments:
+#   $1 - vmid
+#######################################
+cmd_normalise() {
+  local vmid=${1:?usage: $PROG normalise <vmid>}
+  need_root
+  normalise_conf "$vmid"
+  info "CT $vmid config normalised"
+}
+
+#######################################
 # Wire a CT created from a published seed template into the pvect-ostree
 # registry: read the payload, deploy the image, mount the composefs view.
 # Globals:
@@ -1257,6 +1296,7 @@ main() {
     rollback) cmd_rollback "$@" ;;
     mount) cmd_mount "$@" ;;
     umount) cmd_umount "$@" ;;
+    normalise) cmd_normalise "$@" ;;
     remount-all) cmd_remount_all "$@" ;;
     seed) cmd_seed "$@" ;;
     list) cmd_list "$@" ;;
