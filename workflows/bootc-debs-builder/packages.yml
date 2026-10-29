@@ -9,179 +9,129 @@
 #   env        non-secret KEY: VALUE exported for the build (also hashed)
 #   secret-env ENV_VAR: SECRET_NAME injected from secrets (never hashed)
 #   build      the exact build script, verbatim
-# Shared repack logic lives in lib/deb-overlays.sh (debian-bootc lib/ convention:
-# sourced, hashed via sources). Package dirs mirror the deb tree: new files are
-# real files, modified upstream files are git .patch at the mirrored path,
-# applied by deb_overlay_apply (all-or-nothing dry-run first, .patch never
-# shipped). Overlay trees without patches use ifupdown2postinstall-style copy
-# (deb_overlay_tree); whole-tree custom packages use deb_custom.
+# Shared deb logic: DaemonCores-CIscripts/deb_helpers.sh, exported via
+# CI_SCRIPTS (overlay mirror + git .patch at the mirrored path, all-or-
+# nothing dry-run first; .patch never shipped). Package dirs mirror the deb
+# tree: whole-tree customs (deb_custom), pure overlay trees
+# (deb_overlay_tree), patched upstream repacks (deb_repack).
+#
+# NOTE: HELPERS_VER is hashed with the entry; bump it whenever the
+# DaemonCores-CI deb helpers change (they live in another repository, so
+# the content hash does not see them).
 packages:
   - name: ifupdown2
     upstream: ifupdown2
     sources:
       - ifupdown2postinstall
-      - lib/deb-overlays.sh
+    env:
+      PKG: ifupdown2
+      VER_SUFFIX: +bootc5
+      TREE_DIR: ifupdown2postinstall
+      HELPERS_VER: 1
     build: |
       set -euo pipefail
-      SAVE_PWD=$(pwd)
-
-      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
-
-      apt-get update
-      cd /tmp
-      apt-get download ifupdown2
-
-      ORIG_VER=$(dpkg-deb -f /tmp/ifupdown2_*.deb Version)
-      ARCH=$(dpkg-deb -f /tmp/ifupdown2_*.deb Architecture)
-
-      deb_overlay_tree ifupdown2 "${ORIG_VER}" "${ARCH}" +bootc5 \
-        ifupdown2postinstall \
+      . "${CI_SCRIPTS:?}/deb_helpers.sh"
+      deb_overlay_tree "${PKG}" "${VER_SUFFIX}" "${TREE_DIR}" \
         usr/sbin/ifupdown2-autoconf usr/sbin/domain-set
 
   - name: chrony
     upstream: chrony
     sources:
       - chronypostinstall
-      - lib/deb-overlays.sh
+    env:
+      PKG: chrony
+      VER_SUFFIX: +bootc2
+      TREE_DIR: chronypostinstall
+      HELPERS_VER: 1
     build: |
       set -euo pipefail
-      SAVE_PWD=$(pwd)
-
-      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
-
-      apt-get update
-      cd /tmp
-      apt-get download chrony
-
-      ORIG_VER=$(dpkg-deb -f /tmp/chrony_*.deb Version)
-      ARCH=$(dpkg-deb -f /tmp/chrony_*.deb Architecture)
-
-      deb_overlay_tree chrony "${ORIG_VER}" "${ARCH}" +bootc2 chronypostinstall
+      . "${CI_SCRIPTS:?}/deb_helpers.sh"
+      deb_overlay_tree "${PKG}" "${VER_SUFFIX}" "${TREE_DIR}"
 
   - name: openipmi
     upstream: openipmi
     sources:
       - openipmipostinstall
-      - lib/deb-overlays.sh
+    env:
+      PKG: openipmi
+      VER_SUFFIX: +bootc1
+      TREE_DIR: openipmipostinstall
+      HELPERS_VER: 1
     build: |
       set -euo pipefail
-      SAVE_PWD=$(pwd)
-
-      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
-
-      apt-get update
-      cd /tmp
-      apt-get download openipmi
-
-      ORIG_VER=$(dpkg-deb -f /tmp/openipmi_*.deb Version)
-      ARCH=$(dpkg-deb -f /tmp/openipmi_*.deb Architecture)
-
-      deb_overlay_tree openipmi "${ORIG_VER}" "${ARCH}" +bootc1 openipmipostinstall
+      . "${CI_SCRIPTS:?}/deb_helpers.sh"
+      deb_overlay_tree "${PKG}" "${VER_SUFFIX}" "${TREE_DIR}"
 
   - name: libtemplate-perl
     upstream: libtemplate-perl
     sources:
       - libtemplate-perl
-      - lib/deb-overlays.sh
+    env:
+      PKG: libtemplate-perl
+      VER_SUFFIX: +bootc1
+      HELPERS_VER: 1
     build: |
       set -euo pipefail
-      SAVE_PWD=$(pwd)
-
-      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
-
-      apt-get update
-      cd /tmp
-      apt-get download libtemplate-perl
-
-      ORIG_VER=$(dpkg-deb -f /tmp/libtemplate-perl_*.deb Version)
-      ARCH=$(dpkg-deb -f /tmp/libtemplate-perl_*.deb Architecture)
-
-      deb_repack libtemplate-perl "${ORIG_VER}" "${ARCH}" +bootc1 libtemplate-perl
+      . "${CI_SCRIPTS:?}/deb_helpers.sh"
+      deb_repack "${PKG}" "${VER_SUFFIX}" "${PKG}"
 
   - name: libpve-storage-perl
     upstream: libpve-storage-perl
     sources:
       - libpve-storage-perl
-      - lib/deb-overlays.sh
+    env:
+      PKG: libpve-storage-perl
+      VER_SUFFIX: +dcve1
+      HELPERS_VER: 1
     build: |
       set -euo pipefail
-      SAVE_PWD=$(pwd)
-
-      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
-
-      apt-get update
-      cd /tmp
-      apt-get download libpve-storage-perl
-
-      ORIG_VER=$(dpkg-deb -f /tmp/libpve-storage-perl_*.deb Version)
-      ARCH=$(dpkg-deb -f /tmp/libpve-storage-perl_*.deb Architecture)
-
-      deb_repack libpve-storage-perl "${ORIG_VER}" "${ARCH}" +dcve1 libpve-storage-perl
+      . "${CI_SCRIPTS:?}/deb_helpers.sh"
+      deb_repack "${PKG}" "${VER_SUFFIX}" "${PKG}"
 
   - name: pve-manager
     upstream: pve-manager
     sources:
       - pve-manager
-      - lib/deb-overlays.sh
+    env:
+      PKG: pve-manager
+      VER_SUFFIX: +bootc1
+      HELPERS_VER: 1
     build: |
       set -euo pipefail
-      SAVE_PWD=$(pwd)
-
-      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
-
-      apt-get update
-      cd /tmp
-      apt-get download pve-manager
-
-      ORIG_VER=$(dpkg-deb -f /tmp/pve-manager_*.deb Version)
-      ARCH=$(dpkg-deb -f /tmp/pve-manager_*.deb Architecture)
-
-      deb_repack pve-manager "${ORIG_VER}" "${ARCH}" +bootc1 pve-manager
+      . "${CI_SCRIPTS:?}/deb_helpers.sh"
+      deb_repack "${PKG}" "${VER_SUFFIX}" "${PKG}"
 
   - name: qemu-server
     upstream: qemu-server
     sources:
       - qemu-server
-      - lib/deb-overlays.sh
+    env:
+      PKG: qemu-server
+      VER_SUFFIX: +bootc1
+      HELPERS_VER: 1
     build: |
       set -euo pipefail
-      SAVE_PWD=$(pwd)
-
-      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
-
-      apt-get update
-      cd /tmp
-      apt-get download qemu-server
-
-      ORIG_VER=$(dpkg-deb -f /tmp/qemu-server_*.deb Version)
-      ARCH=$(dpkg-deb -f /tmp/qemu-server_*.deb Architecture)
-
-      deb_repack qemu-server "${ORIG_VER}" "${ARCH}" +bootc1 qemu-server
+      . "${CI_SCRIPTS:?}/deb_helpers.sh"
+      deb_repack "${PKG}" "${VER_SUFFIX}" "${PKG}"
 
   - name: proxmox-kernel-helper
     upstream: proxmox-kernel-helper
     sources:
-      - lib/deb-overlays.sh
+      - helper-tree
+    env:
+      PKG: proxmox-kernel-helper
+      VER_SUFFIX: +bootc1
+      HELPERS_VER: 1
     build: |
       set -euo pipefail
-      SAVE_PWD=$(pwd)
-
-      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
-
-      apt-get update
+      . "${CI_SCRIPTS:?}/deb_helpers.sh"
+      # Bespoke content surgery (temporary inline form, PENDING: the grub /
+      # triggers removal becomes a mirror tree + deletion .patch like the
+      # other repacks once generated against a pristine tree).
       cd /tmp
-      apt-get download proxmox-kernel-helper
-
-      ORIG_VER=$(dpkg-deb -f /tmp/proxmox-kernel-helper_*.deb Version)
-      ARCH=$(dpkg-deb -f /tmp/proxmox-kernel-helper_*.deb Architecture)
-
-      # Bespoke content surgery (temporary inline, PENDING: becomes a mirror
-      # tree + deletion .patch like the other repacks once generated against a
-      # pristine tree).
       O=/output/proxmox-kernel-helper
       mkdir -p "$O"
       dpkg-deb -R /tmp/proxmox-kernel-helper_*.deb "$O"
-
       rm -f \
         "$O/usr/sbin/grub-install" \
         "$O/etc/grub.d/000_proxmox_boot_header" \
@@ -197,114 +147,91 @@ packages:
         /etc/kernel/postinst.d/proxmox-auto-removal \
         /etc/kernel/postrm.d/proxmox-auto-removal \
         > "$O/DEBIAN/conffiles"
-
       test ! -e "$O/usr/sbin/grub-install" \
         && test ! -e "$O/DEBIAN/triggers"
-
+      ORIG_VER=$(dpkg-deb -f /tmp/proxmox-kernel-helper_*.deb Version)
+      ARCH=$(dpkg-deb -f /tmp/proxmox-kernel-helper_*.deb Architecture)
       find "$O" -not -path '*/DEBIAN/*' -type f \
         | xargs md5sum \
         | sed "s|$O/||" \
         > "$O/DEBIAN/md5sums"
-
       sed -i "s/^Version: .*/Version: 1:${ORIG_VER}+bootc1/" "$O/DEBIAN/control"
-
       dpkg-deb --build "$O" \
         /debs/proxmox-kernel-helper_${ORIG_VER}+bootc1_${ARCH}.deb
 
   - name: fanctl
     sources:
       - fanctl
-      - lib/deb-overlays.sh
     env:
       FANCTL_VER: "1.2.1"
+      HELPERS_VER: 1
     build: |
       set -euo pipefail
-      SAVE_PWD=$(pwd)
-
-      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
-
+      . "${CI_SCRIPTS:?}/deb_helpers.sh"
       deb_custom fanctl "${FANCTL_VER}" fanctl
 
   - name: powerctl
     sources:
       - powerctl
-      - lib/deb-overlays.sh
     env:
       POWERCTL_VER: "1.1.0"
+      HELPERS_VER: 1
     build: |
       set -euo pipefail
-      SAVE_PWD=$(pwd)
-
-      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
-
+      . "${CI_SCRIPTS:?}/deb_helpers.sh"
       deb_custom powerctl "${POWERCTL_VER}" powerctl
 
   - name: dc-firewall-seed
     sources:
       - dc-firewall-seed
-      - lib/deb-overlays.sh
     env:
       DC_FIREWALL_SEED_VER: "1.0.0"
+      HELPERS_VER: 1
     build: |
       set -euo pipefail
-      SAVE_PWD=$(pwd)
-
-      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
-
+      . "${CI_SCRIPTS:?}/deb_helpers.sh"
       deb_custom dc-firewall-seed "${DC_FIREWALL_SEED_VER}" dc-firewall-seed
 
   - name: dc-config-zfs
     sources:
       - dc-config-zfs
-      - lib/deb-overlays.sh
     env:
       DC_CONFIG_ZFS_VER: "1.0.0"
+      HELPERS_VER: 1
     build: |
       set -euo pipefail
-      SAVE_PWD=$(pwd)
-
-      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
-
+      . "${CI_SCRIPTS:?}/deb_helpers.sh"
       deb_custom dc-config-zfs "${DC_CONFIG_ZFS_VER}" dc-config-zfs
 
   - name: dc-zramctl
     sources:
       - dc-zramctl
-      - lib/deb-overlays.sh
     env:
       DC_ZRAMCTL_VER: "1.0.0"
+      HELPERS_VER: 1
     build: |
       set -euo pipefail
-      SAVE_PWD=$(pwd)
-
-      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
-
+      . "${CI_SCRIPTS:?}/deb_helpers.sh"
       deb_custom dc-zramctl "${DC_ZRAMCTL_VER}" dc-zramctl
 
   - name: pvect-ostree
     sources:
       - pvect-ostree
-      - lib/deb-overlays.sh
     env:
       PVECT_OSTREE_VER: "1.0.0"
+      HELPERS_VER: 1
     build: |
       set -euo pipefail
-      SAVE_PWD=$(pwd)
-
-      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
-
+      . "${CI_SCRIPTS:?}/deb_helpers.sh"
       deb_custom pvect-ostree "${PVECT_OSTREE_VER}" pvect-ostree
 
   - name: compose2bootc
     sources:
       - compose2bootc
-      - lib/deb-overlays.sh
     env:
       COMPOSE2BOOTC_VER: "0.1.0"
+      HELPERS_VER: 1
     build: |
       set -euo pipefail
-      SAVE_PWD=$(pwd)
-
-      . "${SAVE_PWD}/workflows/bootc-debs-builder/lib/deb-overlays.sh"
-
+      . "${CI_SCRIPTS:?}/deb_helpers.sh"
       deb_custom compose2bootc "${COMPOSE2BOOTC_VER}" compose2bootc
