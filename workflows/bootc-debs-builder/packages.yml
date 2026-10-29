@@ -1,126 +1,119 @@
 # Package manifest for the bootc .deb builder.
-# One entry per package. Consumed by the generic bootc-debs-builder workflow
-# (setup computes dependency waves) and by the build-one-deb reusable workflow.
-#   name       logical package name
-#   upstream   apt package to repack (omit for from-source / custom packages)
-#   deps       packages that must be built+installed first (creates a wave)
-#   sources    paths under workflows/bootc-debs-builder/ hashed for change
-#   deb-glob   output deb glob when it differs from <name>_* (also per-variant)
-#   env        non-secret KEY: VALUE exported for the build (also hashed)
-#   secret-env ENV_VAR: SECRET_NAME injected from secrets (never hashed)
-#   build      the exact build script, verbatim
-# Shared deb logic: DaemonCores-CIscripts/deb_helpers.sh, exported via
-# CI_SCRIPTS (overlay mirror + git .patch at the mirrored path, all-or-
-# nothing dry-run first; .patch never shipped). Package dirs mirror the deb
-# tree: whole-tree customs (deb_custom), pure overlay trees
-# (deb_overlay_tree), patched upstream repacks (deb_repack).
+# One entry per package CLASS (Gabriel spec 2026-10-30): the variants
+# mechanism (same as the kernel entries) expands one build script across
+# every package of the class — zero duplicated YAML. Downstream, the
+# manifest-expand action resolves each variant into a plain package entry.
 #
-# NOTE: HELPERS_VER is hashed with the entry; bump it whenever the
-# DaemonCores-CI deb helpers change (they live in another repository, so
-# the content hash does not see them).
+# Shared deb logic: DaemonCores-CI scripts/deb_helpers.sh, exported to the
+# build via CI_SCRIPTS. The overlay model: package dirs mirror the deb tree
+# (variant-source: "{variant}" hashes each mirror); modified upstream files
+# are git .patch at the mirrored path; all-or-nothing dry-run first; .patch
+# is never shipped. Drift = the deb build is skipped, the last-good deb is
+# retained by build-deb.sh.
+#
+# HELPERS_VER is hashed per entry; bump it whenever the DaemonCores-CI deb
+# helpers change (other repository, invisible to the content hash).
 packages:
-  - name: ifupdown2
-    upstream: ifupdown2
-    sources:
-      - ifupdown2postinstall
+  - name: repacked
+    variant-env: PKG
+    variant-source: "{variant}"
     env:
-      PKG: ifupdown2
-      VER_SUFFIX: +bootc5
-      TREE_DIR: ifupdown2postinstall
-      HELPERS_VER: 1
-    build: |
-      set -euo pipefail
-      . "${CI_SCRIPTS:?}/deb_helpers.sh"
-      deb_overlay_tree "${PKG}" "${VER_SUFFIX}" "${TREE_DIR}" \
-        usr/sbin/ifupdown2-autoconf usr/sbin/domain-set
-
-  - name: chrony
-    upstream: chrony
-    sources:
-      - chronypostinstall
-    env:
-      PKG: chrony
-      VER_SUFFIX: +bootc2
-      TREE_DIR: chronypostinstall
-      HELPERS_VER: 1
-    build: |
-      set -euo pipefail
-      . "${CI_SCRIPTS:?}/deb_helpers.sh"
-      deb_overlay_tree "${PKG}" "${VER_SUFFIX}" "${TREE_DIR}"
-
-  - name: openipmi
-    upstream: openipmi
-    sources:
-      - openipmipostinstall
-    env:
-      PKG: openipmi
-      VER_SUFFIX: +bootc1
-      TREE_DIR: openipmipostinstall
-      HELPERS_VER: 1
-    build: |
-      set -euo pipefail
-      . "${CI_SCRIPTS:?}/deb_helpers.sh"
-      deb_overlay_tree "${PKG}" "${VER_SUFFIX}" "${TREE_DIR}"
-
-  - name: libtemplate-perl
-    upstream: libtemplate-perl
-    sources:
-      - libtemplate-perl
-    env:
-      PKG: libtemplate-perl
-      VER_SUFFIX: +bootc1
       HELPERS_VER: 1
     build: |
       set -euo pipefail
       . "${CI_SCRIPTS:?}/deb_helpers.sh"
       deb_repack "${PKG}" "${VER_SUFFIX}" "${PKG}"
+    deb-glob: "{variant}_*"
+    variants:
+      libtemplate-perl:
+        env:
+          PKG: libtemplate-perl
+          VER_SUFFIX: +bootc1
+      libpve-storage-perl:
+        env:
+          PKG: libpve-storage-perl
+          VER_SUFFIX: +dcve1
+      pve-manager:
+        env:
+          PKG: pve-manager
+          VER_SUFFIX: +bootc1
+      qemu-server:
+        env:
+          PKG: qemu-server
+          VER_SUFFIX: +bootc1
 
-  - name: libpve-storage-perl
-    upstream: libpve-storage-perl
-    sources:
-      - libpve-storage-perl
+  - name: overlay-tree
+    variant-env: PKG
+    variant-source: "{variant}"
     env:
-      PKG: libpve-storage-perl
-      VER_SUFFIX: +dcve1
       HELPERS_VER: 1
     build: |
       set -euo pipefail
       . "${CI_SCRIPTS:?}/deb_helpers.sh"
-      deb_repack "${PKG}" "${VER_SUFFIX}" "${PKG}"
+      deb_overlay_tree "${PKG}" "${VER_SUFFIX}" "${PKG}" ${EXTRA_EXEC:-}
+    deb-glob: "{variant}_*"
+    variants:
+      ifupdown2:
+        env:
+          PKG: ifupdown2
+          VER_SUFFIX: +bootc5
+          EXTRA_EXEC: usr/sbin/ifupdown2-autoconf usr/sbin/domain-set
+        upstream: ifupdown2
+      chrony:
+        env:
+          PKG: chrony
+          VER_SUFFIX: +bootc2
+        upstream: chrony
+      openipmi:
+        env:
+          PKG: openipmi
+          VER_SUFFIX: +bootc1
+        upstream: openipmi
 
-  - name: pve-manager
-    upstream: pve-manager
-    sources:
-      - pve-manager
+  - name: custom
+    variant-env: PKG
+    variant-source: "{variant}"
     env:
-      PKG: pve-manager
-      VER_SUFFIX: +bootc1
       HELPERS_VER: 1
     build: |
       set -euo pipefail
       . "${CI_SCRIPTS:?}/deb_helpers.sh"
-      deb_repack "${PKG}" "${VER_SUFFIX}" "${PKG}"
+      deb_custom "${PKG}" "${PKG_VER}" "${PKG}"
+    deb-glob: "{variant}_*"
+    variants:
+      fanctl:
+        env:
+          PKG: fanctl
+          PKG_VER: 1.2.1
+      powerctl:
+        env:
+          PKG: powerctl
+          PKG_VER: 1.1.0
+      dc-firewall-seed:
+        env:
+          PKG: dc-firewall-seed
+          PKG_VER: 1.0.0
+      dc-config-zfs:
+        env:
+          PKG: dc-config-zfs
+          PKG_VER: 1.0.0
+      dc-zramctl:
+        env:
+          PKG: dc-zramctl
+          PKG_VER: 1.0.0
+      pvect-ostree:
+        env:
+          PKG: pvect-ostree
+          PKG_VER: 1.0.0
+      compose2bootc:
+        env:
+          PKG: compose2bootc
+          PKG_VER: 0.1.0
 
-  - name: qemu-server
-    upstream: qemu-server
-    sources:
-      - qemu-server
+  - name: helper-entry
+    variant-env: PKG
+    variant-source: "{variant}"
     env:
-      PKG: qemu-server
-      VER_SUFFIX: +bootc1
-      HELPERS_VER: 1
-    build: |
-      set -euo pipefail
-      . "${CI_SCRIPTS:?}/deb_helpers.sh"
-      deb_repack "${PKG}" "${VER_SUFFIX}" "${PKG}"
-
-  - name: proxmox-kernel-helper
-    upstream: proxmox-kernel-helper
-    sources:
-      - helper-tree
-    env:
-      PKG: proxmox-kernel-helper
-      VER_SUFFIX: +bootc1
       HELPERS_VER: 1
     build: |
       set -euo pipefail
@@ -128,10 +121,9 @@ packages:
       # Bespoke content surgery (temporary inline form, PENDING: the grub /
       # triggers removal becomes a mirror tree + deletion .patch like the
       # other repacks once generated against a pristine tree).
-      cd /tmp
-      O=/output/proxmox-kernel-helper
+      O=/output/${PKG}
       mkdir -p "$O"
-      dpkg-deb -R /tmp/proxmox-kernel-helper_*.deb "$O"
+      dpkg-deb -R /tmp/${PKG}_*.deb "$O"
       rm -f \
         "$O/usr/sbin/grub-install" \
         "$O/etc/grub.d/000_proxmox_boot_header" \
@@ -149,89 +141,18 @@ packages:
         > "$O/DEBIAN/conffiles"
       test ! -e "$O/usr/sbin/grub-install" \
         && test ! -e "$O/DEBIAN/triggers"
-      ORIG_VER=$(dpkg-deb -f /tmp/proxmox-kernel-helper_*.deb Version)
-      ARCH=$(dpkg-deb -f /tmp/proxmox-kernel-helper_*.deb Architecture)
+      ORIG_VER=$(dpkg-deb -f "/tmp/${PKG}_*.deb" Version)
+      ARCH=$(dpkg-deb -f "/tmp/${PKG}_*.deb" Architecture)
       find "$O" -not -path '*/DEBIAN/*' -type f \
         | xargs md5sum \
         | sed "s|$O/||" \
         > "$O/DEBIAN/md5sums"
       sed -i "s/^Version: .*/Version: 1:${ORIG_VER}+bootc1/" "$O/DEBIAN/control"
       dpkg-deb --build "$O" \
-        /debs/proxmox-kernel-helper_${ORIG_VER}+bootc1_${ARCH}.deb
-
-  - name: fanctl
-    sources:
-      - fanctl
-    env:
-      FANCTL_VER: "1.2.1"
-      HELPERS_VER: 1
-    build: |
-      set -euo pipefail
-      . "${CI_SCRIPTS:?}/deb_helpers.sh"
-      deb_custom fanctl "${FANCTL_VER}" fanctl
-
-  - name: powerctl
-    sources:
-      - powerctl
-    env:
-      POWERCTL_VER: "1.1.0"
-      HELPERS_VER: 1
-    build: |
-      set -euo pipefail
-      . "${CI_SCRIPTS:?}/deb_helpers.sh"
-      deb_custom powerctl "${POWERCTL_VER}" powerctl
-
-  - name: dc-firewall-seed
-    sources:
-      - dc-firewall-seed
-    env:
-      DC_FIREWALL_SEED_VER: "1.0.0"
-      HELPERS_VER: 1
-    build: |
-      set -euo pipefail
-      . "${CI_SCRIPTS:?}/deb_helpers.sh"
-      deb_custom dc-firewall-seed "${DC_FIREWALL_SEED_VER}" dc-firewall-seed
-
-  - name: dc-config-zfs
-    sources:
-      - dc-config-zfs
-    env:
-      DC_CONFIG_ZFS_VER: "1.0.0"
-      HELPERS_VER: 1
-    build: |
-      set -euo pipefail
-      . "${CI_SCRIPTS:?}/deb_helpers.sh"
-      deb_custom dc-config-zfs "${DC_CONFIG_ZFS_VER}" dc-config-zfs
-
-  - name: dc-zramctl
-    sources:
-      - dc-zramctl
-    env:
-      DC_ZRAMCTL_VER: "1.0.0"
-      HELPERS_VER: 1
-    build: |
-      set -euo pipefail
-      . "${CI_SCRIPTS:?}/deb_helpers.sh"
-      deb_custom dc-zramctl "${DC_ZRAMCTL_VER}" dc-zramctl
-
-  - name: pvect-ostree
-    sources:
-      - pvect-ostree
-    env:
-      PVECT_OSTREE_VER: "1.0.0"
-      HELPERS_VER: 1
-    build: |
-      set -euo pipefail
-      . "${CI_SCRIPTS:?}/deb_helpers.sh"
-      deb_custom pvect-ostree "${PVECT_OSTREE_VER}" pvect-ostree
-
-  - name: compose2bootc
-    sources:
-      - compose2bootc
-    env:
-      COMPOSE2BOOTC_VER: "0.1.0"
-      HELPERS_VER: 1
-    build: |
-      set -euo pipefail
-      . "${CI_SCRIPTS:?}/deb_helpers.sh"
-      deb_custom compose2bootc "${COMPOSE2BOOTC_VER}" compose2bootc
+        "/debs/${PKG}_${ORIG_VER}+bootc1_${ARCH}.deb"
+    deb-glob: "{variant}_*"
+    variants:
+      proxmox-kernel-helper:
+        env:
+          PKG: proxmox-kernel-helper
+        upstream: proxmox-kernel-helper
