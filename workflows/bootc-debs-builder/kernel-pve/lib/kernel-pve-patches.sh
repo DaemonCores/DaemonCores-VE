@@ -61,7 +61,8 @@ pve_kernel_apply_patches() {
       || { echo "ERROR: patch ${i} does not apply to ${version}" >&2; return 1; }
   done
   for i in $(seq 0 $((count - 1))); do
-    patch -d "${tree}" -p1 --no-backup-if-mismatch <"${dir}/${i}.patch" >/dev/null
+    patch -d "${tree}" -p1 --no-backup-if-mismatch <"${dir}/${i}.patch" >/dev/null \
+      || { echo "ERROR: failed applying patch ${i} to ${tree}" >&2; rm -rf "${dir}"; return 1; }
     echo "applied patch ${i}"
   done
   rm -rf "${dir}"
