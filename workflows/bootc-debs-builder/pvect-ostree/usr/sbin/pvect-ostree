@@ -488,6 +488,13 @@ build_writable_layers() {
   if [[ ! -s $etc/resolv.conf && -r /etc/resolv.conf ]]; then
     cp /etc/resolv.conf "$etc/resolv.conf"
   fi
+  # Some image /etc trees ship podman without policy.json; pulls then fail with
+  # "no policy.json file found". Fall back to the accept-by-default policy.
+  mkdir -p "$etc/containers"
+  if [[ ! -e $etc/containers/policy.json ]]; then
+    printf '%s\n' '{"default":[{"type":"insecureAcceptAnything"}]}' \
+      >"$etc/containers/policy.json"
+  fi
   chown -R "$UID_BASE:$UID_BASE" "$etc" "$var"
   build_bootc_shadow "$vmid" "$deploy"
 }
