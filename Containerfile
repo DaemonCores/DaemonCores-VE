@@ -1,7 +1,12 @@
 #####################################################################################
 # Base image
 #####################################################################################
-FROM ghcr.io/daemoncores/debian-bootc:latest
+# The shared CI (bootc-build.yml) builds Containerfile.base once per job as
+# localhost/debian-bootc-base and passes it as BASE_IMAGE; the base's FROM
+# (the published debian-bootc image) feeds the image content hash. See
+# docs/ci-catchup-plan.md ("image build contract").
+ARG BASE_IMAGE=localhost/debian-bootc-base
+FROM ${BASE_IMAGE}
 STOPSIGNAL SIGRTMIN+3
 
 # Environement Setup
