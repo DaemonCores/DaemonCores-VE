@@ -5,8 +5,7 @@
 # manifest-expand action resolves each variant into a plain package entry.
 #
 # Shared deb logic: DaemonCores-CI scripts/deb_helpers.sh, imported
-# implicitly (strict mode enforced by build-deb.sh: -euo pipefail) by
-# implicitly by build-deb.sh (once, for every build) — no helper plumbing
+# implicitly (strict mode enforced by build-deb.sh: -euo pipefail) by build-deb.sh (once, for every build) — no helper plumbing
 # appears in the build blocks. The overlay model: package dirs mirror the deb tree
 # (variant-source: "{variant}" hashes each mirror); modified upstream files
 # are git .patch at the mirrored path; all-or-nothing dry-run first; .patch
@@ -46,14 +45,6 @@ packages:
           PKG: proxmox-kernel-helper
           VER_SUFFIX: +bootc1
         upstream: proxmox-kernel-helper
-      pve-cluster:
-        env:
-          PKG: pve-cluster
-          VER_SUFFIX: +bootc1
-      libpve-cluster-api-perl:
-        env:
-          PKG: libpve-cluster-api-perl
-          VER_SUFFIX: +bootc1
 
   - name: overlay-tree
     variant-env: PKG
@@ -356,3 +347,17 @@ packages:
         env:
           KERNEL_ARCH: arm64
         deb-glob: "linux-*arm64*"
+  - name: source-build
+    variant-env: PKG
+    variant-source: "{variant}-src"
+    env:
+      HELPERS_VER: 3
+    build: |
+      deb_source_build "${PKG}" "${UP_COMMIT}" "${SRC_VER}" "${PKG}-src" pve-cluster libpve-cluster-api-perl
+    deb-glob: "{variant}_*"
+    variants:
+      pve-cluster:
+        env:
+          PKG: pve-cluster
+          UP_COMMIT: 66c87e0e7587a247f879f6f59e3bb5f3dd008e1f
+          SRC_VER: 9.1.7.1+dcve1
