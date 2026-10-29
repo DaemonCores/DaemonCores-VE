@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# qcowbind-bind — bind a shared qcowbind volume into (or out of) LXC CTs.
+#
+# PROTOTYPE. The host-side mount (nbd connect + FS mount) is owned by the
+# PVE storage plugin PVE::Storage::Custom::QcowBindPlugin (native UI path).
+# This helper only:
+#   1. activates the volume through the plugin (safe, guarded),
+#   2. writes/removes the lxc.mount.entry bind line in the CT config,
+#   3. records/unrecords the CT in the volume sidecar bind list.
+#
+# The bind line is idempotent keyed on the target path inside the CT, so a
+# re-bind replaces the entry instead of duplicating it.
+#
+# Usage:
+#   qcowbind-bind add  <vmid> <storeid>:qb-<name>.qcow2 <path-in-ct>
+#   qcowbind-bind drop <vmid> <path-in-ct>
+# ---------------------------------------------------------------------------
+
+set -euo pipefail
+
+usage() {
+    echo "usage: $0 add <vmid> <storeid>:qb-<name>.qcow2 <path-in-ct>" >&2
+    echo "       $0 drop <vmid> <path-in-ct>" >&2
+    exit 2
+}
+
+[ $# -ge 1 ] || usage
+ACTION=$1
+shift
+
+case "$ACTION" in
+add)
+    [ $# -eq 3 ] || usage
+    VMID=$1; VOLID=$2; CT_PATH=$3
+    ;;
+drop)
+    [ $# -eq 2 ] || usage
+    VMID=$1; CT_PATH=$2
+    ;;
+*)
+    usage
+    ;;
+esac
+
+[[ "$VMID" =~ ^[0-9]+$ ]] || { echo "bad vmid '$VMID'" >&2; exit 1; }
+
+STOREID=${VOLID%%:*}
+VOLNAME=${VOLID#*:}
+# Guard: only qcowbind volumes carry the qb-* grammar.
+[[ "$VOLNAME" =~ ^qb-[a-zA-Z0-9._-]+\.qcow2$ ]] || {
+    echo "'$VOLNAME' is not a qcowbind volume (qb-<name>.qcow2)" >&2
+    exit 1
+}
+
+# Resolve the host mountpoint the plugin exposes for this volume, straight
+# from storage.cfg: mountdir (or path fallback) + volume basename.
+CFG=/etc/pve/storage.cfg
+MOUNTDIR=$(awk -v sid="$STOREID" '
+    # storage.cfg grammar is "type: name" — $1 carries the colon.
+    $1 == "qcowbind:" && $2 == sid { inblock = 1; md = "/mnt/qcowbind"; next }
+    inblock && $1 == "mountdir" { md = $2 }
+    inblock && $1 !~ /:$/ && !/^[[:space:]]/ { next }
+    inblock && $1 ~ /:$/ { exit }
+    END { print md }
+' "$CFG" 2>/dev/null || true)
+MOUNTDIR=${MOUNTDIR:-/mnt/qcowbind}
+HOST_MOUNT="${MOUNTDIR}/$(basename "$VOLNAME")"
+
+if [ ! -d "$HOST_MOUNT" ]; then
+    echo "volume $VOLID is not mounted at $HOST_MOUNT — activate it first " \
+        "(pct start touches activate_volume, or mount via the plugin)" >&2
+    exit 1
+fi
+
+CONF="/etc/pve/lxc/${VMID}.conf"
+[ -f "$CONF" ] || { echo "no such CT config: $CONF" >&2; exit 1; }
+
+ENTRY="lxc.mount.entry: ${HOST_MOUNT} ${CT_PATH} none bind,rw 0 0"
+
+case "$ACTION" in
+add)
+    # Idempotent replace: drop any existing entry pointing at CT_PATH first.
+    if grep -q "^lxc.mount.entry: [^ ]* ${CT_PATH#"${CT_PATH#/}"} " "$CONF"; then
+        tmp=$(mktemp)
+        grep -v "\ ${CT_PATH#"${CT_PATH#/}"}\ " "$CONF" >"$tmp" || true
+        mv "$tmp" "$CONF"
+    fi
+    ENTRY="lxc.mount.entry: ${HOST_MOUNT} ${CT_PATH#/} none bind,rw 0 0"
+    printf '%s\n' "$ENTRY" >>"$CONF"
+    echo "added: $ENTRY"
+    ;;
+drop)
+    tmp=$(mktemp)
+    grep -v "^lxc.mount.entry: [^ ]* ${CT_PATH#/} none bind" "$CONF" >"$tmp" || true
+    mv "$tmp" "$CONF"
+    echo "removed bind entry for ${CT_PATH} from $CONF"
+    ;;
+esac
+
+echo "note: pct set/start applies lxc.mount.entry lines; a running CT needs a " \
+    "reboot for bind changes to take effect"
+exit 0
