@@ -153,6 +153,26 @@ one API2 module + one `www/manager6/lxc` JS file, applied by
   Clone Template (publish under a new name, then open the create wizard with
   the new template pre-selected).
 
+## `pvect-ostree deploy` (voie (c) — implemented 2026-10-30)
+
+libostree 2026.x ships no `ostree container image deploy` (builtins moved into
+bootc, then dropped from the CLI) and `ostree admin deploy` refuses a tree
+without a kernel. The deploy is therefore done by `pvect-ostree` itself:
+
+1. `export_image_rootfs` — flatten the OCI image with podman (throwaway
+   container + `podman export`, whiteouts handled by the runtime);
+2. `reshape_tree` — keep `/etc` plus a copy at `/usr/etc` (the seed path used
+   by `build_writable_layers`), empty `/run` and `/tmp` (tmpfs mount entries
+   cover them);
+3. `ostree commit --branch ostree/<stateroot>` into the sysroot repo;
+4. `deployment_write` — hand-built deployment: `ostree checkout` of the
+   commit, `var/`, `.ostree.cfs` via `mkcomposefs`, origin file; newest
+   deployment = `.0`, previous = `.1` (rollback), indexes shift up on deploy.
+
+`ostree admin deploy` is never invoked. `subvol_path` now resolves the rootfs
+volume from the CT config first, so `pct create --rootfs <any-storeid>:0`
+works (rootfs on SSD-600G-VM-DISKS planned for the portal test CT).
+
 ## Steps
 
 1. **Step 1 (this batch)** — `pvect-ostree build/publish/templates/refresh/adopt`
