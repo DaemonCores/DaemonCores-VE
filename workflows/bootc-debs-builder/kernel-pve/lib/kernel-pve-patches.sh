@@ -28,21 +28,28 @@ pve_kernel_apply_patches() {
   if [[ "${version}" != *.*.* ]]; then
     series="${version}"
   fi
+  # Series directory: active series live at linux-<maj>.y-xanmod, archived
+  # (EOL) series under eol/ (e.g. the 7.0.x tree of the PVE packaging).
+  case "${series}" in
+    7.0) series_dir="eol/linux-7.0.y-xanmod";;
+    *)   series_dir="linux-${series}.y-xanmod";;
+  esac
 
   local dir
   dir=$(mktemp -d)
-  # One name+url per manifest entry, with {series} and {topic} resolved by
-  # yq itself (no sed round-tripped substitution).
-  local count=0
-  while IFS=' ' read -r name url; do
+  # One name+url per manifest entry. The manifest is read with yq for the
+  # stage filter only; the {seriesdir}/{topic} placeholders are resolved in
+  # bash afterwards because the yq builds across distributions do not share
+  # a feature set (strenv() is not available everywhere).
+  local name url topic count=0
+  while read -r name url topic; do
     [[ -n "${name}" && -n "${url}" ]] || continue
+    url="${url//\{seriesdir\}/${series_dir}}"
+    url="${url//\{topic\}/${topic}}"
     curl --retry 3 -fsSL "${url}" -o "${dir}/${count}.patch" \
       || { echo "ERROR: cannot download patch ${name}: ${url}" >&2; return 1; }
     count=$((count + 1))
-  done < <(SERIES="${series}" yq -r '
-    .patches[] | select(.stage == strenv(STAGE))
-      | . as $e | .name + " " +
-        (.url | sub("{series}"; strenv(SERIES)) | sub("{topic}"; $e.topic))' \
+  done < <(yq -r '.patches[] | select(.stage == "'"${stage}"'") | .name + " " + .url + " " + (.topic // "")' \
       "${manifest}")
   ((count)) || return 0
 
