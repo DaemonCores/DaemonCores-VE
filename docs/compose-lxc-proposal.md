@@ -130,7 +130,7 @@ recommended here, but Gabriel has since **chosen variant A** — see
 
 Same two-file constraint as the existing GUI defaults/subscription patch:
 one API2 module + one `www/manager6/lxc` JS file, applied by
-`patch-defaults.sh`.
+the inline patch in the `packages.yml` `build:` (libtemplate-perl model).
 
 * `PVE/API2/Storage/Compose.pm` (new, patched into pve-manager):
   * `GET/POST nodes/{node}/storage/{storeid}/compose` — build/publish a

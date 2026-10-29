@@ -346,6 +346,9 @@ subvol_path() {
   # The CT config records exactly which volume PVE allocated for the rootfs
   # (`pct create --rootfs <storeid>:0` may point anywhere).
   vol=$(pct config "$vmid" 2>/dev/null | awk '/^rootfs: /{print $2; exit}')
+  # Storage options (`pct config` records the volume with its options, e.g.
+  # `size=0T`) are not part of the volume id — strip them before resolving.
+  vol=${vol%%,*}
   if [[ -n $vol ]]; then
     base=$(pvesm path "$vol" 2>/dev/null)
     if [[ -n $base ]]; then
@@ -622,7 +625,7 @@ deployment_write() {
   done
   shopt -u nullglob
   dst=$parent/$commit.0
-  ostree checkout --repo="$SYSROOT/ostree/repo" --force --disable-cache \
+  ostree checkout --repo="$SYSROOT/ostree/repo" --disable-cache \
     "$commit" "$dst" \
     || die "ostree checkout of $commit failed"
   # libostree's deploy would create an empty var/ (initial-var); mirror it.
@@ -1189,6 +1192,11 @@ cmd_adopt() {
   local stack imgref compose
   # shellcheck source=/dev/null
   . "$payload"
+  # The seed payload defines the UPPER_CASE forms written by cmd_publish;
+  # map them to the lower-case locals the adopt flow expects.
+  stack=${STACK:-$stack}
+  imgref=${IMGREF:-$imgref}
+  compose=${COMPOSE:-$compose}
   info "adopting CT $vmid from seed template (stack ${stack:-?}, image $imgref)"
   cmd_deploy "$imgref" "ct$vmid"
   reg_write "$vmid" "ct$vmid" "$imgref" "${compose:-}"

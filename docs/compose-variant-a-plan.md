@@ -2,7 +2,7 @@
 
 Status: **PLAN COMPLETE (Gabriel validated variant A 2026-10-30 — B rejected).
 NO IMPLEMENTATION YET**: every patch below is written as a house
-`patch-defaults.sh` skeleton that **refuses to run** until Gabriel signs off
+packages.yml inline-patch skeleton (libtemplate-perl model: patch lives in the YAML `build`, never as a script file) that **refuses to run** until Gabriel signs off
 the whole plan (gate: `DC_VARIANT_A_GO=1`). British spelling, house comment
 style, `+dcve1` deb suffix, skip exit 3 on drift, sha256 + `apt-mark hold` and
 issue notification — same repack model as the libpve-storage-perl lane.
@@ -66,7 +66,7 @@ binary work, no core daemon forked.
   `perl -c` for the Perl modules) inside the builder; `pmxcfs` is smoke-run
   with `-f` against a throwaway memdb before the deb is published.
 * Anchors: every patch greps the exact upstream line (quoted in the
-  `patch-defaults.sh` skeletons) and skips with exit 3 + issue report on
+  packages.yml inline-patch skeleton (libtemplate-perl model: patch lives in the YAML `build`, never as a script file)s) and skips with exit 3 + issue report on
   drift — never ships unpatched.
 * Deployment on `iartistique` (debug host): snapshot first, apt-mark hold,
   sha256 before/after in `/var/lib/dc-bootc-test/`, restart
@@ -75,8 +75,7 @@ binary work, no core daemon forked.
 
 ## Skeletons on disk (this batch, NOT wired into packages.yml)
 
-* `workflows/bootc-debs-builder/pve-cluster/patch-defaults.sh`
-* `workflows/bootc-debs-builder/pve-manager/patch-defaults.sh`
+The variant A surfaces live as inline `build:` entries in `packages.yml` (libtemplate-perl model — no side script, no patch dir).
 
 Both exit with **"variant A not validated yet — refusing to patch"** unless
 `DC_VARIANT_A_GO=1` is exported. Their per-surface `patch_s<N>()` functions
