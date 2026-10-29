@@ -90,7 +90,7 @@ The `libpve-storage-perl` repack mounts every zpool created through the Proxmox 
 
 ## Validation
 
-Before publication, the shared `image-test` action installs the image to a virtual disk, boots it under QEMU/KVM, and runs the manifest in `workflows/image-tests/tests.yml`.
+Before publication, the shared `image-test` action installs the image to a virtual disk, boots it under QEMU/KVM, and runs the manifest in `workflows/tests.yml`.
 
 The manifest checks:
 

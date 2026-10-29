@@ -29,7 +29,7 @@ Use the repository issue forms for public bugs and feature proposals. Follow [SE
 | --- | --- |
 | Image layer | `Containerfile`, `src/` |
 | Package and host tools | `workflows/bootc-debs-builder/` |
-| Runtime validation | `workflows/image-tests/tests.yml` |
+| Runtime validation | `workflows/tests.yml` |
 | Shared pipeline caller | `.github/workflows/pipeline.yml` |
 | Documentation | `README.md`, `docs/` |
 
