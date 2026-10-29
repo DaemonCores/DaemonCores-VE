@@ -137,6 +137,16 @@ pve_kernel_apply_patches \
   "${SRC_ROOT}/workflows/bootc-debs-builder/kernel-pve/patches.yml" \
   common "${KERNEL_VERSION}" "${SRCDIR}"
 
+# The deb-pkg source package is built from `git archive` HEAD: without a
+# commit of the patch set, dpkg-source would have to embed the whole
+# worktree diff over the unpatched orig tarball (fuzz/refusal — first real
+# run). Committing makes the source package carry the XanMod set and keeps
+# the flavour passes re-runnable over the same tree.
+git -C "${SRCDIR}" add -A
+git -C "${SRCDIR}" -c user.email="pve-build@debian.local" \
+  -c user.name="pve xanmod build" commit -qam \
+  "XanMod patch set ${KERNEL_SERIES} over PVE ${KERNEL_VERSION}"
+
 KCFG_DIR="${SRC_ROOT}/workflows/bootc-debs-builder/kernel-pve/kconfig"
 merge_config() {
   # Fragments are append + olddefconfig (the debian-bootc kernel config
