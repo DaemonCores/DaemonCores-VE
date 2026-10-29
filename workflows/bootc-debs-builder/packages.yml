@@ -85,6 +85,7 @@ packages:
       find "$O" -not -path '*/DEBIAN/*' -type f | xargs md5sum | sed "s|$O/||" > "$O/DEBIAN/md5sums"
       sed -i "s/^Version: .*/Version: 1:${ORIG_VER}+bootc1/" "$O/DEBIAN/control"
       dpkg-deb --build "$O" /debs/proxmox-kernel-helper_${ORIG_VER}+bootc1_${ARCH}.deb
+
   - name: fanctl
     sources:
       - fanctl
