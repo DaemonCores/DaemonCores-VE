@@ -476,7 +476,8 @@ build_writable_layers() {
     # file or PVE::LXC::Setup fails with "can't open /etc/os-release".
     if [[ -L $etc/os-release ]]; then
       rm -f "$etc/os-release"
-      cp -L "$seed/os-release" "$etc/os-release" \
+      cp -L "$seed/os-release" "$etc/os-release" 2>/dev/null \
+        || cp -L "$deploy/usr/lib/os-release" "$etc/os-release" 2>/dev/null \
         || die "cannot materialise /etc/os-release from $seed"
     fi
     for u in $GUEST_MASK_UNITS; do
@@ -828,6 +829,10 @@ cmd_create() {
   shift 2
   need_root
   need_tools
+  # Extraction/copy steps run in a user namespace; a restricted cwd ($PWD=/root,
+  # mode 700) makes tar exit 2 ("failed to return to initial working directory").
+  # Anchor every command to / before touching the tree.
+  cd /
   [[ -f "/etc/pve/lxc/$vmid.conf" ]] && die "CT $vmid already exists"
 
   local stateroot="ct$vmid"
