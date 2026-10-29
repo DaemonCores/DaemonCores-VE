@@ -8,6 +8,9 @@
 #   cluster fs, status line carried round-trip).
 #
 #   pvect-bootc create  <vmid> <archive> [--name N] [--description D] [--onboot 0|1]
+#   pvect-bootc publish  <compose.yml> [--name N]   # build + smoke + publish
+#   pvect-bootc templates                            # seed templates (TSV)
+#   pvect-bootc compose-read <stack>                 # recorded compose source
 #   pvect-bootc start   <vmid>
 #   pvect-bootc stop    <vmid>      # hard
 #   pvect-bootc shutdown <vmid>     # graceful
@@ -67,6 +70,56 @@ is_mounted() {
   sub=$("$VOSTREE" subvol-path "$1" 2>/dev/null) || return 1
   # composefs view check: the .ostree.cfs marker lives inside the mounted view
   [[ -f "$sub/.ostree.cfs" && -d "$sub/var/lib" ]] 2>/dev/null
+}
+
+#######################################
+# Build + smoke + publish a compose stack as a seed template (delegate to
+# pvect-ostree publish; stdout stays reserved for the image reference so the
+# caller can chain it).
+# Arguments:
+#   $1 - compose file; $@ - extra args (--name N)
+#######################################
+publish_stack() {
+  local compose=$1
+  shift
+  need_root
+  [[ -r $compose ]] || die "compose file not found: $compose"
+  "$VOSTREE" publish "$compose" "$@" || die "seed template publish failed"
+  info "compose stack published (template ostree:vztmpl/<stack>.tar.gz)"
+}
+
+#######################################
+# List the published seed templates as TSV (archive, stack, imgref, epoch,
+# compose path) - the shape the bootc REST API forwards to the UI.
+#######################################
+list_templates() {
+  need_root
+  local f stack imgref compose ctime archive
+  shopt -s nullglob
+  for f in "$SYSROOT"/vztmpl/*.payload.env; do
+    stack=""; imgref=""; compose=""
+    # shellcheck source=/dev/null
+    . "$f"
+    # shellcheck disable=SC2153
+    ctime=$(stat -c '%Y' "$f")
+    archive="ostree:vztmpl/$STACK.tar.gz"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$archive" "$STACK" "$IMGREF" "$ctime" "$COMPOSE"
+  done
+}
+
+#######################################
+# Print the compose source recorded for a published stack.
+# Arguments:
+#   $1 - stack name
+#######################################
+read_stack_compose() {
+  local stack=$1 envf compose
+  need_root
+  envf="$SYSROOT/vztmpl/$stack.payload.env"
+  [[ -r $envf ]] || die "no published stack '$stack'"
+  compose=$(grep -m1 '^COMPOSE=' "$envf" | cut -d= -f2-)
+  [[ -n $compose && -r $compose ]] || die "stack $stack has no recorded compose source"
+  cat "$compose"
 }
 
 guest_exists() {
@@ -195,16 +248,39 @@ refresh_guest() {
   info "bootc guest $vmid refreshed (previous deployment kept for rollback)"
 }
 
-usage() { sed -n '3,13p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '9,18p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 NAME=""; DESC=""; ONBOOT=""
 main() {
   local cmd=${1:-}; [[ -n $cmd ]] || usage 1
   [[ $cmd == -h || $cmd == --help || $cmd == help ]] && usage 0
   shift
-  local vmid=${1:-}
-  [[ $vmid =~ ^[0-9]+$ ]] || die "invalid vmid"
   case "$cmd" in
+    publish)
+      local compose=${1:-}; [[ -n $compose ]] || die "usage: $PROG publish <compose.yml> [--name N]"
+      shift
+      local args=()
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --name) args+=(--name "$2"); shift 2 ;;
+          *) die "unknown option: $1" ;;
+        esac
+      done
+      publish_stack "$compose" "${args[@]}"
+      ;;
+    templates)
+      list_templates
+      ;;
+    compose-read)
+      local stack=${1:-}
+      [[ -n $stack ]] || die "usage: $PROG compose-read <stack>"
+      read_stack_compose "$stack"
+      ;;
+    *)
+      local vmid=${1:-}
+      [[ $vmid =~ ^[0-9]+$ ]] || die "invalid vmid"
+      shift
+      case "$cmd" in
     create)
       shift; local archive=$1; shift || true
       while [[ $# -gt 0 ]]; do
@@ -231,6 +307,8 @@ main() {
       ;;
     -h | --help | help) usage 0 ;;
     *) die "unknown command '$cmd' (try: $PROG --help)" ;;
+  esac
+      ;;
   esac
 }
 
