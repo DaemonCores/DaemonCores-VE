@@ -12,22 +12,40 @@ The patches are anchored on the **upstream source tree**
 download.proxmox.com pve-no-subscription trixie). Paths mirror the source
 tree root (`src/pmxcfs/...`).
 
-Rebuild flow (when wired, PENDING): clone at the commit, apply this tree
-with `patch --fuzz=0 --forward -p1 -d <source>`, then
-`dpkg-buildpackage -b` (build deps: libglib2.0-dev, libfuse-dev,
-libsqlite3-dev, corosync, libqb-dev, librrd-dev, check — see
-`debian/control`; Debian trixie lacks the `corosync/cpg.h` family in
-`libcorosync-common-dev`, take them from the corosync sources). The
-`patches.lock.json` here records the sha256 of the pristine source files
-the patches touch; `patch_guard.py --tree <source>` verifies drift the
-same way as the deb-tree locks.
+Wired (2026-10-30): the lane rides the `source-build` class of
+`packages.yml` (variant `pve-cluster`, name `source-build-pve-cluster`)
+through the shared `deb_source_build` helper (DaemonCores-CI `dee562b`,
+`HELPERS_VER: 3`), which clones the upstream tree, pins the manifest
+commit, runs `patch_guard.py` against this `patches.lock.json`,
+dry-runs then applies the patches, re-targets the deb-tree Perl
+overlays onto `src/PVE/...` (`usr/share/perl5/` → `src/`, `-p3`),
+stamps `9.1.7.1+dcve1` in the changelog, installs the build deps from
+`debian/control` and drives the upstream staged `make deb`. The build
+needs the pve-no-subscription repo in the build environment (buildenv
+already carries it; the corosync headers come from the Proxmox
+`libcpg-dev`/`libcmap-dev` packages, not patched corosync sources).
+Deps resolved: glib, fuse, sqlite3, libqb, rrd/corosync, check.
 
-Validation done: the dry-run/apply round-trip plus `patch_guard.py` guard
-on a pristine 9.1.7 checkout, AND a real object compile of the three
-patched units (`gcc -c -DHAVE_CONFIG_H -D_FILE_OFFSET_BITS=64` with
-glib/fuse/sqlite/qb/rrd/corosync headers against 9.1.7) — `status.c`,
-`memdb.c`, `pmxcfs.c` all compile clean. Full `make`/deb packaging lane is
-still PENDING (needs the packaging build environment).
+The build emits the whole family — `pve-cluster`, `pve-cluster-dbgsym`,
+`libpve-cluster-perl`, `libpve-cluster-api-perl` (S3-Perl Setup.pm),
+`libpve-notify-perl` — at `9.1.7.1+dcve1`. The former `repacked`
+variants `pve-cluster` (S4 deb tree) and `libpve-cluster-api-perl` are
+retired: one source build now ships S1-S4 in one consistent set, and a
+version without epoch is safe because no same-name repacked deb
+competes (the upstream top Makefile cannot carry a `:` in filenames).
+
+The `patches.lock.json` here records the sha256 of the PRISTINE
+(pre-patch) files at `66c87e0`; `patch_guard.py --tree <source>`
+verifies drift the same way as the deb-tree locks. (Fix 2026-10-30:
+the original lock recorded the post-patch content and would have
+rejected every build.)
+
+Validation done: `patch_guard.py` green on pristine 9.1.7, patch
+dry-runs green, and a REAL full build in a Debian trixie container —
+all five debs built, lintian warnings only; the built `pmxcfs` carries
+`nodes/<n>/bootc`, and `Cluster.pm`/`Setup.pm` carry their bootc hunks.
+Runtime S1-S4 tests on the host remain PENDING — never deploy to the
+host.
 
 Anchors (verified against 9.1.7 before patching):
 
