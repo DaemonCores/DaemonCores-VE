@@ -1,0 +1,20 @@
+Source: dc-gpu-lxc
+Package: dc-gpu-lxc
+Version: {{ VER }}
+Architecture: all
+Maintainer: Gabriel Guillou guillou.gabriel@gmail.com
+Homepage: https://github.com/DaemonCores/DaemonCores-VE
+Section: admin
+Priority: optional
+Depends: coreutils, procps, {{ DEPS }}
+Description: vendor-generic GPU passthrough glue for Proxmox LXC guests
+ Prints or applies the lxc.conf lines that expose a GPU to an LXC guest, for
+ every vendor: the shared /dev/dri subtree for AMD and Intel, the /dev/nvidia*
+ character devices plus the proprietary user-space libraries for NVIDIA.
+ .
+ The tool probes the actual host at runtime — device nodes, majors and library
+ paths are read from the machine running it, so no vendor table is hardcoded
+ and adding a new GPU of an already-covered vendor needs no package change.
+ Lines are idempotent on --apply (already-present lines are skipped) and the
+ default mode writes nothing: every --apply call is a deliberate operator
+ step. See the wiki GPU-Support page for the vendor x level matrix.
