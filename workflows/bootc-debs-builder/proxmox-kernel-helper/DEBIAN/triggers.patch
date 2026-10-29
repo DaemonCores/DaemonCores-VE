@@ -1,0 +1,10 @@
+diff --git a/DEBIAN/triggers b/DEBIAN/triggers
+deleted file mode 100644
+index 8cea030..0000000
+--- a/DEBIAN/triggers
++++ /dev/null
+@@ -1,4 +0,0 @@
+-activate-noawait update-initramfs
+-interest-noawait /usr/lib/grub
+-interest-noawait /usr/lib/shim
+-interest-noawait /usr/lib/systemd/boot

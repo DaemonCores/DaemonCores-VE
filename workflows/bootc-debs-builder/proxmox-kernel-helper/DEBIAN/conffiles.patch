@@ -1,0 +1,11 @@
+diff --git a/DEBIAN/conffiles b/DEBIAN/conffiles
+index 4a19fe1..96dc4f6 100644
+--- a/DEBIAN/conffiles
++++ b/DEBIAN/conffiles
+@@ -1,6 +1,2 @@
+-/etc/grub.d/000_proxmox_boot_header
+-/etc/initramfs/post-update.d/proxmox-boot-sync
+ /etc/kernel/postinst.d/proxmox-auto-removal
+-/etc/kernel/postinst.d/zz-proxmox-boot
+ /etc/kernel/postrm.d/proxmox-auto-removal
+-/etc/kernel/postrm.d/zz-proxmox-boot

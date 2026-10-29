@@ -1,0 +1,30 @@
+diff --git a/etc/grub.d/000_proxmox_boot_header b/etc/grub.d/000_proxmox_boot_header
+deleted file mode 100644
+index cc53310..0000000
+--- a/etc/grub.d/000_proxmox_boot_header
++++ /dev/null
+@@ -1,24 +0,0 @@
+-#! /bin/sh
+-set -e
+-
+-. /usr/share/proxmox-kernel-helper/scripts/functions
+-
+-if proxmox-boot-tool status --quiet; then
+-	cat <<- EOF
+-	#
+-	# This system is booted via proxmox-boot-tool! The grub-config used when
+-	# booting from the disks configured with proxmox-boot-tool resides on the vfat
+-	# partitions with UUIDs listed in ${ESP_LIST}.
+-	# /boot/grub/grub.cfg is NOT read when booting from those disk!
+-	EOF
+-
+-	if [ -z "$DPKG_RUNNING_VERSION" ] && [ -z "$PVE_EFIBOOT_UNSHARED" ]; then
+-		warn "W: This system is booted via proxmox-boot-tool:"
+-		warn "W: Executing 'update-grub' directly does not update the correct configs!"
+-		warn "W: Running: 'proxmox-boot-tool refresh'"
+-		warn ""
+-
+-		proxmox-boot-tool refresh > /dev/null
+-	fi
+-fi
+-
