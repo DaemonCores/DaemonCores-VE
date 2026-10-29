@@ -75,7 +75,17 @@ Registry entries gain a `COMPOSE=` line so `refresh` and the UI know the source.
 
 Requirement: compose2bootc/pvect-ostree containers must be **entirely
 separated** from the official Proxmox LXC so official updates cannot collide
-with our customisations. Two variants:
+with our customisations.
+
+**DELIBERATION CLOSED (Gabriel): variant A is VALIDATED — a genuine third
+guest type beside LXC/QEMU, not a filter over CTs. Variant B is rejected as
+an illusion of isolation.** The full variant A plan (surfaces S1-S10, house
+patch skeletons in `workflows/bootc-debs-builder/{pve-cluster,pve-manager}/`,
+per-surface validation tests, GO gate) lives in
+**`docs/compose-variant-a-plan.md`** — read it with this file (the plugin/
+storage-plugin and `pvect-ostree` groundwork below is reused unchanged by
+variant A). Nothing is implemented until Gabriel's GO on that file; the two
+patch skeletons exit 8 without `DC_VARIANT_A_GO=1`.
 
 ### Variant A — a genuine third guest type (registry-level)
 
@@ -112,11 +122,9 @@ All compose2bootc/pvect-ostree specificity lives in the storage plugin + the
   view (read-only risk of confusion, not corruption — the immutable composefs
   posture is enforced on the host side by the plugin, not by the UI).
 
-Recommendation: **variant B**. It maximises update-collision separation where
-it matters (additive-only pve-manager patches, no pve-cluster/pve-container
-fork), matches the existing two-place design constraint, and keeps the
-official guest machinery intact. Gabriel to confirm the choice (tranche on the
-plan, per the conversation).
+Recommendation (OBSOLETE — superseded 2026-10-30): variant B was
+recommended here, but Gabriel has since **chosen variant A** — see
+`docs/compose-variant-a-plan.md` for the validated plan.
 
 ## Web UI (pve-manager patch, steps 2–4 — not implemented yet)
 
