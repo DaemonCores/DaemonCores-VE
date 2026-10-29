@@ -19,7 +19,7 @@
 #                                                     |
 #                                --[healthcheck smoke test]--> promote
 #
-# Design notes are in docs/architecture.md. British spelling
+# Design notes are in docs/Handoff-Architecture.md (wiki). British spelling
 # throughout, to match the DaemonCores house style.
 ######################################################################
 set -euo pipefail

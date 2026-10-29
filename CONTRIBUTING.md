@@ -31,7 +31,7 @@ Use the repository issue forms for public bugs and feature proposals. Follow [SE
 | Package and host tools | `workflows/bootc-debs-builder/` |
 | Runtime validation | `workflows/tests.yml` |
 | Shared pipeline caller | `.github/workflows/pipeline.yml` |
-| Documentation | `README.md`, `docs/` |
+| Documentation | `README.md`, `docs/` (wiki symlink) |
 
 ## Change requirements
 
