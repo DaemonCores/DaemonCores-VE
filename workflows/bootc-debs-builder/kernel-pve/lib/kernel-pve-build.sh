@@ -85,8 +85,20 @@ PKG_VER=$(sed -n 's/^proxmox-kernel-.* (\([^ )]*\)).*/\1/p' /build/pkg-src/debia
 [[ "${PKG_VER}" == "${KERNEL_VERSION}-"* ]] || \
   echo "WARN: packaging master is ${PKG_VER}, requested kernel version ${KERNEL_VERSION}"
 SRCDIR=/build/linux-${KERNEL_VERSION}
-[[ -e "${SRCDIR}" ]] || mv /build/pkg-src/submodules/ubuntu-kernel "${SRCDIR}"
-rm -f "${SRCDIR}/.git" 2>/dev/null || true   # git pointer: setlocalversion must not append a suffix
+[[ -e "${SRCDIR}" ]] || cp -a /build/pkg-src/submodules/ubuntu-kernel "${SRCDIR}"
+# Keep the git worktree linkage: `make deb-pkg` builds the source package
+# with check-git and refuses to run outside a git repository (first real
+# run: "creating source package requires git repository"). The pointer is
+# made absolute because the tree is copied out of pkg-src; the XanMod
+# setlocalversion patch (0017) drops the git tag suffix, so the release
+# stays 7.0.14-<LOCALVERSION>.
+if [[ -f "${SRCDIR}/.git" ]]; then
+  gd=$(sed 's/^gitdir: *//' "${SRCDIR}/.git")
+  [[ "${gd:0:1}" == "/" ]] || gd="/build/pkg-src/${gd}"
+  [[ -d "${gd}" ]] && echo "gitdir: ${gd}" > "${SRCDIR}/.git"
+  git -C "${SRCDIR}" rev-parse --git-dir >/dev/null 2>&1 \
+    || rm -f "${SRCDIR}/.git"   # give up quietly; deb-pkg would fail below with the real error
+fi
 
 # Config seed priority: a pre-mounted /build/.config.pve-seed (captured from
 # the host: /boot/config-<kernel> of the running PVE kernel — the tree's
