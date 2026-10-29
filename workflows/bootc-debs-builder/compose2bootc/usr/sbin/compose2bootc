@@ -596,20 +596,37 @@ do_test() {
   podman rm -f "${cid}" >/dev/null 2>&1 || true
   : >"${tmp}/ids"
 
-  local net="${PROG}-test-$$"
   # Dedicated subnet: the default 10.89.0.0/24 range collides with stale
   # aardvark bindings on this host; pin an unused private range instead.
   # aardvark-dns cannot serve extra networks on this host (trixie netavark
   # bug: port 53 always "in use"). Run the test network WITHOUT dns and
   # resolve services by static --ip + --add-host instead.
-  podman network create --subnet 10.97.0.0/24 --disable-dns "${net}" >/dev/null 2>&1 || true
+  # Stale networks from an interrupted run keep their subnet reserved, so
+  # sweep them first, then try a few subnets before giving up.
+  local net="${PROG}-test-$$" _subnet _ok=0
+  for _n in $(podman network ls --format "{{.Name}}" \
+      | grep "^${PROG}-test-" 2>/dev/null); do
+    podman network rm "${_n}" >/dev/null 2>&1 || true
+  done
+  for _subnet in 10.97.0.0/24 10.98.0.0/24 10.99.0.0/24 10.100.0.0/24; do
+    if podman network create --subnet "${_subnet}" --disable-dns \
+        "${net}" >/dev/null 2>&1; then
+      _ok=1
+      break
+    fi
+  done
+  [ "${_ok}" = 1 ] \
+    || die "could not create the test network on any known subnet"
+  # The static IPs must live in the subnet actually created: the first one of
+  # the pool can be taken by the host podman bridge (10.97.0.0/24).
+  local _prefix="${_subnet%.*}"
   local -A _svcip=()
   local _n=2 _sf _s0
   for _sf in "${tmp}"/*.container; do
     [ -e "${_sf}" ] || continue
     _s0="$(sed -n 's/^ContainerName=//p' "${_sf}" | head -1)"
     [ -n "${_s0}" ] || continue
-    _svcip["${_s0}"]="10.97.0.${_n}"; _n=$((_n + 1))
+    _svcip["${_s0}"]="${_prefix}.${_n}"; _n=$((_n + 1))
   done
   # shellcheck disable=SC2064  # expand ${tmp}/${net} now; run at RETURN
   trap "_test_cleanup '${tmp}' '${net}'" RETURN
@@ -623,11 +640,18 @@ do_test() {
     hc="$(sed -n 's/^HealthCmd=//p' "${f}" | head -1)"
     _envfs="$(sed -n 's/^EnvironmentFile=//p' "${f}")"
     _vols="$(sed -n 's/^Volume=//p' "${f}")"
+    # Environment= lines carry compose-level settings in production (systemd
+    # evaluates them when the quadlet starts); the smoke run must replay them
+    # or e.g. POSTGRES_USER never reaches initdb. ${VAR} placeholders belong
+    # to the host env file (F1), so leave unresolved ones out.
+    local _envs="$(sed -n 's/^Environment=//p' "${f}")"
     [ -n "${img}" ] || continue
     checked=$((checked + 1))
     info "  starting ${svc:-?} (${img})"
     local args=(
-      run -d --rm --name "${PROG}-test-${svc}-$$"
+      # No --rm: a container that starts and dies would be reaped before
+      # its logs could be read, leaving "unknown" as the only symptom.
+      run -d --name "${PROG}-test-${svc}-$$"
       --network "${net}"
       # newer AppArmor releases mediate AF_UNIX and deny container-internal
       # sockets (postgres is hit first); the test host profile is not ours
@@ -636,6 +660,13 @@ do_test() {
     )
     for _envf in ${_envfs}; do
       [ -f "${_envf}" ] && args+=(--env-file "${_envf}")
+    done
+    local _env
+    for _env in ${_envs}; do
+      case "${_env}" in
+        *'${'*) ;;                        # value unresolved on the host: skip,
+        *) args+=(-e "${_env}") ;;        # the env file (F1) supplies it
+      esac
     done
     for _v in ${_vols}; do
       _h="${_v%%:*}"
@@ -650,13 +681,17 @@ do_test() {
     for _ah in "${!_svcip[@]}"; do
       [ "${_ah}" = "${svc}" ] || args+=(--add-host "${_ah}:${_svcip[${_ah}]}")
     done
+    local _hsp="$(sed -n 's/^HealthStartPeriod=//p' "${f}" | head -1)"
     [ -n "${hc}" ] && args+=(
       --health-cmd "${hc}" --health-interval 5s
       --health-retries 6 --health-timeout 5s
     )
+    [ -n "${hc}" ] && [ -n "${_hsp}" ] && args+=(--health-start-period "${_hsp}")
     local id
+    # No --rm: a container that starts and immediately dies would be reaped
+    # before its logs could be read, leaving "unknown" as the only symptom.
     id="$(podman "${args[@]}" "${img}" 2>&1)" \
-      || { log "  podman run error: ${id}"; id=""; }
+      || { log "  podman run error: ${id}"; id="" ; }
     [ -n "${id}" ] && echo "${id}" >>"${tmp}/ids"
     if [ -z "${hc}" ]; then
       info "  ${svc}: no healthcheck declared — start-only check"
@@ -666,9 +701,10 @@ do_test() {
       }
       continue
     fi
-    # Poll Podman's health status up to ~60s.
-    local state=""
-    for _ in $(seq 1 20); do
+    # Poll Podman's health status; start periods of heavy services (Forgejo
+    # booting real data) commonly run past a minute, so give three minutes.
+    local state="" _gone=0
+    for _ in $(seq 1 60); do
       state="$(
         podman inspect --format '{{.State.Health.Status}}' \
           "${id}" 2>/dev/null || echo unknown
@@ -676,6 +712,7 @@ do_test() {
       case "${state}" in
         healthy) break ;;
         unhealthy) break ;;
+        unknown) _gone=1; break ;;
       esac
       sleep 3
     done
@@ -683,6 +720,14 @@ do_test() {
       info "  ${svc}: healthy"
     else
       warn "  ${svc}: ${state:-unknown}"
+      if [ -n "${id}" ]; then
+        # Diagnose before cleanup: exit status plus the last log lines.
+        log "  ${svc}: exited=$(podman inspect --format \
+          '{{.State.ExitCode}}' "${id}" 2>/dev/null)"
+        podman logs --tail 50 "${id}" 2>&1 | while read -r _l; do
+          log "    | ${_l}"
+        done
+      fi
       fail=1
     fi
   done
