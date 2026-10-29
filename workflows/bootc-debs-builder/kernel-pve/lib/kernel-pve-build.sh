@@ -94,10 +94,22 @@ SRCDIR=/build/linux-${KERNEL_VERSION}
 # stays 7.0.14-<LOCALVERSION>.
 if [[ -f "${SRCDIR}/.git" ]]; then
   gd=$(sed 's/^gitdir: *//' "${SRCDIR}/.git")
-  [[ "${gd:0:1}" == "/" ]] || gd="/build/pkg-src/${gd}"
-  [[ -d "${gd}" ]] && echo "gitdir: ${gd}" > "${SRCDIR}/.git"
-  git -C "${SRCDIR}" rev-parse --git-dir >/dev/null 2>&1 \
-    || rm -f "${SRCDIR}/.git"   # give up quietly; deb-pkg would fail below with the real error
+  # The relative pointer was written for the ORIGINAL location
+  # (pkg-src/submodules/ubuntu-kernel, base /build/pkg-src): ../../.git
+  # from there is pkg-src/.git. Map it to its absolute spot; the module
+  # git dir travels with pkg-src, the worktree stays the copied tree.
+  [[ "${gd:0:1}" == "/" ]] || gd="/build/pkg-src/${gd#../../}"
+  if [[ -d "${gd}" ]]; then
+    echo "gitdir: ${gd}" > "${SRCDIR}/.git"
+    # The module config carries core.worktree pointing at the original
+    # location (check-git needs `rev-parse --show-cdup` empty from the
+    # tree top): repoint it at the copied tree.
+    git --git-dir="${gd}" config core.worktree "${SRCDIR}"
+    git -C "${SRCDIR}" rev-parse --git-dir >/dev/null 2>&1 \
+      || rm -f "${SRCDIR}/.git"   # give up quietly; deb-pkg would fail below with the real error
+  else
+    rm -f "${SRCDIR}/.git"
+  fi
 fi
 
 # Config seed priority: a pre-mounted /build/.config.pve-seed (captured from
