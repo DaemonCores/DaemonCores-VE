@@ -40,13 +40,20 @@ sub type {
 
 sub plugindata {
     return {
-        content => [{ rootdir => 1 }, { rootdir => 1 }],
+        content => [{ rootdir => 1, vztmpl => 1 }, { rootdir => 1, vztmpl => 1 }],
         format  => [{ subvol => 1 }, 'subvol'],
     };
 }
 
+# Seed templates published by `pvect-ostree publish` live under the sysroot.
+my $TEMPLATES_SUBDIR = 'vztmpl';
+
 sub properties {
     return {
+        # 'path' is inherited from PVE::Storage::Plugin (no redefinition:
+        # SectionConfig rejects duplicate properties). It must be set on the
+        # storage (see seed) so alloc_disk takes the subvol (no mkfs) branch
+        # for `--rootfs <storeid>:0`.
         'pvect-sysroot' => {
             description => "ostree sysroot holding the composefs deployments.",
             type        => 'string',
@@ -57,16 +64,20 @@ sub properties {
 
 sub options {
     return {
-        nodes          => { optional => 1 },
-        disable        => { optional => 1 },
-        content        => { optional => 1 },
+        nodes           => { optional => 1 },
+        disable         => { optional => 1 },
+        content         => { optional => 1 },
+        path            => { optional => 1 },
         'pvect-sysroot' => { optional => 1 },
     };
 }
 
-# volname is 'subvol-<vmid>-disk-0.subvol'; pull the vmid out of it.
+# volname is 'subvol-<vmid>-disk-0.subvol' or 'vztmpl/<stack>.tar.gz'.
 sub parse_volname {
     my ($class, $volname) = @_;
+    if ($volname =~ m|^vztmpl/([^/]+\.tar\.gz)$|) {
+        return ('vztmpl', $volname, undef, undef, undef, undef, 'tar.gz');
+    }
     if ($volname =~ m/^subvol-(\d+)-disk-\d+/) {
         return ('rootdir', $volname, $1, undef, undef, undef, 'subvol');
     }
@@ -76,8 +87,14 @@ sub parse_volname {
 sub filesystem_path {
     my ($class, $scfg, $volname, $snapname) = @_;
     die "snapshots are not supported by pvect-ostree\n" if defined($snapname);
+    my $sysroot = $scfg->{'pvect-sysroot'} // '/var/lib/pvect-ostree/sysroot';
+    if ($volname =~ m|^vztmpl/(.+)$|) {
+        my $path = "$sysroot/$TEMPLATES_SUBDIR/$1";
+        return wantarray ? ($path, undef, 'vztmpl') : $path;
+    }
     my (undef, undef, $vmid) = $class->parse_volname($volname);
-    my $path = "/var/lib/vz/images/$vmid/$volname";
+    my $path = ($scfg->{path} // '/var/lib/pvect-ostree/sysroot/volumes')
+        . "/$vmid/$volname";
     return wantarray ? ($path, $vmid, 'rootdir') : $path;
 }
 
@@ -103,17 +120,81 @@ sub status {
 sub activate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
     die "snapshots are not supported by pvect-ostree\n" if defined($snapname);
-    my (undef, undef, $vmid) = $class->parse_volname($volname);
-    run_command([PVECT, 'mount', $vmid]);
+    my @v = $class->parse_volname($volname);
+    return 1 if $v[0] eq 'vztmpl';
+    my $vmid = $v[2];
+    # A CT created from a published seed template is only registered at its
+    # first activation: pct create activates the (empty) volume before the
+    # template extraction, so an unregistered volume with no seed is normal
+    # mid-create.
+    my $managed = eval { run_command([PVECT, 'mount', $vmid]); 1 } // 0;
+    return 1 if $managed;
+    my $subvol = _pvect_out('subvol-path', $vmid);
+    $subvol //= '';
+    $subvol =~ s/\s+$//;
+    if (-f "$subvol/pvect-ostree/payload.env") {
+        run_command([PVECT, 'adopt', $vmid]);
+    }
+    # else: mid-create (seed not extracted yet) — nothing to mount, and the
+    # next activation (start) adopts it.
     return 1;
+}
+
+#######################################
+# Run a pvect-ostree subcommand printing a single line and return that line.
+# Arguments:
+#   @_ - the pvect-ostree subcommand and its arguments
+# Outputs:
+#   Nothing (the captured line is the return value).
+# Returns:
+#   The stripped stdout line, or undef when the command failed.
+#######################################
+sub _pvect_out {
+    my @cmd = (PVECT, @_);
+    my $out;
+    eval {
+        run_command(\@cmd, outfunc => sub { $out .= $_[0] // '' });
+    };
+    return $out;
 }
 
 sub deactivate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
+    my @v = $class->parse_volname($volname);
+    return 1 if $v[0] eq 'vztmpl';
     my (undef, undef, $vmid) = $class->parse_volname($volname);
     # Best-effort: leave the mount if the container is still running.
     eval { run_command([PVECT, 'umount', $vmid]) };
     return 1;
+}
+
+# List the published seed templates in the standard vztmpl shape, so `pvesm
+# list <storeid>` and the GUI template pickers work unchanged; this storage has
+# no configurable path, so the base-class subdir walk cannot apply.
+sub list_volumes {
+    my ($class, $storeid, $scfg, $vmid, $content_types) = @_;
+    my $sysroot = $scfg->{'pvect-sysroot'} // '/var/lib/pvect-ostree/sysroot';
+
+    if (!grep { $_ eq 'vztmpl' } @$content_types) {
+        return $class->SUPER::list_volumes($storeid, $scfg, $vmid, $content_types);
+    }
+
+    my $res = [];
+    my $dir = "$sysroot/$TEMPLATES_SUBDIR";
+    if (opendir(my $dh, $dir)) {
+        while (defined(my $fn = readdir($dh))) {
+            next if $fn !~ m{^([^/]+\.tar\.gz)$};
+            my $file = "$dir/$fn";
+            next if !-f $file;
+            push @$res, {
+                volid  => "$storeid:vztmpl/$fn",
+                format => 'tar.gz',
+                size   => (-s $file),
+            };
+        }
+        closedir($dh);
+    }
+    return $res;
 }
 
 sub list_images {
@@ -123,6 +204,10 @@ sub list_images {
 
 sub volume_size_info {
     my ($class, $scfg, $storeid, $volname, $timeout) = @_;
+    if ($volname =~ m|^vztmpl/|) {
+        my $path = $class->filesystem_path($scfg, $volname);
+        return (-f $path) ? (-s $path) : 0;
+    }
     return 0;
 }
 
@@ -130,15 +215,30 @@ sub create_base { die "create_base is not supported by pvect-ostree\n"; }
 sub clone_image { die "clone_image is not supported by pvect-ostree\n"; }
 sub alloc_image {
     my ($class, $storeid, $scfg, $vmid, $fmt, $name, $size) = @_;
-    die "unsupported format '$fmt'\n" if defined($fmt) && $fmt ne 'subvol';
+    # pct create asks for 'raw' (size-given) or 'subvol' (--rootfs <sid>:0);
+    # both map to the same empty seed directory — the composefs view is
+    # mounted over it at activation, the size is nominal.
+    die "unsupported format '$fmt'\n"
+        if defined($fmt) && $fmt ne 'subvol' && $fmt ne 'raw';
     $name //= "subvol-$vmid-disk-0.subvol";
-    my $dir = "/var/lib/vz/images/$vmid";
+    my $dir = ($scfg->{path} // '/var/lib/pvect-ostree/sysroot/volumes') . "/$vmid";
+    # Allocation starts from an empty volume: a previous failed create leaves
+    # seed content and PVE extracts templates with --skip-old-files, so stale
+    # files would leak into the new container (wrong etc/os-release included).
+    File::Path::remove_tree("$dir/$name");
     File::Path::make_path("$dir/$name");
     return $name;
 }
 
 sub free_image {
     my ($class, $storeid, $scfg, $volname, $isBase, $format) = @_;
+    # Delete like the dir storage does, so a destroyed vmid can be recreated;
+    # only rootdir volumes in our own path are touched.
+    my $vtype = eval { ($class->parse_volname($volname))[0] } // '';
+    return undef if $vtype ne 'rootdir';
+    my (undef, undef, $vmid) = $class->parse_volname($volname);
+    my $base = $scfg->{path} // '/var/lib/pvect-ostree/sysroot/volumes';
+    File::Path::remove_tree("$base/$vmid") if $base;
     return undef;
 }
 
