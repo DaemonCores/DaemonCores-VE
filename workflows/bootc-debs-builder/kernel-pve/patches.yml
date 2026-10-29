@@ -37,6 +37,9 @@ patches:
     url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0001-XANMOD-x86-build-Add-more-CFLAGS-optimizations.patch
     topic: xanmod
     stage: common
+  # 0003-kbuild-sms-pipelining: RETIRED (probe 2026-10-29): the active 7.3
+  # name and the EOL 7.0 name both fail the dry-run on the pristine PVE
+  # 7.0.14 tree, so no series variant applies; re-review on a series bump.
   # 0002-kbuild-llvm-plo: PINNED to the active 7.3 file on 2026-10-29
   # (series 7.0 review): the EOL 7.0 sibling does not apply to the 7.0.x
   # tree — it depends on an XanMod-side 0001 Makefile context (dry-run
@@ -46,10 +49,6 @@ patches:
   # it; re-review on a series bump.
   - name: 0002-kbuild-llvm-plo
     url: https://gitlab.com/xanmod/linux-patches/-/raw/master/linux-7.3.y-xanmod/xanmod/0002-XANMOD-kbuild-Add-LLVM-polyhedral-loop-optimizer-fla.patch
-    topic: xanmod
-    stage: common
-  - name: 0003-kbuild-sms-pipelining
-    url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0003-XANMOD-kbuild-Add-SMS-based-software-pipelining-flag.patch
     topic: xanmod
     stage: common
   - name: 0004-kbuild-debpkg-dbg
