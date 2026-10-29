@@ -20,7 +20,7 @@ packages:
     variant-env: PKG
     variant-source: "{variant}"
     env:
-      HELPERS_VER: 2
+      HELPERS_VER: 3
     build: |
       deb_repack "${PKG}" "${VER_SUFFIX}" "${PKG}"
     deb-glob: "{variant}_*"
@@ -59,7 +59,7 @@ packages:
     variant-env: PKG
     variant-source: "{variant}"
     env:
-      HELPERS_VER: 2
+      HELPERS_VER: 3
     build: |
       deb_overlay_tree "${PKG}" "${VER_SUFFIX}" "${PKG}" ${EXTRA_EXEC:-}
     deb-glob: "{variant}_*"
@@ -85,7 +85,7 @@ packages:
     variant-env: PKG
     variant-source: "{variant}"
     env:
-      HELPERS_VER: 2
+      HELPERS_VER: 3
     build: |
       deb_custom "${PKG}" "${PKG_VER}" "${PKG}"
     deb-glob: "{variant}_*"
@@ -122,3 +122,237 @@ packages:
         env:
           PKG: dc-gpu-lxc
           PKG_VER: 1.0.0
+
+  # ===========================================================================
+  # kernel-pve: the PVE packaging + XanMod patch set, the transverse-variant
+  # strategy (Gabriel, 30/10). ONE class entry, one variant per microarch
+  # level (KERNEL_ARCH_LEVEL: x64v1 / x64v2 / x64v3); the arm64 variant is
+  # CODED but PERMANENTLY DISABLED (`kernel-arm` flag, expand.jq keeps it
+  # only when the caller sets KERNEL_ARM=yes — there is no arm64 PVE lane
+  # today). The build block orchestrates the STANDARD kernel helpers of
+  # DaemonCores-CI scripts/kernel_helpers.sh (kernel_pve_prepare,
+  # kernel_apply_patches on the native patches: data, kernel_merge_config,
+  # kernel_build_debs) — no logic is duplicated here; the retired
+  # lib/kernel-pve-build.sh stays only for the deprecated workflow lane
+  # until that lane lands.
+  #
+  # PRODUCTION lane (not artifact-only): the debs land in /debs and go
+  # through the standard builder — content-hash cache, /debs/.meta, publish
+  # to the DaemonCores APT repo like every other package. The flavour IS the
+  # version suffix (CONFIG_LOCALVERSION="-x64v<n>-xanmod1", XanMod
+  # convention): no +bootc1-style suffix on the kernel — the deb version is
+  # the PVE packaging version + flavour, same as debian-bootc's linux-image
+  # carries the kernel.org version. The bootc images take the deb from that
+  # APT repo at image build (OCI image reference), the flavour being
+  # selected per image; on the host the flavour is fixed at install and
+  # never switched on a bootc system (immutability). Waves: no deps — wave 0.
+  #
+  # Version resolution: KERNEL_VERSION is empty here; the build block reads
+  # it from the Proxmox repo (rolling anchor, no pinning). Guard: patches
+  # are upstream-fetched at build time and DRY-RUN all-or-nothing before any
+  # touch of the tree (patch-guard pattern; no sha256 lock possible on
+  # remote patches — the dry-run is the guard), a failure keeps the
+  # last-good deb. GPU config sets (kconfig/gpu/{amd,intel,nvidia}.cfg) are
+  # merged transversely: ONE kernel build per flavour, no vendor matrix.
+  - name: kernel-pve
+    variant-env: KERNEL_ARCH_LEVEL
+    # Native patch data (canonical patches schema, identical to
+    # kernel-pve/patches.yml — kept in sync until the deprecated
+    # workflow lane is retired; the native key is the live definition,
+    # hashed via PATCHES_JSON in the content hash).
+    patches:
+      - name: 0001-x86-cflags
+        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0001-XANMOD-x86-build-Add-more-CFLAGS-optimizations.patch
+        topic: xanmod
+        stage: common
+      - name: 0002-kbuild-llvm-plo
+        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0002-XANMOD-kbuild-Add-LLVM-polyhedral-loop-optimizer-fla.patch
+        topic: xanmod
+        stage: common
+      - name: 0003-kbuild-sms-pipelining
+        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0003-XANMOD-kbuild-Add-SMS-based-software-pipelining-flag.patch
+        topic: xanmod
+        stage: common
+      - name: 0004-kbuild-debpkg-dbg
+        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0004-XANMOD-kbuild-deb-pkg-Create-dbg-when-make-DEB_DEBUG.patch
+        topic: xanmod
+        stage: common
+      - name: 0005-kbuild-sign-external-cfg
+        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0005-kbuild-Re-add-.config-file-required-to-sign-external.patch
+        topic: xanmod
+        stage: common
+      - name: 0006-fair-unscaled-tunables
+        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0006-XANMOD-fair-Set-scheduler-tunable-latencies-to-unsca.patch
+        topic: xanmod
+        stage: common
+      - name: 0007-mq-deadline-write-prio
+        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0007-XANMOD-block-mq-deadline-Increase-write-priority-to-.patch
+        topic: xanmod
+        stage: common
+      - name: 0008-mq-deadline-front-merges
+        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0008-XANMOD-block-mq-deadline-Disable-front_merges-by-def.patch
+        topic: xanmod
+        stage: common
+      - name: 0009-block-rq-affinity
+        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0009-XANMOD-block-Set-rq_affinity-to-force-complete-I-O-r.patch
+        topic: xanmod
+        stage: common
+      - name: 0010-blk-wbt-latency
+        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0010-XANMOD-blk-wbt-Set-wbt_default_latency_nsec-to-2msec.patch
+        topic: xanmod
+        stage: common
+      - name: 0011-kconfig-500hz
+        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0011-XANMOD-kconfig-add-500Hz-timer-interrupt-kernel-conf.patch
+        topic: xanmod
+        stage: common
+      - name: 0012-vfs-cache-pressure
+        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0012-XANMOD-vfs-Decrease-rate-at-which-vfs-caches-are-rec.patch
+        topic: xanmod
+        stage: common
+      - name: 0013-mm-max-map-count
+        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0013-XANMOD-mm-Raise-max_map_count-default-value.patch
+        topic: xanmod
+        stage: common
+      - name: 0014-mm-vmscan-swappiness
+        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0014-XANMOD-mm-vmscan-Reduce-amount-of-swapping.patch
+        topic: xanmod
+        stage: common
+      - name: 0015-cpufreq-governor-tunes
+        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0015-XANMOD-cpufreq-tunes-ondemand-and-conservative-gover.patch
+        topic: xanmod
+        stage: common
+      - name: 0016-kconfig-symbolic-err
+        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0016-XANMOD-lib-kconfig.debug-disable-default-SYMBOLIC_ER.patch
+        topic: xanmod
+        stage: common
+      - name: 0017-setlocalversion-tag
+        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0017-XANMOD-scripts-setlocalversion-remove-tag-for-git-re.patch
+        topic: xanmod
+        stage: common
+      - name: 0018-setlocalversion-file
+        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0018-XANMOD-scripts-setlocalversion-Move-localversion-fil.patch
+        topic: xanmod
+        stage: common
+      - name: 0001-wait-lifo
+        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0001-sched-wait-Do-accept-in-LIFO-order-for-cache-efficie.patch
+        topic: clearlinux
+        stage: common
+      - name: 0002-firmware-stateless
+        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0002-firmware-Enable-stateless-firmware-loading.patch
+        topic: clearlinux
+        stage: common
+      - name: 0003-rwsem-spin
+        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0003-locking-rwsem-spin-faster.patch
+        topic: clearlinux
+        stage: common
+      - name: 0004-ata-before-graphics
+        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0004-drivers-initialize-ata-before-graphics.patch
+        topic: clearlinux
+        stage: common
+    env:
+      HELPERS_VER: 3
+      # Bump when the build contract changes in a way `sources:` alone
+      # cannot express (e.g. the lib's behaviour for the same tree).
+      KERNEL_BUILD_VER: 1
+      KERNEL_SERIES: "7.3"
+      KERNEL_ARCH: x86_64
+      KERNEL_OUT: /debs
+    sources:
+      - kernel-pve/kconfig
+    build: |
+      # Version resolved from the Proxmox repo itself (rolling anchor).
+      echo "deb [arch=amd64] https://download.proxmox.com/debian/pve trixie pve-no-subscription" \
+        > /etc/apt/sources.list.d/pve.list
+      echo "deb-src [arch=amd64] https://download.proxmox.com/debian/pve trixie pve-no-subscription" \
+        >> /etc/apt/sources.list.d/pve.list
+      curl -fsSL https://download.proxmox.com/debian/proxmox-release-trixie.gpg \
+        -o /etc/apt/trusted.gpg.d/proxmox-release-trixie.gpg \
+        || { [[ -s /etc/apt/trusted.gpg.d/proxmox-release-trixie.gpg ]] \
+          && echo "WARN: key fetch failed (CDN SNI), using pre-mounted keyring" \
+          || { echo "ERROR: no proxmox repo key available" >&2; exit 1; }; }
+      apt-get update
+      KERNEL_VERSION=$(apt-cache policy proxmox-kernel-7.0 | sed -n 2p | awk '{print $2}')
+      test -n "${KERNEL_VERSION}" \
+        || { echo "ERROR: cannot resolve the PVE kernel version" >&2; exit 1; }
+
+      apt-get install -y --no-install-recommends \
+        build-essential dpkg-dev devscripts curl git yq patch \
+        bc bison flex libncurses-dev libssl-dev libelf-dev rsync kmod python3 \
+        fakeroot ca-certificates
+      [[ "${KERNEL_ARCH}" = "arm64" ]] && \
+        apt-get install -y --no-install-recommends \
+          crossbuild-essential-arm64 gcc-aarch64-linux-gnu
+
+      mkdir -p /build /debs
+
+      # Standard kernel helpers (DaemonCores-CI scripts/kernel_helpers.sh,
+      # sourced implicitly by deb_helpers.sh): packaging fetch, patches.yml,
+      # kconfig merge, make deb-pkg. The retired lib/lib driver of the
+      # deprecated workflow keeps its own copy until that lane is retired.
+      mkdir -p /build && kernel_pve_prepare /build
+      # Native patches: data of this entry, exported as PATCHES_JSON by the
+      # builder (hashed in the content hash); "-" selects it.
+      kernel_apply_patches - \
+        "${DEB_ARCH}" "${KERNEL_VERSION}" "${SRCDIR}"
+
+      [[ -z "${PVE_SEED_CONFIG}" ]] || cp "${PVE_SEED_CONFIG}" "${SRCDIR}/.config"
+
+      # GPU config sets (transverse: ONE optimised build, every vendor) are
+      # merged BEFORE the flavour fragments so a flavour delta wins last.
+      FRAGS=()
+      for gs in ${KERNEL_GPU:-all}; do
+        if [[ "${gs}" == "all" ]]; then
+          FRAGS+=("${KERNEL_DATA_DIR}/kconfig/gpu/"*.cfg)
+        else
+          f="${KERNEL_DATA_DIR}/kconfig/gpu/${gs}.cfg"
+          [[ -f "${f}" ]] \
+            || { echo "ERROR: unknown GPU set '${gs}'" >&2; exit 1; }
+          FRAGS+=("${f}")
+        fi
+      done
+
+      if [[ "${KERNEL_ARCH}" = "x86_64" ]]; then
+        # ONE flavour per variant (KERNEL_ARCH_LEVEL); the flavour fragment
+        # is merged last. KCFLAGS carries the microarch (-march=x86-64-vN).
+        FRAGS+=("${KERNEL_DATA_DIR}/kconfig/x86-common.cfg")
+        [[ -f "${KERNEL_DATA_DIR}/kconfig/${KERNEL_ARCH_LEVEL}.cfg" ]] && \
+          FRAGS+=("${KERNEL_DATA_DIR}/kconfig/${KERNEL_ARCH_LEVEL}.cfg")
+        kernel_merge_config "${SRCDIR}" "${FRAGS[@]}"
+        KCFLAGS=$(kernel_flavour_kcflags "${KERNEL_ARCH_LEVEL}")
+        kernel_build_debs "${SRCDIR}" deb-pkg "${KCFLAGS}"
+      else
+        # arm64 (coded but disabled): ONE generic kernel, cross-compiled.
+        [[ -z "${PVE_SEED_CONFIG}" ]] && make -C "${SRCDIR}" defconfig
+        [[ -f "${KERNEL_DATA_DIR}/kconfig/arm64-common.cfg" ]] && \
+          FRAGS+=("${KERNEL_DATA_DIR}/kconfig/arm64-common.cfg")
+        kernel_merge_config "${SRCDIR}" "${FRAGS[@]}"
+        kernel_build_debs "${SRCDIR}" deb-pkg
+      fi
+
+      # make deb-pkg writes the debs one directory above the tree.
+      cp "$(dirname "${SRCDIR}")"/*.deb /debs/
+      # Free the ~10 GB source tree now that the debs are in /debs.
+      rm -rf "${SRCDIR}" /build
+      ls -la /debs
+    # deb-glob is NOT {variant}-substituted by expand.jq (only variant-source
+    # and variant-deps are): every variant carries its own literal glob.
+    deb-glob: "linux-*x64v1*"
+    variants:
+      x64v1:
+        when:
+          arch: amd64
+      x64v2:
+        when:
+          arch: amd64
+        deb-glob: "linux-*x64v2*"
+      x64v3:
+        when:
+          arch: amd64
+        deb-glob: "linux-*x64v3*"
+      arm64:
+        when:
+          arch: arm64
+          kernel-arm: true
+        env:
+          KERNEL_ARCH: arm64
+        deb-glob: "linux-*arm64*"

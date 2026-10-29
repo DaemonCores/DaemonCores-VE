@@ -1,14 +1,16 @@
-name: Kernel PVE + XanMod
+name: Kernel PVE + XanMod (DEPRECATED)
 
-# Thin caller: the build lives in DaemonCores-CI. Weekly and by hand — this
-# is a build-only job: the debs land as workflow artifacts, nothing reaches
-# the PVE host without a separate GO (docs/kernel-nvidia-pve-host-plan.md,
-# file of operations K-06/K-07).
+# DEPRECATED — the production path is the deb pipeline:
+# DaemonCores-VE workflows/bootc-debs-builder/packages.yml, kernel-pve class
+# entry (one variant per microarch level; debs published to the DaemonCores
+# APT repo like any other package). This workflow exists ONLY for the
+# in-flight kernel validation lane, which runs its build through it as
+# workflow artifacts; it must be removed once that lane lands, so there is
+# exactly ONE way to build the kernel. The weekly cron is gone — manual
+# dispatch only.
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 4 * * 1'
 
 permissions:
   contents: read
