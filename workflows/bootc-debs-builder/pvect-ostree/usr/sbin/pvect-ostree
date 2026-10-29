@@ -402,6 +402,46 @@ ct_etc() { echo "$STATE_DIR/$1/etc"; }
 ct_var() { echo "$STATE_DIR/$1/var"; }
 
 #######################################
+# Print the writable per-CT /usr/lib/bootc shadow (bootc image store).
+# Globals:
+#   STATE_DIR
+# Arguments:
+#   $1 - vmid
+# Outputs:
+#   Bootc shadow path on stdout.
+#######################################
+ct_bootc() { echo "$STATE_DIR/$1/bootc"; }
+
+#######################################
+# Shadow /usr/lib/bootc with a writable copy plus the storage/ directory.
+#
+# In a bootc image, /usr/lib/bootc/storage is a build-time symlink into the
+# build sysroot (/sysroot/ostree/bootc/storage); inside a container nothing
+# provides /sysroot, and podman (which enters bootc image-store mode as soon
+# as /run/ostree exists) then dies on every service with "can't stat
+# imageStore dir". A writable copy of the image's /usr/lib/bootc (quadlets
+# keep the build-side bookkeeping) plus an empty storage/ directory restores
+# a usable additional image store; service images are loaded there by hand.
+# Globals:
+#   UID_BASE
+# Arguments:
+#   $1 - vmid
+#   $2 - deployment directory
+#######################################
+build_bootc_shadow() {
+  local vmid=$1 deploy=$2 shadow
+  shadow=$(ct_bootc "$vmid")
+  [[ -d $deploy/usr/lib/bootc ]] || return 0
+  if [[ ! -d $shadow/bound-images.d ]]; then
+    mkdir -p "$shadow"
+    cp -a "$deploy/usr/lib/bootc/." "$shadow/" \
+      || die "cannot seed the bootc shadow from $deploy/usr/lib/bootc"
+  fi
+  mkdir -p "$shadow/storage"
+  chown -R "$UID_BASE:$UID_BASE" "$shadow"
+}
+
+#######################################
 # Build the writable /etc from the deployment's default /usr/etc and mask the
 # host-only units so the guest boots clean. Idempotent-ish: only (re)builds
 # /etc when it is missing, to preserve local changes across updates.
@@ -444,6 +484,7 @@ build_writable_layers() {
     done
   fi
   chown -R "$UID_BASE:$UID_BASE" "$etc" "$var"
+  build_bootc_shadow "$vmid" "$deploy"
 }
 
 #######################################
@@ -543,6 +584,7 @@ EOF
   {
     echo "mp0: $etc,mp=/etc"
     echo "mp1: $var,mp=/var"
+    echo "mp2: $(ct_bootc "$vmid"),mp=/usr/lib/bootc"
   } >>"$conf"
 }
 
