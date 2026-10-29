@@ -1,0 +1,23 @@
+diff --git a/usr/share/perl5/PVE/API2/Qemu.pm b/usr/share/perl5/PVE/API2/Qemu.pm
+index 71247ee..34dd99c 100644
+--- a/usr/share/perl5/PVE/API2/Qemu.pm
++++ b/usr/share/perl5/PVE/API2/Qemu.pm
+@@ -1479,6 +1479,18 @@ __PACKAGE__->register_method({
+                 my $conf = $param;
+                 my $arch = PVE::QemuServer::Helpers::get_vm_arch($conf);
+ 
++                # DaemonCores: OVMF is the default BIOS; auto-provision an EFI
++                # vars disk so CLI/API creates persist EFI state like the GUI.
++                if (($param->{bios} // 'ovmf') eq 'ovmf' && !$param->{efidisk0} && $storage) {
++                    $param->{efidisk0} = "$storage:1,efitype=4m";
++                }
++
++                # DaemonCores: OVMF is the default BIOS; auto-provision an EFI
++                # vars disk so CLI/API creates persist EFI state like the GUI.
++                if (($param->{bios} // 'ovmf') eq 'ovmf' && !$param->{efidisk0} && $storage) {
++                    $param->{efidisk0} = "$storage:1,efitype=4m";
++                }
++
+                 for my $opt (sort keys $param->%*) {
+                     next if $opt !~ m/^scsi\d+$/;
+                     assert_scsi_feature_compatibility($opt, $conf, $storecfg, $param->{$opt});

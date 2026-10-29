@@ -1,0 +1,13 @@
+diff --git a/usr/share/perl5/PVE/API2/Subscription.pm b/usr/share/perl5/PVE/API2/Subscription.pm
+index cf965c3..b218c95 100644
+--- a/usr/share/perl5/PVE/API2/Subscription.pm
++++ b/usr/share/perl5/PVE/API2/Subscription.pm
+@@ -220,7 +220,7 @@ __PACKAGE__->register_method({
+         my $info = read_etc_subscription();
+         if (!$info) {
+             my $no_subscription_info = {
+-                status => "notfound",
++                status => "active",
+                 message => "There is no subscription key",
+                 url => $url,
+             };

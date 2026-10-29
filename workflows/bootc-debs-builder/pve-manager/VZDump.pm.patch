@@ -1,0 +1,15 @@
+diff --git a/usr/share/perl5/PVE/VZDump.pm b/usr/share/perl5/PVE/VZDump.pm
+index defe9e0..12199a0 100644
+--- a/usr/share/perl5/PVE/VZDump.pm
++++ b/usr/share/perl5/PVE/VZDump.pm
+@@ -1414,7 +1414,10 @@ sub exec_backup {
+         my $plugin;
+         if (defined($vmlist->{ids}->{$vmid})) {
+             my $guest_type = $vmlist->{ids}->{$vmid}->{type};
++            # variant A: no vzdump of bootc guests (v1)
++            $plugin = undef if defined($guest_type) && $guest_type eq 'bootc';
+             $plugin = $vzdump_plugins->{$guest_type};
++            next if $opts->{all} && !$plugin;
+             next if !$rpcenv->check($authuser, "/vms/$vmid", ['VM.Backup'], $opts->{all});
+         }
+         push @$tasklist,

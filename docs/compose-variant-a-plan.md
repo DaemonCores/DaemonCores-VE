@@ -1,11 +1,15 @@
 # Variant A — third guest type `bootc` (VALIDATED architecture, implementation gated)
 
-Status: **PLAN COMPLETE (Gabriel validated variant A 2026-10-30 — B rejected).
-NO IMPLEMENTATION YET**: every patch below is written as a house
-packages.yml inline-patch skeleton (libtemplate-perl model: patch lives in the YAML `build`, never as a script file) that **refuses to run** until Gabriel signs off
-the whole plan (gate: `DC_VARIANT_A_GO=1`). British spelling, house comment
-style, `+dcve1` deb suffix, skip exit 3 on drift, sha256 + `apt-mark hold` and
-issue notification — same repack model as the libpve-storage-perl lane.
+Status: **IMPLEMENTED via the overlay model (Gabriel spec 2026-10-30)**,
+S5-S8 of the pve-manager surface + the qemu-server VM defaults + the
+libpve-storage-perl ZFS patches are shipped as `workflows/bootc-debs-builder`
+overlay trees / git-format patches in `packages.yml` (one generic build,
+drift = `patch --fuzz=0 --forward` refusing a hunk). S9/S10 (JS UI wiring,
+www bootc panels) remain **PENDING** — `bootc-classes.js` is parked under
+`workflows/bootc-debs-builder/s10-pending/` (NOT in the deb mirror: it would
+land at the deb root and is still unwired). `pve-cluster` (pmxcfs, binary C:
+S1-S4) is **PENDING** — implemented later as its own inline/overlay entry;
+the invented stub lane was removed. British spelling, house comment style,
 
 This document supersedes the variant-B recommendation in
 `docs/compose-lxc-proposal.md` (that doc keeps the storage-plugin and
@@ -58,30 +62,65 @@ Grounding: the hard-wired guest machinery was verified in the upstream trees
 its role (seed payload wiring) and is invoked by `start`. This is additive
 binary work, no core daemon forked.
 
-## Repack mechanics (same model as libpve-storage-perl)
+## Repack mechanics (overlay model, Gabriel spec 2026-10-30)
 
-* Packages: `pve-cluster` (`3:<ORIG>+dcvbootc1`), `pve-manager` (`2:<ORIG>+dcvbootc1`) —
-  distinct suffixes so a drift-skip never silently ships one package unpatched.
-* C patches are verified by a real `dpkg-buildpackage` (or `make -C src` +
-  `perl -c` for the Perl modules) inside the builder; `pmxcfs` is smoke-run
-  with `-f` against a throwaway memdb before the deb is published.
-* Anchors: every patch greps the exact upstream line (quoted in the
-  packages.yml inline-patch skeleton (libtemplate-perl model: patch lives in the YAML `build`, never as a script file)s) and skips with exit 3 + issue report on
-  drift — never ships unpatched.
+Packages repackés (entry `packages.yml`): `libtemplate-perl` (+bootc1),
+`libpve-storage-perl` (+dcve1), `pve-manager` (+bootc1), `qemu-server`
+(+bootc1) — build générique IDENTIQUE dans `packages.yml`, seuls deux
+var changent par entrée (`PKG=...`, `VER_SUFFIX=...`):
+
+1. `dpkg-deb -R` de l'upstream téléchargé.
+2. `"$CI_SCRIPTS/apply_overlays.sh" workflows/bootc-debs-builder/<pkg> "$O"`
+   (script partagé DaemonCores-CI, exporté par `build-deb.sh:run_build`) :
+   - le dossier paquet est le MIROIR EXACT de l'arbre du deb — fichiers
+     NOUVEAUX copiés tels quels (`pve-manager/usr/...`) ;
+   - fichiers MODIFIÉS = `.patch` git-format à la racine du dossier paquet
+     (les ancres sont les hunks ; `--fuzz=0 --forward`, dry-run complet
+     AVANT toute application → jamais d'arbre à moitié patché ; drift =
+     exit 3 + annotation + step summary) ;
+   - `*.patch` et `patches.lock.json` ne sont jamais copiés dans le deb.
+3. md5sums regénérés, `Version: 1:<ORIG>+<VER_SUFFIX>`, `dpkg-deb --build`.
+
+Drift double garde: `apply_overlays.sh` (le patch tool lui-même) et
+`patches.lock.json` (sha256 des fichiers touchés, vérifiables par
+`patch_guard.py --tree <arbre-vierge>`; à câbler dans le CI de la même
+manière que kernel-patches si besoin).
+
+### État des surfaces
+
+* pve-manager S5 (Cluster.pm), S6 (Nodes.pm), S7 (modules Bootc +
+  wrapper `pvect-bootc`), S8 (pvestatd `update_bootc_status` finalisé —
+  RRD pve2-vm statut+nom seulement, pas de compteurs; vzdump skip bootc) :
+  **livrés** (`.patch` + fichiers nouveaux). Ancrages régénérés contre
+  l'arbre trixie `pve-manager 9.2.9` (download.proxmox
+  pve-no-subscription) — c'est le tree exact que `apt-get download`
+  résout dans le builder.
+* S9/S10 : **PENDING** — les stubs S9/S10/S10-check de l'ancien .sh
+  n'ont JAMAIS eu de corps (aucun câblage JS); quand implémenté, le
+  contenu de `bootc-classes.js` devra être porté DANS le hunk
+  `pvemanagerlib.js` (appended), pas comme fichier séparé.
+* pve-cluster S1-S4 : **PENDING** (paquet binaire C; quand implémenté,
+  entry dédiée; le stub invéré a été supprimé).
+* qemu-server : les 7 patchs VM-defaults (ovmf/cpu/firewall/writethrough/
+  agent/efidisk/q35) portés verbatim en hunks.
+* `libpve-storage-perl` : 2 hunks ZFS, suffix +dcve1 conservé.
+
+Débats: les patchs ont été VALIDÉS en appliquant réellement
+apply_overlays.sh sur les arbres vierges `dpkg-deb -R` téléchargés
+(pve-manager/qemu-server/libpve-storage-perl 9.2.9/9.1.9 + libtemplate-perl
+2.27-1+b8), avec perl -c (stubs PVE) / `node --check` et patch_guard.
+
 * Deployment on `iartistique` (debug host): snapshot first, apt-mark hold,
   sha256 before/after in `/var/lib/dc-bootc-test/`, restart
   `pve-cluster` (pmxcfs!) + `pvedaemon` + `pveproxy`. Prod transition only
   after full validation and re-GO from Gabriel.
 
-## Skeletons on disk (this batch, NOT wired into packages.yml)
+## Skeletons on disk → IMPLEMENTED
 
-The variant A surfaces live as inline `build:` entries in `packages.yml` (libtemplate-perl model — no side script, no patch dir).
-
-Both exit with **"variant A not validated yet — refusing to patch"** unless
-`DC_VARIANT_A_GO=1` is exported. Their per-surface `patch_s<N>()` functions
-contain the anchors and the target edits as documented stubs; wiring
-`packages.yml` + filling the stubs is the implementation step, executed only
-after Gabriel's GO on this file.
+The variant A pve-manager/qemu-server surfaces live as the overlay trees and
+git-format patches under `workflows/bootc-debs-builder/` (see
+Repack mechanics above); the gate script (`DC_VARIANT_A_GO`) is gone — the
+surfaces are built unconditionally now, guarded by patch-tool drift instead.
 
 ## Validation tests per surface
 

@@ -17,7 +17,6 @@ use PVE::Cluster qw(cfs_read_file get_vmlist);
 # Read and parse a bootc guest conf (key: value lines, '#' comments).
 sub load_config {
     my ($vmid, $node) = @_;
-
     my $vmlist = get_vmlist() // {};
     my $d = $vmlist->{ids}->{$vmid};
     $node //= $d->{node} if defined($d);
@@ -50,6 +49,11 @@ sub conf_status {
 
     return $conf->{status} // 'stopped';
 }
+
+# get_filtered_vmlist() (API2/Nodes) calls $class->is_template() on every
+# conf; bootc guests are never templates (templates live on the ostree
+# storage), so it is always 0 - same contract as PVE::LXC::Config.
+sub is_template { 0 }
 
 sub guest_status {
     my ($vmid, $node) = @_;

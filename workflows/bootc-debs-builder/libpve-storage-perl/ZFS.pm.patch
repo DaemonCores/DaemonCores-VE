@@ -1,0 +1,13 @@
+diff --git a/usr/share/perl5/PVE/API2/Disks/ZFS.pm b/usr/share/perl5/PVE/API2/Disks/ZFS.pm
+index 7dae404..37828c0 100644
+--- a/usr/share/perl5/PVE/API2/Disks/ZFS.pm
++++ b/usr/share/perl5/PVE/API2/Disks/ZFS.pm
+@@ -484,7 +484,7 @@ __PACKAGE__->register_method({
+             # create zpool with desired raidlevel
+             my $ashift = $param->{ashift} // 12;
+ 
+-            my $cmd = [$ZPOOL, 'create', '-o', "ashift=$ashift", $name];
++            my $cmd = [$ZPOOL, 'create', '-o', "ashift=$ashift", '-m', "/mnt/$name", $name];
+ 
+             if ($raidlevel eq 'raid10') {
+                 for (my $i = 0; $i < @$devs; $i += 2) {

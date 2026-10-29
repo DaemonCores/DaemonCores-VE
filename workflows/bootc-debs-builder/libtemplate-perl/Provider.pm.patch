@@ -1,0 +1,13 @@
+diff --git a/usr/lib/x86_64-linux-gnu/perl5/5.40/Template/Provider.pm b/usr/lib/x86_64-linux-gnu/perl5/5.40/Template/Provider.pm
+index 6ecb245..417bf92 100644
+--- a/usr/lib/x86_64-linux-gnu/perl5/5.40/Template/Provider.pm
++++ b/usr/lib/x86_64-linux-gnu/perl5/5.40/Template/Provider.pm
+@@ -936,7 +936,7 @@ sub _compiled_is_current {
+ sub _template_modified {
+     my $self = shift;
+     my $template = shift || return;
+-    return (stat( $template ))[9];
++    my @arr = stat($template); return (@arr) ? ($arr[9] || 1) : undef;
+ }
+ 
+ #------------------------------------------------------------------------

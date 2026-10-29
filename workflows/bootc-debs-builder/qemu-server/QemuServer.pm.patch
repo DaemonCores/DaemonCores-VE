@@ -1,0 +1,13 @@
+diff --git a/usr/share/perl5/PVE/QemuServer.pm b/usr/share/perl5/PVE/QemuServer.pm
+index 759f7db..8f1e8b8 100644
+--- a/usr/share/perl5/PVE/QemuServer.pm
++++ b/usr/share/perl5/PVE/QemuServer.pm
+@@ -661,7 +661,7 @@ EODESCR
+         type => 'string',
+         enum => [qw(seabios ovmf)],
+         description => "Select BIOS implementation.",
+-        default => 'seabios',
++        default => 'ovmf',
+     },
+     vmgenid => {
+         type => 'string',

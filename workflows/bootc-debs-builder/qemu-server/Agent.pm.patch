@@ -1,0 +1,13 @@
+diff --git a/usr/share/perl5/PVE/QemuServer/Agent.pm b/usr/share/perl5/PVE/QemuServer/Agent.pm
+index be6df44..20ffbc9 100644
+--- a/usr/share/perl5/PVE/QemuServer/Agent.pm
++++ b/usr/share/perl5/PVE/QemuServer/Agent.pm
+@@ -25,7 +25,7 @@ our $agent_fmt = {
+         description =>
+             "Enable/disable communication with a QEMU Guest Agent (QGA) running in the VM.",
+         type => 'boolean',
+-        default => 0,
++        default => 1,
+         default_key => 1,
+     },
+     fstrim_cloned_disks => {
