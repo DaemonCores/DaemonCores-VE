@@ -68,6 +68,7 @@ RUN chmod +x /usr/sbin/policy-rc.d \
         proxmox-firewall \
         pvect-ostree \
         compose2bootc \
+        dc-gpu-lxc \
     && apt remove -y \
         linux-image-amd64 \
         os-prober \
