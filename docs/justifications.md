@@ -24,6 +24,12 @@ OSTree deployments can expose `/usr` files with an epoch mtime. Template Toolkit
 
 The `libtemplate-perl` repack maps an existing zero mtime to a non-zero sentinel while preserving the missing-file case. The CI verifies the installed patch and requests the live web page, covering both implementation and outcome.
 
+## ZFS pool mountpoints under `/mnt`
+
+Upstream Proxmox creates API/GUI zpools with a root-level mountpoint (`/pool`). On a bootc image `/` is a read-only OSTree root, so pool creation and later volume paths would break. The `libpve-storage-perl` repack (which has carried `PVE::API2::Disks::ZFS` since Proxmox 9.0) inserts `-m /mnt/<pool>` at pool creation and points the zfspool path fallback at `/mnt`, so pools without an explicit mountpoint never resolve onto the root.
+
+The patch is guarded by anchor checks (guarded exit 3, like the other repacks) and carries a `+dcve` version suffix to distinguish it from the plain `+bootc` repacks. Hosts should hold or pin the package so an upstream upgrade cannot silently drop the behaviour. Pools created before the patch are unaffected.
+
 ## Subscription-status patch
 
 The repacked `pve-manager` changes the no-subscription response used by the web interface. This is a local product choice, not an Enterprise subscription and not a substitute for vendor support or repository access.

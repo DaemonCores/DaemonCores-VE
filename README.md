@@ -39,6 +39,7 @@ The base image supplies Debian 13, bootc, OSTree, composefs, bootupd, the bootlo
 | --- | --- |
 | `pve-manager` | Applies the project web-interface defaults and subscription-status patch. |
 | `qemu-server` | Applies backend VM defaults and EFI provisioning behaviour. |
+| `libpve-storage-perl` | Mounts API/GUI-created ZFS pools under `/mnt/<pool>` and keeps the zfspool path fallback off the read-only OSTree root. |
 | `libtemplate-perl` | Handles OSTree's zero file mtimes correctly so Proxmox templates remain discoverable. |
 | `ifupdown2` | Adds boot ordering, interface autoconfiguration, and hostname/IP reconciliation. |
 | `chrony` and `openipmi` | Add service guards and network ordering suitable for the image. |
