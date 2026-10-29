@@ -295,8 +295,24 @@ services = data.get("services") or {}
 if not services:
     sys.exit("no services found in compose file")
 
+# Resolve short image names for the nested podman: containers-registries.conf
+# ships without unqualified-search-registries in bootc images.
 os.makedirs(os.path.join(ctx, "systemd"), exist_ok=True)
 os.makedirs(os.path.join(ctx, "tmpfiles"), exist_ok=True)
+# Podman only reads /etc/containers/registries.conf — materialise the
+# image copy into the writable /etc at boot (which is seeded once and
+# persists across updates, so an image alone never reaches older CTs).
+with open(os.path.join(ctx, "tmpfiles", "registries.conf"), "w") as fh:
+    fh.write("# short-name resolution + signature policy for the nested podman\n"
+             "C+ /etc/containers/registries.conf 0644 - - - "
+             "/usr/share/containers/registries.conf\n"
+             "C+ /etc/containers/policy.json 0644 - - - "
+             "/usr/share/containers/policy.json\n")
+with open(os.path.join(ctx, "registries.conf"), "w") as fh:
+    fh.write("# unqualified search for the nested podman (bootc default: none)\n"
+             "unqualified-search-registries = ['docker.io', 'ghcr.io', 'quay.io']\n")
+with open(os.path.join(ctx, "policy.json"), "w") as fh:
+    fh.write('{"default": [{"type": "insecureAcceptAnything"}]}\n')
 
 network = f"{stack}"
 images, host_dirs, bound, relocations, summary = {}, set(), [], [], []
@@ -433,11 +449,19 @@ RUN apt update \\
 {RULE}
 COPY ./systemd/ /usr/share/containers/systemd/
 COPY ./tmpfiles/ /usr/lib/tmpfiles.d/
+COPY ./registries.conf /usr/share/containers/registries.conf
+COPY ./policy.json /usr/share/containers/policy.json
+# /usr/share (not /etc): the writable /etc layer is seeded once and persists
+# across updates — this file must follow the image.
 
 {RULE}
 # Logically bound images (pre-fetched by bootc on upgrade, before reboot)
 {RULE}
-RUN mkdir -p /usr/lib/bootc/bound-images.d{(' \\\n' + bound_ln) if bound else ''}
+# The base image ships /usr/lib/bootc/storage as a symlink into the host
+# sysroot, which is dangling inside an LXC; make it a real directory so the
+# nested podman additionalimagestore (GlobalArgs) mounts without status=125.
+RUN rm -f /usr/lib/bootc/storage \
+    && mkdir -p /usr/lib/bootc/storage /usr/lib/bootc/bound-images.d{(' \\\n' + bound_ln) if bound else ''}
 
 {RULE}
 # Lint (mirrors the CI smoke test)
