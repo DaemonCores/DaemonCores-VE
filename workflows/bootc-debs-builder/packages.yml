@@ -40,42 +40,35 @@ packages:
 - name: fanctl
   sources:
   - fanctl
-  env:
-    FANCTL_VER: 1.2.1
+  env: { FANCTL_VER: 1.2.1 }
   build: "SAVE_PWD=$(pwd)\n\nmkdir -p /output/fanctl\ncp -r \"${SAVE_PWD}\"/workflows/bootc-debs-builder/fanctl/* /output/fanctl/\n\nchmod 0755 /output/fanctl/usr/sbin/fanctl\nchmod 0755 /output/fanctl/DEBIAN/postinst\n\nsed -i \\\n  -e \"s|{{ VER }}|${FANCTL_VER}|g\" \\\n  -e \"s|, {{ DEPS }}||g\" \\\n  /output/fanctl/DEBIAN/control\n\n# Content check: template expanded + scripts present/executable/valid.\no=/output/fanctl\n! grep -q '{{' \"${o}/DEBIAN/control\" \\\n  || { echo \"ERROR: fanctl control has unexpanded template\" >&2; exit 1; }\nfor f in \"${o}/usr/sbin/fanctl\" \"${o}/DEBIAN/postinst\"; do\n  test -x \"${f}\" \\\n    || { echo \"ERROR: fanctl ${f} missing/not exec\" >&2; exit 1; }\n  if head -1 \"${f}\" | grep -qE '^#!.*sh'; then\n    bash -n \"${f}\" \\\n      || { echo \"ERROR: fanctl ${f} shell syntax\" >&2; exit 1; }\n  fi\ndone\n\ndpkg-deb --build /output/fanctl \\\n  /debs/fanctl_${FANCTL_VER}_all.deb\n"
 - name: powerctl
   sources:
   - powerctl
-  env:
-    POWERCTL_VER: 1.1.0
+  env: { POWERCTL_VER: 1.1.0 }
   build: "SAVE_PWD=$(pwd)\n\nmkdir -p /output/powerctl\ncp -r \"${SAVE_PWD}\"/workflows/bootc-debs-builder/powerctl/* /output/powerctl/\n\nchmod 0755 /output/powerctl/usr/sbin/powerctl\nchmod 0755 /output/powerctl/DEBIAN/postinst\n\nsed -i \\\n  -e \"s|{{ VER }}|${POWERCTL_VER}|g\" \\\n  -e \"s|, {{ DEPS }}||g\" \\\n  /output/powerctl/DEBIAN/control\n\n# Content check: template expanded + scripts present/executable/valid.\no=/output/powerctl\n! grep -q '{{' \"${o}/DEBIAN/control\" \\\n  || { echo \"ERROR: powerctl control has unexpanded template\" >&2; exit 1; }\nfor f in \"${o}/usr/sbin/powerctl\" \"${o}/DEBIAN/postinst\"; do\n  test -x \"${f}\" \\\n    || { echo \"ERROR: powerctl ${f} missing/not exec\" >&2; exit 1; }\n  if head -1 \"${f}\" | grep -qE '^#!.*sh'; then\n    bash -n \"${f}\" \\\n      || { echo \"ERROR: powerctl ${f} shell syntax\" >&2; exit 1; }\n  fi\ndone\n\ndpkg-deb --build /output/powerctl \\\n  /debs/powerctl_${POWERCTL_VER}_all.deb\n"
 - name: dc-firewall-seed
   sources:
   - dc-firewall-seed
-  env:
-    DC_FIREWALL_SEED_VER: 1.0.0
+  env: { DC_FIREWALL_SEED_VER: 1.0.0 }
   build: "SAVE_PWD=$(pwd)\n\nmkdir -p /output/dc-firewall-seed\ncp -r \"${SAVE_PWD}\"/workflows/bootc-debs-builder/dc-firewall-seed/* /output/dc-firewall-seed/\n\nchmod 0755 /output/dc-firewall-seed/usr/sbin/dc-firewall-seed\nchmod 0755 /output/dc-firewall-seed/DEBIAN/postinst\n\nsed -i \\\n  -e \"s|{{ VER }}|${DC_FIREWALL_SEED_VER}|g\" \\\n  -e \"s|, {{ DEPS }}||g\" \\\n  /output/dc-firewall-seed/DEBIAN/control\n\n# Content check: template expanded + scripts present/executable/valid.\no=/output/dc-firewall-seed\n! grep -q '{{' \"${o}/DEBIAN/control\" \\\n  || { echo \"ERROR: dc-firewall-seed control unexpanded template\" >&2; exit 1; }\nfor f in \"${o}/usr/sbin/dc-firewall-seed\" \"${o}/DEBIAN/postinst\"; do\n  test -x \"${f}\" \\\n    || { echo \"ERROR: dc-firewall-seed ${f} missing/not exec\" >&2; exit 1; }\n  if head -1 \"${f}\" | grep -qE '^#!.*sh'; then\n    bash -n \"${f}\" \\\n      || { echo \"ERROR: dc-firewall-seed ${f} shell syntax\" >&2; exit 1; }\n  fi\ndone\n\ndpkg-deb --build /output/dc-firewall-seed \\\n  /debs/dc-firewall-seed_${DC_FIREWALL_SEED_VER}_all.deb\n"
 - name: dc-config-zfs
   sources:
   - dc-config-zfs
-  env:
-    DC_CONFIG_ZFS_VER: 1.0.0
+  env: { DC_CONFIG_ZFS_VER: 1.0.0 }
   build: "SAVE_PWD=$(pwd)\n\nmkdir -p /output/dc-config-zfs\ncp -r \"${SAVE_PWD}\"/workflows/bootc-debs-builder/dc-config-zfs/* /output/dc-config-zfs/\n\nchmod 0755 /output/dc-config-zfs/usr/sbin/dc-config-zfs\nchmod 0755 /output/dc-config-zfs/DEBIAN/postinst\n\nsed -i \\\n  -e \"s|{{ VER }}|${DC_CONFIG_ZFS_VER}|g\" \\\n  -e \"s|, {{ DEPS }}||g\" \\\n  /output/dc-config-zfs/DEBIAN/control\n\n# Content check: template expanded + scripts present/executable/valid.\no=/output/dc-config-zfs\n! grep -q '{{' \"${o}/DEBIAN/control\" \\\n  || { echo \"ERROR: dc-config-zfs control unexpanded template\" >&2; exit 1; }\nfor f in \"${o}/usr/sbin/dc-config-zfs\" \"${o}/DEBIAN/postinst\"; do\n  test -x \"${f}\" \\\n    || { echo \"ERROR: dc-config-zfs ${f} missing/not exec\" >&2; exit 1; }\n  if head -1 \"${f}\" | grep -qE '^#!.*sh'; then\n    bash -n \"${f}\" \\\n      || { echo \"ERROR: dc-config-zfs ${f} shell syntax\" >&2; exit 1; }\n  fi\ndone\n\ndpkg-deb --build /output/dc-config-zfs \\\n  /debs/dc-config-zfs_${DC_CONFIG_ZFS_VER}_all.deb\n"
 - name: dc-zramctl
   sources:
   - dc-zramctl
-  env:
-    DC_ZRAMCTL_VER: 1.0.0
+  env: { DC_ZRAMCTL_VER: 1.0.0 }
   build: "SAVE_PWD=$(pwd)\n\nmkdir -p /output/dc-zramctl\ncp -r \"${SAVE_PWD}\"/workflows/bootc-debs-builder/dc-zramctl/* /output/dc-zramctl/\n\nchmod 0755 /output/dc-zramctl/usr/sbin/dc-zramctl\nchmod 0755 /output/dc-zramctl/usr/lib/dc-zramctl/calibrate\nchmod 0755 /output/dc-zramctl/DEBIAN/postinst\n\nsed -i \\\n  -e \"s|{{ VER }}|${DC_ZRAMCTL_VER}|g\" \\\n  -e \"s|, {{ DEPS }}||g\" \\\n  /output/dc-zramctl/DEBIAN/control\n\n# Content check: template expanded + scripts present/executable/valid.\no=/output/dc-zramctl\n! grep -q '{{' \"${o}/DEBIAN/control\" \\\n  || { echo \"ERROR: dc-zramctl control unexpanded template\" >&2; exit 1; }\nfor f in \"${o}/usr/sbin/dc-zramctl\" \\\n  \"${o}/usr/lib/dc-zramctl/calibrate\" \"${o}/DEBIAN/postinst\"; do\n  test -x \"${f}\" \\\n    || { echo \"ERROR: dc-zramctl ${f} missing/not exec\" >&2; exit 1; }\n  if head -1 \"${f}\" | grep -qE '^#!.*sh'; then\n    bash -n \"${f}\" \\\n      || { echo \"ERROR: dc-zramctl ${f} shell syntax\" >&2; exit 1; }\n  fi\ndone\n\ndpkg-deb --build /output/dc-zramctl \\\n  /debs/dc-zramctl_${DC_ZRAMCTL_VER}_all.deb\n"
 - name: pvect-ostree
   sources:
   - pvect-ostree
-  env:
-    PVECT_OSTREE_VER: 1.0.0
+  env: { PVECT_OSTREE_VER: 1.0.0 }
   build: "SAVE_PWD=$(pwd)\n\nmkdir -p /output/pvect-ostree\ncp -r \"${SAVE_PWD}\"/workflows/bootc-debs-builder/pvect-ostree/* /output/pvect-ostree/\n\nchmod 0755 /output/pvect-ostree/usr/sbin/pvect-ostree\nchmod 0755 /output/pvect-ostree/DEBIAN/postinst\n\nsed -i \\\n  -e \"s|{{ VER }}|${PVECT_OSTREE_VER}|g\" \\\n  -e \"s|, {{ DEPS }}||g\" \\\n  /output/pvect-ostree/DEBIAN/control\n\n# Content check: template expanded + scripts present/executable/valid.\no=/output/pvect-ostree\n! grep -q '{{' \"${o}/DEBIAN/control\" \\\n  || { echo \"ERROR: pvect-ostree control unexpanded template\" >&2; exit 1; }\nfor f in \"${o}/usr/sbin/pvect-ostree\" \"${o}/DEBIAN/postinst\"; do\n  test -x \"${f}\" \\\n    || { echo \"ERROR: pvect-ostree ${f} missing/not exec\" >&2; exit 1; }\n  if head -1 \"${f}\" | grep -qE '^#!.*sh'; then\n    bash -n \"${f}\" \\\n      || { echo \"ERROR: pvect-ostree ${f} shell syntax\" >&2; exit 1; }\n  fi\ndone\n\ndpkg-deb --build /output/pvect-ostree \\\n  /debs/pvect-ostree_${PVECT_OSTREE_VER}_all.deb\n"
 - name: compose2bootc
   sources:
   - compose2bootc
-  env:
-    COMPOSE2BOOTC_VER: 0.1.0
+  env: { COMPOSE2BOOTC_VER: 0.1.0 }
   build: "SAVE_PWD=$(pwd)\n\nmkdir -p /output/compose2bootc\ncp -r \"${SAVE_PWD}\"/workflows/bootc-debs-builder/compose2bootc/* /output/compose2bootc/\n\nchmod 0755 /output/compose2bootc/usr/sbin/compose2bootc\nchmod 0755 /output/compose2bootc/DEBIAN/postinst\n\nsed -i \\\n  -e \"s|{{ VER }}|${COMPOSE2BOOTC_VER}|g\" \\\n  -e \"s|, {{ DEPS }}||g\" \\\n  /output/compose2bootc/DEBIAN/control\n\n# Content check: template expanded + scripts present/executable/valid.\no=/output/compose2bootc\n! grep -q '{{' \"${o}/DEBIAN/control\" \\\n  || { echo \"ERROR: compose2bootc control unexpanded template\" >&2; exit 1; }\nfor f in \"${o}/usr/sbin/compose2bootc\" \"${o}/DEBIAN/postinst\"; do\n  test -x \"${f}\" \\\n    || { echo \"ERROR: compose2bootc ${f} missing/not exec\" >&2; exit 1; }\n  if head -1 \"${f}\" | grep -qE '^#!.*sh'; then\n    bash -n \"${f}\" \\\n      || { echo \"ERROR: compose2bootc ${f} shell syntax\" >&2; exit 1; }\n  fi\ndone\n\ndpkg-deb --build /output/compose2bootc \\\n  /debs/compose2bootc_${COMPOSE2BOOTC_VER}_all.deb\n"
