@@ -1,0 +1,8 @@
+{
+  "usr/share/perl5/PVE/API2/Cluster.pm": "1296999437390c82a89e56418c2e39fd3579ef5fd35bd6d7307e4a5d7033610a",
+  "usr/share/perl5/PVE/API2/Nodes.pm": "df97e542b4494513ab50dc23b8a87fb1ba3f0a749b5f4cbfb1f3565e32791fc6",
+  "usr/share/perl5/PVE/API2/Subscription.pm": "37afc36aea403f2868bbb7cfc26e95532cf871d6f058e7f554f3f62c7412ddb6",
+  "usr/share/perl5/PVE/Service/pvestatd.pm": "cbaf6bdf59103c03f695a03f9f902b0d75797de860a01aa560d66692778a86fa",
+  "usr/share/perl5/PVE/VZDump.pm": "9a5706e5fcb31adfc1e7825686203fae16afd1fe197ef340d4077c52ef68be2a",
+  "usr/share/pve-manager/js/pvemanagerlib.js": "ca6cc7169d950af4cbd7815a3ffd6b93e0cd3eba78f5ffc2b48fa727547889f5"
+}

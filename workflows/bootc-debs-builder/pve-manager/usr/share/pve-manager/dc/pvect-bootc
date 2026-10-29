@@ -1,0 +1,237 @@
+#!/bin/bash
+#
+# pvect-bootc - bootc guest lifecycle for the variant A guest type
+#   (docs/compose-variant-a-plan.md, surface S7/S8). Thin delegate shell:
+#   the image/template machinery stays in pvect-ostree and the seed payload
+#   in the OstreeComposefsPlugin; this wrapper only owns the guest-facing
+#   verbs and the per-guest conf (nodes/<node>/bootc/<vmid>.conf on the
+#   cluster fs, status line carried round-trip).
+#
+#   pvect-bootc create  <vmid> <archive> [--name N] [--description D] [--onboot 0|1]
+#   pvect-bootc start   <vmid>
+#   pvect-bootc stop    <vmid>      # hard
+#   pvect-bootc shutdown <vmid>     # graceful
+#   pvect-bootc status  <vmid>
+#   pvect-bootc destroy <vmid>
+#   pvect-bootc refresh <vmid>
+set -uo pipefail
+
+PROG=$(basename "$0")
+VOSTREE="pvect-ostree"
+
+ETC=$'/etc/pve'
+SYSROOT=/var/lib/pvect-ostree/sysroot
+
+info() { echo "$PROG: $*" >&2; }
+warn() { command -v logger >/dev/null 2>&1 && logger -t "$PROG" "$*" 2>/dev/null; echo "$PROG: warning: $*" >&2; }
+die() {
+  warn "$*"
+  exit 1
+}
+
+need_root() { [[ $(id -u) -eq 0 ]] || die "must run as root"; }
+
+nodename() { cat /etc/hostname 2>/dev/null || hostname; }
+
+conf_path() { echo "$ETC/nodes/$(nodename)/bootc/$1.conf"; }
+
+#######################################
+# Rewrite the per-guest conf with an updated key, keeping the other lines.
+# Arguments:
+#   $1 - vmid; $2 - key; $3 - new value; $4 - keep absent when empty (0/1)
+#######################################
+conf_set() {
+  local vmid=$1 key=$2 value=$3 f
+  f=$(conf_path "$vmid")
+  [[ -f $f ]] || die "no bootc conf for guest $vmid at $f"
+  if [[ -n $value ]]; then
+    if grep -qE "^${key}:" "$f" 2>/dev/null; then
+      sed -i -E "s|^(${key}):.*$|\1: $value|" "$f"
+    else
+      printf '%s: %s\n' "$key" "$value" >>"$f"
+    fi
+  else
+    sed -i -E "/^${key}:.*$/d" "$f"
+  fi
+}
+
+conf_get() {
+  local f
+  f=$(conf_path "$1")
+  [[ -r $f ]] || return 0
+  awk -F': ' -v k="$2" '$1 == k {print $2; exit}' "$f" 2>/dev/null
+}
+
+is_mounted() {
+  local sub
+  sub=$("$VOSTREE" subvol-path "$1" 2>/dev/null) || return 1
+  # composefs view check: the .ostree.cfs marker lives inside the mounted view
+  [[ -f "$sub/.ostree.cfs" && -d "$sub/var/lib" ]] 2>/dev/null
+}
+
+guest_exists() {
+  [[ -f $(conf_path "$1") ]]
+}
+
+require_guest() { guest_exists "$1" || die "guest $1 is not managed by pvect-bootc"; }
+
+#######################################
+# Create a bootc guest from a published seed template.
+# Allocates the rootdir volume on the plugin storage, extracts the seed,
+# adopts and mounts it; then opens the guest's cluster conf.
+# Globals:
+#   SYSROOT
+# Arguments:
+#   $1 - vmid; $2 - archive (ostree:vztmpl/<stack>.tar.gz); $@ - options
+#######################################
+create_guest() {
+  local vmid=$1 archive=$2
+  need_root
+  guest_exists "$vmid" && die "guest $vmid already exists"
+
+  local storeid stack file
+  storeid=${archive%%:*}
+  [[ -n $storeid && $archive == *':vztmpl/'* ]] || die "invalid archive '$archive' (expected ostree:vztmpl/<stack>.tar.gz)"
+  stack=${archive#*:vztmpl/}; stack=${stack%.tar.gz}
+  file="$SYSROOT/vztmpl/$stack.tar.gz"
+  [[ -r $file ]] || die "seed template $archive not found"
+
+  # allocate the rootdir volume like a normal dir-storage guest would
+  local volname subvol
+  volname="subvol-${vmid}-disk-0.subvol"
+  subvol=$(pvesm path "$storeid:$volname" 2>/dev/null)
+  if [[ ! -d ${subvol:-/nonexistent} ]]; then
+    pvesm alloc "$storeid" "$vmid" "$volname" 4294967296 >/dev/null \
+      || die "volume allocation failed on $storeid"
+    subvol=$(pvesm path "$storeid:$volname") || die "cannot resolve allocated volume"
+  fi
+
+  # seed content (the payload is hidden/wiped at first activation by the
+  # existing machinery)
+  tar -xzf "$file" -C "$subvol" || die "seed extraction failed"
+  local payload="$subvol/pvect-ostree/payload.env"
+  [[ -r $payload ]] || die "seed payload missing after extraction"
+
+  local compose=""
+  [[ -r $payload ]] && compose=$(grep -m1 '^COMPOSE=' "$payload" | cut -d= -f2-)
+
+  # register with the ostree machinery (stateroot ct<vmid>)
+  "$VOSTREE" adopt "$vmid" || die "pvect-ostree adopt failed"
+
+  # open the guest conf on the cluster fs
+  local f
+  f=$(conf_path "$vmid")
+  {
+    printf 'name: %s\n' "${NAME:-bootc-st$vmid}"
+    [[ -n $DESC ]] && printf 'description: %s\n' "$DESC"
+    printf 'onboot: %s\n' "${ONBOOT:-0}"
+    printf 'archive: %s\n' "$archive"
+    printf 'volname: %s\n' "$storeid:$volname"
+    printf 'compose: %s\n' "$compose"
+    printf 'status: stopped\n'
+  } >"$f"
+  [[ -f $f ]] || die "conf creation failed"
+  info "bootc guest $vmid created (template $stack); start with pvect-bootc start $vmid"
+}
+
+start_guest() {
+  local vmid=$1
+  require_guest "$vmid"
+  is_mounted "$vmid" && die "guest $vmid already mounted"
+  "$VOSTREE" mount "$vmid" || die "rootfs mount failed for $vmid"
+  conf_set "$vmid" status running
+  info "bootc guest $vmid started (composefs view mounted)"
+}
+
+stop_common() {
+  local vmid=$1
+  require_guest "$vmid"
+  if is_mounted "$vmid"; then
+    "$VOSTREE" umount "$vmid" || die "rootfs unmount failed for $vmid"
+  fi
+  conf_set "$vmid" status stopped
+}
+
+shutdown_guest() {
+  local vmid=$1 timeout=${2:-30}
+  # v1: the seed payload serves out of the mounted view; a graceful stop is
+  # the same unmount (no in-guest init to signal yet - documented in the plan).
+  start=$(date +%s)
+  stop_common "$vmid"
+  info "bootc guest $vmid shut down ($(($(date +%s) - start))s)"
+}
+
+stop_guest() { stop_common "$1"; info "bootc guest $1 stopped"; }
+
+destroy_guest() {
+  local vmid=$1
+  require_guest "$vmid"
+  stop_common "$vmid" || true
+  local volname
+  volname=$(conf_get "$vmid" volname)
+  if [[ -n $volname ]]; then
+    pvesm free "$volname" 2>/dev/null \
+      || warn "volume $volname not freed (delete it by hand if wanted)"
+  fi
+  rm -f "$(conf_path "$vmid")"
+  "$VOSTREE" destroy "$vmid" 2>/dev/null || true
+  info "bootc guest $vmid destroyed (deployment retained for rollback)"
+}
+
+status_guest() {
+  local vmid=$1
+  require_guest "$vmid"
+  local status running
+  status=$(conf_get "$vmid" status); status=${status:-stopped}
+  is_mounted "$vmid" && running=running || running=stopped
+  echo "status: $status"
+  echo "live-mount: $running"
+}
+
+refresh_guest() {
+  local vmid=$1
+  require_guest "$vmid"
+  "$VOSTREE" refresh "$vmid" || die "refresh failed for $vmid"
+  info "bootc guest $vmid refreshed (previous deployment kept for rollback)"
+}
+
+usage() { sed -n '3,13p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+NAME=""; DESC=""; ONBOOT=""
+main() {
+  local cmd=${1:-}; [[ -n $cmd ]] || usage 1
+  [[ $cmd == -h || $cmd == --help || $cmd == help ]] && usage 0
+  shift
+  local vmid=${1:-}
+  [[ $vmid =~ ^[0-9]+$ ]] || die "invalid vmid"
+  case "$cmd" in
+    create)
+      shift; local archive=$1; shift || true
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --name) NAME=$2; shift 2 ;;
+          --description) DESC=$2; shift 2 ;;
+          --onboot) ONBOOT=$2; shift 2 ;;
+          *) die "unknown option: $1" ;;
+        esac
+      done
+      create_guest "$vmid" "$archive"
+      ;;
+    start) start_guest "$vmid" ;;
+    stop) stop_guest "$vmid" ;;
+    shutdown) shutdown_guest "$vmid" "${3:-${SHUTDOWN_TIMEOUT:-30}}" ;;
+    status) status_guest "$vmid" ;;
+    destroy) destroy_guest "$vmid" ;;
+    refresh) refresh_guest "$vmid" ;;
+    rollback)
+      require_guest "$vmid"
+      "$VOSTREE" rollback "$vmid" || die "rollback failed for $vmid"
+      conf_set "$vmid" status stopped
+      info "bootc guest $vmid rolled back to the previous deployment"
+      ;;
+    -h | --help | help) usage 0 ;;
+    *) die "unknown command '$cmd' (try: $PROG --help)" ;;
+  esac
+}
+
+main "$@"

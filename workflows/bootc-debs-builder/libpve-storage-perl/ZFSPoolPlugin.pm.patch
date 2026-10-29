@@ -1,0 +1,13 @@
+diff --git a/usr/share/perl5/PVE/Storage/ZFSPoolPlugin.pm b/usr/share/perl5/PVE/Storage/ZFSPoolPlugin.pm
+index 55f0bbc..4cfe57f 100644
+--- a/usr/share/perl5/PVE/Storage/ZFSPoolPlugin.pm
++++ b/usr/share/perl5/PVE/Storage/ZFSPoolPlugin.pm
+@@ -182,7 +182,7 @@ sub path {
+     my ($vtype, $name, $vmid) = $class->parse_volname($volname);
+ 
+     my $path = '';
+-    my $mountpoint = $scfg->{mountpoint} // "/$scfg->{pool}";
++    my $mountpoint = $scfg->{mountpoint} // "/mnt/$scfg->{pool}";
+ 
+     if ($vtype eq "images") {
+         if ($name =~ m/^subvol-/ || $name =~ m/^basevol-/) {

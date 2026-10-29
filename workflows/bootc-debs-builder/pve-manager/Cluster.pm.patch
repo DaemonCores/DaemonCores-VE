@@ -1,0 +1,32 @@
+diff --git a/usr/share/perl5/PVE/API2/Cluster.pm b/usr/share/perl5/PVE/API2/Cluster.pm
+index 4e5efbf..3b9be77 100644
+--- a/usr/share/perl5/PVE/API2/Cluster.pm
++++ b/usr/share/perl5/PVE/API2/Cluster.pm
+@@ -6,6 +6,7 @@ use warnings;
+ use JSON;
+ 
+ use PVE::API2Tools;
++use PVE::API2::Bootc;
+ use PVE::Cluster qw(cfs_register_file cfs_lock_file cfs_read_file cfs_write_file);
+ use PVE::DataCenterConfig;
+ use PVE::Exception qw(raise_param_exc);
+@@ -289,7 +290,7 @@ __PACKAGE__->register_method({
+                     description => "Resource type.",
+                     type => 'string',
+                     enum =>
+-                        ['node', 'storage', 'pool', 'qemu', 'lxc', 'openvz', 'sdn', 'network'],
++                        ['node', 'storage', 'pool', 'qemu', 'lxc', 'bootc', 'openvz', 'sdn', 'network'],
+                 },
+                 status => {
+                     description => "Resource type dependent status.",
+@@ -559,6 +560,10 @@ __PACKAGE__->register_method({
+                 my $data = $idlist->{$vmid};
+                 my $entry = PVE::API2Tools::extract_vm_stats($vmid, $data, $rrd);
+ 
++                if ($data->{type} eq 'bootc') {
++                    $entry->{status} = PVE::API2::Bootc::guest_status($vmid, $data->{node});
++                }
++
+                 if (my $pool = $usercfg->{vms}->{$vmid}) {
+                     $entry->{pool} = $pool;
+                     if (my $pe = $pooldata->{$pool}) {

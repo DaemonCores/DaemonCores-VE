@@ -1,0 +1,13 @@
+diff --git a/usr/share/perl5/PVE/QemuServer/CPUConfig.pm b/usr/share/perl5/PVE/QemuServer/CPUConfig.pm
+index 2bae55b..c2442fe 100644
+--- a/usr/share/perl5/PVE/QemuServer/CPUConfig.pm
++++ b/usr/share/perl5/PVE/QemuServer/CPUConfig.pm
+@@ -297,7 +297,7 @@ my $cpu_fmt = {
+             "Emulated CPU type. Can be default or custom name (custom model names must be prefixed with 'custom-').",
+         type => 'string',
+         format_description => 'string',
+-        default => 'kvm64',
++        default => 'x86-64-v2-AES',
+         default_key => 1,
+         optional => 1,
+     },

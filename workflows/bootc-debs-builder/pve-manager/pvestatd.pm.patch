@@ -1,0 +1,55 @@
+diff --git a/usr/share/perl5/PVE/Service/pvestatd.pm b/usr/share/perl5/PVE/Service/pvestatd.pm
+index 34f9da7..59c8838 100644
+--- a/usr/share/perl5/PVE/Service/pvestatd.pm
++++ b/usr/share/perl5/PVE/Service/pvestatd.pm
+@@ -618,6 +618,39 @@ sub rebalance_lxc_containers {
+     }
+ }
+ 
++# variant A: bootc guests carry their status in the conf file; feed the
++# /cluster/resources RRD graphs the same pve2-vm shape as lxc (v1: status +
++# name only, no live counters).
++sub update_bootc_status {
++    my ($status_cfg, $pull_txn) = @_;
++
++    my $ctime = time();
++    my $vmlist = PVE::Cluster::get_vmlist();
++    foreach my $vmid (sort { $a <=> $b } keys %{$vmlist->{ids} || {}}) {
++        my $d = $vmlist->{ids}->{$vmid};
++        next if $d->{type} ne 'bootc';
++        next if $d->{node} ne $nodename;
++        my $conf = eval { PVE::Bootc::load_config($vmid, $d->{node}) };
++        next if !defined($conf);
++        my $status = PVE::Bootc::conf_status($conf);
++        my $name = $conf->{name} // "bootc-$vmid";
++        # stopped-guest row shape (pve-vm-9.0: 22 cols, pve2.3-vm: 16 cols)
++        if ($rrd_dir_exists->("pve-vm-9.0")) {
++            my $data = $generate_rrd_string->([
++                0, $name, $status, "0", $ctime,
++                (undef) x 17,
++            ]);
++            PVE::Cluster::broadcast_rrd("pve-vm-9.0/$vmid", $data) if defined($data);
++        } else {
++            my $data = $generate_rrd_string->([
++                0, $name, $status, "0", $ctime,
++                (undef) x 11,
++            ]);
++            PVE::Cluster::broadcast_rrd("pve2.3-vm/$vmid", $data) if defined($data);
++        }
++    }
++}
++
+ sub update_lxc_status {
+     my ($status_cfg, $pull_txn) = @_;
+ 
+@@ -840,6 +873,10 @@ sub update_status {
+     $err = $@;
+     syslog('err', "lxc status update error: $err") if $err;
+ 
++    eval { update_bootc_status($status_cfg, $pull_txn); };
++    $err = $@;
++    syslog('err', "bootc status update error: $err") if $err;
++
+     eval { rebalance_lxc_containers(); };
+     $err = $@;
+     syslog('err', "lxc cpuset rebalance error: $err") if $err;

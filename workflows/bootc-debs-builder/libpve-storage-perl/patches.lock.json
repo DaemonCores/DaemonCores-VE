@@ -1,0 +1,4 @@
+{
+  "usr/share/perl5/PVE/API2/Disks/ZFS.pm": "a2d025d7ff4872a390d751849daed6fd4dc9caad624a9b60bebec33bb4fc89a1",
+  "usr/share/perl5/PVE/Storage/ZFSPoolPlugin.pm": "15d4f05cd71de1b8566b2e34a89724d1f5a2a5ae2296a61a3df15ad5a9659e79"
+}

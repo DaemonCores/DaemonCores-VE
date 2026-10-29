@@ -1,0 +1,12 @@
+diff --git a/usr/share/perl5/PVE/QemuServer/Drive.pm b/usr/share/perl5/PVE/QemuServer/Drive.pm
+index 17c46f3..6eb0c17 100644
+--- a/usr/share/perl5/PVE/QemuServer/Drive.pm
++++ b/usr/share/perl5/PVE/QemuServer/Drive.pm
+@@ -189,6 +189,7 @@ my %drivedesc_base = (
+         type => 'string',
+         enum => [qw(none writethrough writeback unsafe directsync)],
+         description => "The drive's cache mode",
++        default => 'writethrough',
+         optional => 1,
+     },
+     format => get_standard_option('pve-qm-image-format'),
