@@ -9,3 +9,5 @@ tmp/
 
 # Vector database artifacts (not part of the project)
 lancedb/
+.kronn/
+.mcp.json
