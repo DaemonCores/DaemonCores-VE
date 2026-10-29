@@ -74,6 +74,8 @@ The `libtemplate-perl` repack handles files whose mtime is zero in an OSTree dep
 
 The installer uses a Btrfs pool for system state and can preserve the `var` subvolume during a compatible reinstall. ZFS data disks are outside that installer-managed layout.
 
+The `libpve-storage-perl` repack mounts every zpool created through the Proxmox API or web interface under `/mnt/<pool>` and aligns the zfspool path fallback, because `/` is a read-only OSTree root and the upstream root-level default mountpoint (`/pool`) cannot be used on a bootc image. Existing externally created pools are unaffected: their `storage.cfg` entries already declare the effective mountpoint.
+
 ### Firewall
 
 `dc-firewall-seed` waits for pmxcfs, then copies the packaged cluster and node firewall templates into `/etc/pve`. The templates cannot be placed directly at that path in the image because `/etc/pve` becomes a FUSE mount.
