@@ -3,11 +3,19 @@
 Status: **IMPLEMENTED via the overlay model (Gabriel spec 2026-10-30)**,
 S5-S8 of the pve-manager surface + the qemu-server VM defaults + the
 libpve-storage-perl ZFS patches are shipped as `workflows/bootc-debs-builder`
-overlay trees / git-format patches in `packages.yml` (one generic build,
-drift = `patch --fuzz=0 --forward` refusing a hunk). S9/S10 (JS UI wiring,
-www bootc panels) remain **PENDING** — `bootc-classes.js` is parked under
-`workflows/bootc-debs-builder/s10-pending/` (NOT in the deb mirror: it would
-land at the deb root and is still unwired). `pve-cluster` (pmxcfs, binary C:
+overlay trees / git-format patches in `packages.yml` (one generic build, drift = `patch --fuzz=0
+--forward` refusing a hunk). S9/S10 (JS UI wiring, bootc panels) are
+**IMPLEMENTED as appended hunks of `pvemanagerlib.js.patch`** (S9: tree
+type defaults + ordering, always-grouped bootc section, `treeTypeToClass`
+routing, Workspace "Bootc Containers" button, node command-menu
+"Create Bootc"; S10: `PVE.bootc.Templates/Create/Editor/Edit/Status`
+appended to the bundle — never standalone files, the deb ships no www/
+tree). `s10-pending/www/bootc-classes.js` keeps the S10 payload source of
+truth for review; its content is byte-identical to what the patch appends.
+New in S7 plumbing to serve the UI: `pvect-bootc publish/templates/
+compose-read` verbs and `PVE::API2::Bootc` endpoints `compose/{stack}`
+(POST publish), reworked `templates` (TSV from the wrapper) and
+`template/{stack}/compose`. `pve-cluster` (pmxcfs, binary C:
 S1-S4) is **PENDING** — implemented later as its own inline/overlay entry;
 the invented stub lane was removed. British spelling, house comment style,
 
@@ -97,10 +105,11 @@ manière que kernel-patches si besoin).
   l'arbre trixie `pve-manager 9.2.9` (download.proxmox
   pve-no-subscription) — c'est le tree exact que `apt-get download`
   résout dans le builder.
-* S9/S10 : **PENDING** — les stubs S9/S10/S10-check de l'ancien .sh
-  n'ont JAMAIS eu de corps (aucun câblage JS); quand implémenté, le
-  contenu de `bootc-classes.js` devra être porté DANS le hunk
-  `pvemanagerlib.js` (appended), pas comme fichier séparé.
+* S9/S10 : **livrés** dans le hunk `pvemanagerlib.js.patch` (S9 câblage
+  tree/Workspace/menu + S10 classes `PVE.bootc.*` appended au bundle;
+  `s10-pending/www/bootc-classes.js` = source du payload, reportée dans
+  le hunk). Les stubs S9/S10/S10-check de l'ancien .sh n'ont JAMAIS eu de
+  corps (aucun câblage JS) — remplacés par les hunks ci-dessus.
 * pve-cluster S1-S4 : **PENDING** (paquet binaire C; quand implémenté,
   entry dédiée; le stub invéré a été supprimé).
 * qemu-server : les 7 patchs VM-defaults (ovmf/cpu/firewall/writethrough/
