@@ -1,5 +1,3 @@
-diff --git a/usr/share/pve-manager/js/pvemanagerlib.js b/usr/share/pve-manager/js/pvemanagerlib.js
-index a54d7f3..aa2b14d 100644
 --- a/usr/share/pve-manager/js/pvemanagerlib.js
 +++ b/usr/share/pve-manager/js/pvemanagerlib.js
 @@ -1618,7 +1618,7 @@ Ext.define('PVE.qemu.Architecture', {
@@ -20,7 +18,62 @@ index a54d7f3..aa2b14d 100644
                  return `${Proxmox.Utils.defaultText} (${defaultBios})`;
              } else if (value === 'seabios') {
                  return 'SeaBIOS';
-@@ -60893,7 +60893,7 @@ Ext.define('PVE.qemu.SystemInputPanel', {
+@@ -18064,6 +18064,10 @@ Ext.define('PVE.tree.ResourceTree', {
+                 iconCls: 'fa fa-cube',
+                 text: gettext('LXC Container'),
+             },
++            bootc: {
++                iconCls: 'fa fa-ship',
++                text: gettext('Bootc Container'),
++            },
+             template: {
+                 iconCls: 'fa fa-file-o',
+             },
+@@ -18124,6 +18128,8 @@ Ext.define('PVE.tree.ResourceTree', {
+                 return 0;
+             case 'qemu':
+                 return 1;
++            case 'bootc':
++                return 1.5;
+             case 'node':
+                 return 2;
+             case 'sdn':
+@@ -18144,9 +18150,13 @@ Ext.define('PVE.tree.ResourceTree', {
+             n2 = node2.data;
+ 
+         if (!n1.groupbyid === !n2.groupbyid) {
+-            let n1IsGuest = n1.type === 'qemu' || n1.type === 'lxc';
+-            let n2IsGuest = n2.type === 'qemu' || n2.type === 'lxc';
+-            if (me['group-guest-types'] || !n1IsGuest || !n2IsGuest) {
++            let n1IsGuest =
++                n1.type === 'qemu' || n1.type === 'lxc' || n1.type === 'bootc';
++            let n2IsGuest =
++                n2.type === 'qemu' || n2.type === 'lxc' || n2.type === 'bootc';
++            // bootc guests always stay grouped in their own tree section
++            if (me['group-guest-types'] || n1.type === 'bootc'
++                || n2.type === 'bootc' || !n1IsGuest || !n2IsGuest) {
+                 // first sort (group) by type
+                 let res = me.getTypeOrder(n1.type) - me.getTypeOrder(n2.type);
+                 if (res !== 0) {
+@@ -50104,6 +50114,17 @@ Ext.define('PVE.node.CmdMenu', {
+                 });
+             },
+         },
++        {
++            text: gettext('Create Bootc'),
++            itemId: 'createbootc',
++            iconCls: 'fa fa-ship',
++            handler: function () {
++                Ext.create('PVE.bootc.Create', {
++                    nodename: this.up('menu').nodename,
++                    autoShow: true,
++                }).show();
++            },
++        },
+         { xtype: 'menuseparator' },
+         {
+             text: gettext('Bulk Start'),
+@@ -60893,7 +60914,7 @@ Ext.define('PVE.qemu.SystemInputPanel', {
              xtype: 'proxmoxcheckbox',
              name: 'agent',
              uncheckedValue: 0,
@@ -29,3 +82,565 @@ index a54d7f3..aa2b14d 100644
              deleteDefaultValue: true,
              fieldLabel: gettext('Qemu Agent'),
          },
+@@ -74268,6 +74289,7 @@ Ext.define('PVE.StdWorkspace', {
+                             node: 'PVE.node.Config',
+                             qemu: 'PVE.qemu.Config',
+                             lxc: 'pveLXCConfig',
++                            bootc: 'PVE.bootc.Status',
+                             storage: 'PVE.storage.Browser',
+                             sdn: 'PVE.sdn.Browser',
+                             network: 'PVE.network.Browser',
+@@ -74325,11 +74347,24 @@ Ext.define('PVE.StdWorkspace', {
+             },
+         });
+ 
++        let createBootc = Ext.createWidget('button', {
++            pack: 'end',
++            margin: '3 5 0 0',
++            baseCls: 'x-btn',
++            iconCls: 'fa fa-ship',
++            text: gettext('Bootc Containers'),
++            disabled: !caps.vms['VM.Allocate'],
++            handler: function () {
++                Ext.create('PVE.bootc.Templates', { autoShow: false }).show();
++            },
++        });
++
+         appState.on('statechange', function (sp, key, value) {
+             if (key === 'GuiCap' && value) {
+                 caps = value;
+                 createVM.setDisabled(!caps.vms['VM.Allocate']);
+                 createCT.setDisabled(!caps.vms['VM.Allocate']);
++                createBootc.setDisabled(!caps.vms['VM.Allocate']);
+             } else if (key === '_stripBeta') {
+                 let betaLink = me.query('#betalink')?.[0];
+                 if (betaLink) {
+@@ -74402,6 +74437,7 @@ Ext.define('PVE.StdWorkspace', {
+                         },
+                         createVM,
+                         createCT,
++                        createBootc,
+                         {
+                             pack: 'end',
+                             margin: '0 5 0 0',
+@@ -74610,3 +74646,519 @@ Ext.define('PVE.StdWorkspace', {
+         });
+     },
+ });
++
++/*
++ * bootc-classes.js - variant A surfaces S10 of docs/compose-variant-a-plan.md.
++ * This payload is appended to www/manager6/pvemanagerlib.js through the
++ * pvemanagerlib.js.patch hunk (the deb ships no www/ tree; a standalone
++ * file at the deb root would be dead weight). S9 wiring lives in the same
++ * patch: Workspace button, node command menu entry, tree type defaults and
++ * ordering, and the treeTypeToClass mapping to PVE.bootc.Status.
++ * Bootc guests have their OWN section; the LXC tree rendering is untouched.
++ *
++ * Classes:
++ *   PVE.bootc.Templates - grid of published seed templates (stack, image,
++ *                         compose source) + Create from Compose + per-row
++ *                         Edit (compose re-publish) / Clone (new guest).
++ *   PVE.bootc.Create    - Portainer-style compose editor: YAML textarea ->
++ *                         publish (build, smoke test, seed template) ->
++ *                         guest form prefilled with the new archive.
++ *   PVE.bootc.Editor    - compose editor for a published stack (re-publish).
++ *   PVE.bootc.Edit      - open a guest's recorded YAML, compose-refresh,
++ *                         rollback to the previous deployment.
++ *   PVE.bootc.Status    - start/stop/shutdown/destroy against
++ *                         nodes/{node}/bootc/{vmid} (Status API).
++ */
++Ext.define('PVE.bootc.Templates', {
++    extend: 'Ext.panel.Panel',
++    alias: ['widget.pveBootcTemplates'],
++
++    layout: { type: 'vbox', align: 'stretch' },
++
++    initComponent: function () {
++        let me = this;
++
++        me.node = PVE.bootc.node(me);
++        me.store = Ext.create('Ext.data.Store', {
++            fields: ['archive', 'stack', 'imgref', 'ctime', 'compose'],
++            autoLoad: true,
++            proxy: {
++                type: 'proxmox',
++                url: `/nodes/${me.node}/bootc/templates`,
++                reader: { type: 'json', rootProperty: 'data' },
++            },
++        });
++
++        me.grid = Ext.create('Ext.grid.Panel', {
++            flex: 1,
++            store: me.store,
++            columns: [
++                {
++                    text: gettext('Stack'),
++                    dataIndex: 'stack',
++                    flex: 1,
++                    renderer: (v, meta, rec) => {
++                        meta.tdAttr = `data-qtip="${Ext.htmlEncode(rec.data.archive)}"`;
++                        return v;
++                    },
++                },
++                {
++                    text: gettext('Image'),
++                    dataIndex: 'imgref',
++                    flex: 1,
++                },
++                {
++                    text: gettext('Compose source'),
++                    dataIndex: 'compose',
++                    flex: 1,
++                },
++                {
++                    text: gettext('Built'),
++                    dataIndex: 'ctime',
++                    renderer: Proxmox.Utils.render_timestamp,
++                    width: 140,
++                },
++            ],
++            tbar: [
++                {
++                    text: gettext('Create from Compose'),
++                    iconCls: 'fa fa-ship',
++                    handler: () => Ext.create('PVE.bootc.Create').show(),
++                },
++                {
++                    text: gettext('Edit'),
++                    iconCls: 'fa fa-file-text-o',
++                    handler: (btn) => {
++                        let rec = btn.up('grid').getSelection()[0];
++                        if (!rec) return;
++                        Ext.create('PVE.bootc.Editor', { stack: rec.data.stack }).show();
++                    },
++                },
++                {
++                    text: gettext('Clone Template'),
++                    iconCls: 'fa fa-cubes',
++                    handler: (btn) => {
++                        let rec = btn.up('grid').getSelection()[0];
++                        if (!rec) return;
++                        Ext.create('PVE.bootc.Create', {
++                            guestMode: true,
++                            archive: rec.data.archive,
++                        }).show();
++                    },
++                },
++            ],
++        });
++
++        me.items = [me.grid];
++        me.callParent();
++    },
++});
++
++Ext.define('PVE.bootc.Create', {
++    extend: 'Ext.window.Window',
++    alias: ['widget.pveBootcCreate'],
++
++    modal: true,
++    width: 760,
++    layout: { type: 'vbox', align: 'stretch' },
++    bodyPadding: 5,
++
++    initComponent: function () {
++        let me = this;
++
++        me.node = PVE.bootc.node(me);
++
++        me.stackField = Ext.create('Ext.form.field.Text', {
++            fieldLabel: gettext('Stack name'),
++            name: 'stack',
++            allowBlank: false,
++            emptyText: gettext('derived from the compose file when left empty'),
++        });
++
++        me.yamlField = Ext.create('Ext.form.field.TextArea', {
++            fieldLabel: gettext('docker-compose.yml'),
++            height: 220,
++            name: 'compose',
++            flex: 1,
++        });
++
++        me.vmidField = Ext.create('Ext.form.field.Number', {
++            fieldLabel: gettext('VMID'),
++            name: 'vmid',
++            allowBlank: false,
++        });
++
++        me.archiveField = Ext.create('Ext.form.field.Text', {
++            fieldLabel: gettext('Seed template'),
++            name: 'archive',
++            allowBlank: false,
++            value: me.archive,
++            emptyText: gettext('ostree:vztmpl/<stack>.tar.gz'),
++        });
++
++        me.nameField = Ext.create('Ext.form.field.Text', {
++            fieldLabel: gettext('Name'),
++            name: 'name',
++            allowBlank: true,
++        });
++
++        me.onbootField = Ext.create('Ext.form.field.Checkbox', {
++            fieldLabel: gettext('Start at boot'),
++            name: 'onboot',
++            boxLabel: gettext('Start the guest when the node boots'),
++        });
++
++        me.items = [
++            me.stackField,
++            me.yamlField,
++            {
++                xtype: 'toolbar',
++                items: [
++                    {
++                        text: gettext('Build & Publish'),
++                        iconCls: 'fa fa-ship',
++                        handler: () => me.publish(),
++                    },
++                    {
++                        text: gettext('Create Guest'),
++                        iconCls: 'fa fa-cubes',
++                        handler: () => me.createGuest(),
++                    },
++                ],
++            },
++            {
++                xtype: 'fieldcontainer',
++                layout: 'hbox',
++                margin: '5 0 0 0',
++                defaults: { flex: 1, margin: '0 5 0 0' },
++                items: [me.vmidField, me.nameField, me.onbootField],
++            },
++            me.archiveField,
++        ];
++
++        me.buttons = [{ text: gettext('Close'), handler: () => me.close() }];
++        me.callParent();
++
++        if (me.guestMode) {
++            // clone flow: focus the guest form, the compose block is optional
++            me.yamlField.setDisabled(true);
++            me.stackField.setDisabled(true);
++        }
++    },
++
++    // publish the compose stack through the storage plugin; the returned
++    // task UPID opens the build/smoke/publish log; the archive field is
++    // prefilled afterwards so the next step is "Create Guest"
++    publish: function () {
++        let me = this;
++        let stack = me.stackField.getValue() || `bootc-${Date.now()}`;
++        me.stackField.setValue(stack);
++        me.archiveField.setValue(`ostree:vztmpl/${stack}.tar.gz`);
++        Proxmox.Utils.API2Request({
++            method: 'POST',
++            url: `/nodes/${me.node}/bootc/compose/${stack}`,
++            params: { compose: me.yamlField.getValue() },
++            failure: (response) => Ext.Msg.alert(gettext('Error'), response.htmlStatus),
++            success: (response) => Ext.create('Proxmox.window.TaskProgress', {
++                upid: response.result.data,
++                autoShow: true,
++            }),
++        });
++    },
++
++    createGuest: function () {
++        let me = this;
++        let vmid = me.vmidField.getValue();
++        let archive = me.archiveField.getValue();
++        if (!vmid || !archive) {
++            Ext.Msg.alert(gettext('Error'), gettext('VMID and seed template are required.'));
++            return;
++        }
++        let params = { vmid: vmid, archive: archive };
++        if (me.nameField.getValue()) {
++            params.name = me.nameField.getValue();
++        }
++        params.onboot = me.onbootField.getValue() ? 1 : 0;
++        Proxmox.Utils.API2Request({
++            method: 'POST',
++            url: `/nodes/${me.node}/bootc`,
++            params: params,
++            failure: (response) => Ext.Msg.alert(gettext('Error'), response.htmlStatus),
++            success: (response) => {
++                me.close();
++                Ext.create('Proxmox.window.TaskProgress', {
++                    upid: response.result.data,
++                    autoShow: true,
++                });
++            },
++        });
++    },
++});
++
++Ext.define('PVE.bootc.Editor', {
++    extend: 'Ext.window.Window',
++    alias: ['widget.pveBootcEditor'],
++
++    modal: true,
++    width: 760,
++    layout: { type: 'vbox', align: 'stretch' },
++    bodyPadding: 5,
++
++    initComponent: function () {
++        let me = this;
++
++        me.node = PVE.bootc.node(me);
++        me.yamlField = Ext.create('Ext.form.field.TextArea', {
++            fieldLabel: gettext('docker-compose.yml'),
++            height: 300,
++            flex: 1,
++        });
++
++        me.items = [
++            me.yamlField,
++            {
++                xtype: 'toolbar',
++                items: [
++                    {
++                        text: gettext('Build & Publish'),
++                        iconCls: 'fa fa-ship',
++                        handler: () => me.publish(),
++                    },
++                ],
++            },
++        ];
++
++        me.buttons = [{ text: gettext('Close'), handler: () => me.close() }];
++
++        Proxmox.Utils.API2Request({
++            url: `/nodes/${me.node}/bootc/template/${me.stack}/compose`,
++            failure: (response, opts) => Ext.Msg.alert(gettext('Error'), response.htmlStatus),
++            success: (response, opts) => me.yamlField.setValue(response.result.data),
++        });
++
++        me.callParent();
++    },
++
++    // the stack name is fixed for a re-publish: the template and the image
++    // reference are overwritten in place, keeping published guests intact
++    publish: function () {
++        let me = this;
++        Proxmox.Utils.API2Request({
++            method: 'POST',
++            url: `/nodes/${me.node}/bootc/compose/${me.stack}`,
++            params: { compose: me.yamlField.getValue() },
++            failure: (response) => Ext.Msg.alert(gettext('Error'), response.htmlStatus),
++            success: (response) => Ext.create('Proxmox.window.TaskProgress', {
++                upid: response.result.data,
++                autoShow: true,
++            }),
++        });
++    },
++});
++
++Ext.define('PVE.bootc.Edit', {
++    extend: 'Ext.window.Window',
++    alias: ['widget.pveBootcEdit'],
++
++    modal: true,
++    width: 760,
++    layout: { type: 'vbox', align: 'stretch' },
++    bodyPadding: 5,
++
++    initComponent: function () {
++        let me = this;
++
++        me.node = me.node || me.pveSelNode?.data?.node || PVE.bootc.node(me);
++        me.yamlField = Ext.create('Ext.form.field.TextArea', {
++            fieldLabel: gettext('docker-compose.yml'),
++            height: 300,
++            name: 'compose',
++            flex: 1,
++        });
++
++        me.items = [
++            me.yamlField,
++            {
++                xtype: 'toolbar',
++                items: [
++                    {
++                        text: gettext('Refresh Guest'),
++                        iconCls: 'fa fa-recycle',
++                        handler: () => me.refresh(),
++                    },
++                ],
++            },
++        ];
++
++        me.buttons = [
++            {
++                text: gettext('Rollback'),
++                handler: () => me.rollback(),
++            },
++            { text: gettext('Close'), handler: () => me.close() },
++        ];
++
++        Proxmox.Utils.API2Request({
++            url: `/nodes/${me.node}/bootc/${me.vmid}/compose`,
++            failure: (response, opts) => Ext.Msg.alert(gettext('Error'), response.htmlStatus),
++            success: (response, opts) => me.yamlField.setValue(response.result.data),
++        });
++
++        me.callParent();
++    },
++
++    refresh: function () {
++        let me = this;
++        Proxmox.Utils.API2Request({
++            method: 'POST',
++            url: `/nodes/${me.node}/bootc/${me.vmid}/compose-refresh`,
++            failure: (response, opts) => Ext.Msg.alert(gettext('Error'), response.htmlStatus),
++            success: (response) => Ext.create('Proxmox.window.TaskProgress', {
++                upid: response.result.data,
++                autoShow: true,
++            }),
++        });
++    },
++
++    rollback: function () {
++        let me = this;
++        Proxmox.Utils.API2Request({
++            method: 'POST',
++            url: `/nodes/${me.node}/bootc/${me.vmid}/rollback`,
++            failure: (response) => Ext.Msg.alert(gettext('Error'), response.htmlStatus),
++            success: (response) => Ext.create('Proxmox.window.TaskProgress', {
++                upid: response.result.data,
++                autoShow: true,
++            }),
++        });
++    },
++});
++
++Ext.define('PVE.bootc.Status', {
++    extend: 'Ext.panel.Panel',
++    alias: ['widget.pveBootcStatus'],
++
++    layout: { type: 'vbox', align: 'stretch' },
++
++    initComponent: function () {
++        let me = this;
++
++        me.node = PVE.bootc.node(me);
++        me.store = Ext.create('Ext.data.Store', {
++            fields: ['vmid', 'node', 'name', 'status'],
++            autoLoad: true,
++            proxy: {
++                type: 'proxmox',
++                url: `/nodes/${me.node}/bootc`,
++                reader: { type: 'json', rootProperty: 'data' },
++            },
++        });
++
++        me.grid = Ext.create('Ext.grid.Panel', {
++            flex: 1,
++            store: me.store,
++            columns: [
++                { text: gettext('VMID'), dataIndex: 'vmid', width: 90 },
++                { text: gettext('Name'), dataIndex: 'name', flex: 1 },
++                { text: gettext('Status'), dataIndex: 'status', width: 110 },
++            ],
++            tbar: [
++                {
++                    text: gettext('Start'),
++                    iconCls: 'fa fa-play',
++                    handler: (btn) => me.action('start'),
++                },
++                {
++                    text: gettext('Stop'),
++                    iconCls: 'fa fa-stop',
++                    handler: (btn) => me.action('stop'),
++                },
++                {
++                    text: gettext('Shutdown'),
++                    iconCls: 'fa fa-power-off',
++                    handler: (btn) => me.action('shutdown'),
++                },
++                {
++                    text: gettext('Edit Compose'),
++                    iconCls: 'fa fa-file-text-o',
++                    handler: (btn) => me.editCompose(),
++                },
++                {
++                    text: gettext('Destroy'),
++                    iconCls: 'fa fa-trash-o',
++                    handler: (btn) => me.destroyGuest(),
++                },
++            ],
++        });
++
++        me.items = [me.grid];
++        me.callParent();
++    },
++
++    selected: function () {
++        let me = this;
++        return me.grid.getSelection()[0];
++    },
++
++    action: function (action) {
++        let me = this;
++        let rec = me.selected();
++        if (!rec) return;
++        Proxmox.Utils.API2Request({
++            method: 'POST',
++            url: `/nodes/${rec.data.node}/bootc/${rec.data.vmid}/${action}`,
++            failure: (response) => Ext.Msg.alert(gettext('Error'), response.htmlStatus),
++            success: (response) => {
++                Ext.create('Proxmox.window.TaskProgress', {
++                    upid: response.result.data,
++                    autoShow: true,
++                });
++                me.store.reload();
++            },
++        });
++    },
++
++    editCompose: function () {
++        let me = this;
++        let rec = me.selected();
++        if (!rec) return;
++        Ext.create('PVE.bootc.Edit', {
++            vmid: rec.data.vmid,
++            node: rec.data.node,
++        }).show();
++    },
++
++    destroyGuest: function () {
++        let me = this;
++        let rec = me.selected();
++        if (!rec) return;
++        Ext.Msg.confirm(gettext('Destroy'), `bootc guest ${rec.data.vmid}: are you sure?`,
++            (button) => {
++                if (button !== 'yes') return;
++                Proxmox.Utils.API2Request({
++                    method: 'DELETE',
++                    url: `/nodes/${rec.data.node}/bootc/${rec.data.vmid}`,
++                    failure: (response) => Ext.Msg.alert(gettext('Error'), response.htmlStatus),
++                    success: () => me.store.reload(),
++                });
++            });
++    },
++});
++
++// shared helpers for the bootc panels
++Ext.apply(PVE, {
++    bootc: {
++        // resolve the node a panel operates on: explicit selection first,
++        // then the workspace selection, then any node in the resource store
++        node: function (panel) {
++            if (panel?.pveSelNode?.data?.node) {
++                return panel.pveSelNode.data.node;
++            }
++            if (PVE.curSelectedNode?.data?.node) {
++                return PVE.curSelectedNode.data.node;
++            }
++            let nodes = PVE.data.ResourceStore.getNodes();
++            return nodes[0]?.node ?? '';
++        },
++    },
++});
+\ No newline at end of file

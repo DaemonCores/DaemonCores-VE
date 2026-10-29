@@ -11,7 +11,7 @@ use strict;
 use warnings;
 
 use PVE::SafeSyslog;
-use PVE::Tools qw(extract_param file_get_contents);
+use PVE::Tools qw(extract_param file_get_contents file_set_contents);
 use PVE::Exception qw(raise raise_param_exc raise_perm_exc);
 use PVE::INotify;
 use PVE::Cluster;
@@ -140,6 +140,54 @@ __PACKAGE__->register_method({
 });
 
 __PACKAGE__->register_method({
+    name => 'compose_publish',
+    path => 'compose/{stack}',
+    method => 'POST',
+    proxyto => 'node',
+    protected => 1,
+    description => "Build, smoke-test and publish a compose stack as a seed"
+        . " template (Portainer-style editor entry point; task UPID returned).",
+    permissions => { check => ['perm', '/', ['VM.Allocate']] },
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => get_standard_option('pve-node'),
+            stack => {
+                description => "Stack name (template <stack>.tar.gz and image"
+                    . " localhost/<stack>:latest derive from it).",
+                type => 'string', pattern => '[a-zA-Z0-9][a-zA-Z0-9_.-]*',
+                maxLength => 64,
+            },
+            compose => {
+                description => "The docker-compose.yml content.",
+                type => 'string', maxLength => 1024 * 1024,
+            },
+        },
+    },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        my $rpcenv = PVE::RPCEnvironment::get();
+        my $authuser = $rpcenv->get_user();
+        $rpcenv->{type} = 'priv'; # to start tasks in background
+        my ($node, $stack, $compose) =
+            ($param->{node}, $param->{stack}, $param->{compose});
+
+        # the compose source lands outside the deb tree, beside the other
+        # recorded stacks; the wrapper hands it to pvect-ostree publish
+        my $dir = '/var/lib/pvect-ostree/compose-ui';
+        mkdir $dir;
+        my $file = "$dir/$stack.yml";
+        PVE::Tools::file_set_contents($file, $compose);
+
+        return $rpcenv->fork_worker(
+            'bootcpublish', $stack, $authuser,
+            sub { PVE::Tools::run_command([$wrapper, 'publish', $file,
+                '--name', $stack], errmsg => "bootc publish $stack failed"); });
+    },
+});
+
+__PACKAGE__->register_method({
     name => 'compose_refresh',
     path => '{vmid}/compose-refresh',
     method => 'POST',
@@ -188,9 +236,58 @@ __PACKAGE__->register_method({
     returns => { type => 'array' },
     code => sub {
         my ($param) = @_;
-        my $storage_cfg = PVE::Storage::config();
-        PVE::Storage::activate_storage($storage_cfg, 'ostree', $param->{node});
-        return PVE::Storage::list_volumes($storage_cfg, 'ostree', $param->{node}, 'vztmpl');
+
+        # the wrapper owns the template metadata (stack, image, recorded
+        # compose source, epoch); TSV keeps the parsing trivial
+        my $templates_out = '';
+        eval {
+            PVE::Tools::run_command([$wrapper, 'templates'], outfunc => sub {
+                $templates_out .= $_[0];
+            }, errmsg => 'templates listing failed');
+        };
+        my $res = [];
+        for my $line (split(/\n/, $templates_out // '')) {
+            my ($archive, $stack, $imgref, $ctime, $compose) = split(/\t/, $line);
+            next if !defined($archive) || $archive eq '';
+            push @$res, {
+                archive => $archive,
+                stack => $stack // '',
+                imgref => $imgref // '',
+                ctime => ($ctime // 0) + 0,
+                compose => $compose // '',
+            };
+        }
+        return $res;
+    },
+});
+
+__PACKAGE__->register_method({
+    name => 'template_read_compose',
+    path => 'template/{stack}/compose',
+    method => 'GET',
+    proxyto => 'node',
+    protected => 1,
+    permissions => { check => ['perm', '/', ['VM.Allocate']] },
+    description => "The recorded compose source of a published stack.",
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => get_standard_option('pve-node'),
+            stack => {
+                description => "Stack name.",
+                type => 'string', pattern => '[a-zA-Z0-9][a-zA-Z0-9_.-]*',
+                maxLength => 64,
+            },
+        },
+    },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        my $out = '';
+        PVE::Tools::run_command([$wrapper, 'compose-read', $param->{stack}],
+            outfunc => sub { $out .= $_[0] },
+            errmsg => "compose-read $param->{stack} failed");
+        return $out;
     },
 });
 
