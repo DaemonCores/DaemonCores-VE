@@ -331,8 +331,17 @@ for svc, spec in services.items():
               "GlobalArgs=--storage-opt=additionalimagestore=/usr/lib/bootc/storage"]
     for p in as_list(spec.get("ports")):
         lines.append(f"PublishPort={str(p).strip(chr(34))}")
+    _unresolved = []
     for e in env_pairs(spec.get("environment")):
-        lines.append(f"Environment={e}")
+        if "${" in e:
+            _unresolved.append(e.split("=", 1)[0])
+        else:
+            lines.append(f"Environment={e}")
+    if _unresolved:
+        # Secrets stay OUT of the image: quadlet reads them from a per-host
+        # env file provisioned at CT runtime (/etc/compose2bootc/<stack>.env).
+        lines.append(f"# unresolved (host env file): " + ", ".join(_unresolved))
+        lines.append(f"EnvironmentFile=/etc/compose2bootc/{stack}.env")
     for v in as_list(spec.get("volumes")):
         host, target, opts, non_fhs = parse_volume(v, stack, svc, var_prefix)
         host_dirs.add(host)
@@ -346,8 +355,18 @@ for svc, spec in services.items():
         for k in ("HealthInterval", "HealthTimeout", "HealthStartPeriod", "HealthRetries"):
             if hc.get(k): lines.append(f"{k}={hc[k]}")
     cmd = spec.get("command")
-    if cmd is not None:
-        lines.append("Exec=" + (cmd if isinstance(cmd, str) else " ".join(map(str, cmd))))
+    _exec = None
+    _ep = spec.get("entrypoint")
+    if _ep is not None:
+        _parts = [_ep] if isinstance(_ep, str) else [x for x in _ep if str(x).strip()]
+        if cmd is not None:
+            _parts.append(cmd if isinstance(cmd, str) else " ".join(map(str, cmd)))
+        _exec = " ".join(_parts) if not isinstance(_ep, str) or cmd is None else \
+                (_ep + (" " + cmd if cmd else ""))
+    elif cmd is not None:
+        _exec = cmd if isinstance(cmd, str) else " ".join(map(str, cmd))
+    if _exec is not None:
+        lines.append("Exec=" + _exec.strip())
 
     restart = str(spec.get("restart", "on-failure"))
     restart = "always" if restart in ("always", "unless-stopped") else \
@@ -405,7 +424,7 @@ SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 {RULE}
 RUN apt update \\
     && apt install -y --no-install-recommends \\
-        podman catatonit fuse-overlayfs passt netavark \\
+        podman catatonit fuse-overlayfs passt netavark aardvark-dns \\
     && apt clean \\
     && rm -rf /var/lib/apt/lists/*
 
@@ -578,7 +597,20 @@ do_test() {
   : >"${tmp}/ids"
 
   local net="${PROG}-test-$$"
-  podman network create "${net}" >/dev/null 2>&1 || true
+  # Dedicated subnet: the default 10.89.0.0/24 range collides with stale
+  # aardvark bindings on this host; pin an unused private range instead.
+  # aardvark-dns cannot serve extra networks on this host (trixie netavark
+  # bug: port 53 always "in use"). Run the test network WITHOUT dns and
+  # resolve services by static --ip + --add-host instead.
+  podman network create --subnet 10.97.0.0/24 --disable-dns "${net}" >/dev/null 2>&1 || true
+  local -A _svcip=()
+  local _n=2 _sf _s0
+  for _sf in "${tmp}"/*.container; do
+    [ -e "${_sf}" ] || continue
+    _s0="$(sed -n 's/^ContainerName=//p' "${_sf}" | head -1)"
+    [ -n "${_s0}" ] || continue
+    _svcip["${_s0}"]="10.97.0.${_n}"; _n=$((_n + 1))
+  done
   # shellcheck disable=SC2064  # expand ${tmp}/${net} now; run at RETURN
   trap "_test_cleanup '${tmp}' '${net}'" RETURN
 
@@ -589,22 +621,42 @@ do_test() {
     svc="$(sed -n 's/^ContainerName=//p' "${f}" | head -1)"
     img="$(sed -n 's/^Image=//p' "${f}" | head -1)"
     hc="$(sed -n 's/^HealthCmd=//p' "${f}" | head -1)"
+    _envfs="$(sed -n 's/^EnvironmentFile=//p' "${f}")"
+    _vols="$(sed -n 's/^Volume=//p' "${f}")"
     [ -n "${img}" ] || continue
     checked=$((checked + 1))
     info "  starting ${svc:-?} (${img})"
     local args=(
       run -d --rm --name "${PROG}-test-${svc}-$$"
       --network "${net}"
+      # newer AppArmor releases mediate AF_UNIX and deny container-internal
+      # sockets (postgres is hit first); the test host profile is not ours
+      # to manage, so run the smoke containers unconfined.
+      --security-opt apparmor=unconfined
     )
+    for _envf in ${_envfs}; do
+      [ -f "${_envf}" ] && args+=(--env-file "${_envf}")
+    done
+    for _v in ${_vols}; do
+      _h="${_v%%:*}"
+      case "${_h}" in /var/lib/compose2bootc/*) [ -d "${_h}" ] || mkdir -p "${_h}" ;; esac
+      args+=(-v "${_v}")
+    done
     # Only alias the container when the unit names a service; an empty
     # ContainerName must not become --network-alias "".
     [ -n "${svc}" ] && args+=(--network-alias "${svc}")
+    [ -n "${svc}" ] && [ -n "${_svcip[${svc}]:-}" ] && args+=(--ip "${_svcip[${svc}]}")
+    local _ah
+    for _ah in "${!_svcip[@]}"; do
+      [ "${_ah}" = "${svc}" ] || args+=(--add-host "${_ah}:${_svcip[${_ah}]}")
+    done
     [ -n "${hc}" ] && args+=(
       --health-cmd "${hc}" --health-interval 5s
       --health-retries 6 --health-timeout 5s
     )
     local id
-    id="$(podman "${args[@]}" "${img}" 2>/dev/null || true)"
+    id="$(podman "${args[@]}" "${img}" 2>&1)" \
+      || { log "  podman run error: ${id}"; id=""; }
     [ -n "${id}" ] && echo "${id}" >>"${tmp}/ids"
     if [ -z "${hc}" ]; then
       info "  ${svc}: no healthcheck declared — start-only check"
