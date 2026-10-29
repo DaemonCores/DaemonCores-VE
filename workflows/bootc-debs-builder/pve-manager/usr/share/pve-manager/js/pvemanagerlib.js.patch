@@ -123,7 +123,7 @@
                          {
                              pack: 'end',
                              margin: '0 5 0 0',
-@@ -74610,3 +74646,519 @@ Ext.define('PVE.StdWorkspace', {
+@@ -74610,3 +74646,522 @@ Ext.define('PVE.StdWorkspace', {
          });
      },
  });
@@ -632,6 +632,9 @@
 +        // resolve the node a panel operates on: explicit selection first,
 +        // then the workspace selection, then any node in the resource store
 +        node: function (panel) {
++            if (panel?.nodename) {
++                return panel.nodename;
++            }
 +            if (panel?.pveSelNode?.data?.node) {
 +                return panel.pveSelNode.data.node;
 +            }

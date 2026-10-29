@@ -502,6 +502,9 @@ Ext.apply(PVE, {
         // resolve the node a panel operates on: explicit selection first,
         // then the workspace selection, then any node in the resource store
         node: function (panel) {
+            if (panel?.nodename) {
+                return panel.nodename;
+            }
             if (panel?.pveSelNode?.data?.node) {
                 return panel.pveSelNode.data.node;
             }
