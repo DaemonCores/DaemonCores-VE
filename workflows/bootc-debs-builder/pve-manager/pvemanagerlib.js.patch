@@ -1,0 +1,31 @@
+diff --git a/usr/share/pve-manager/js/pvemanagerlib.js b/usr/share/pve-manager/js/pvemanagerlib.js
+index a54d7f3..aa2b14d 100644
+--- a/usr/share/pve-manager/js/pvemanagerlib.js
++++ b/usr/share/pve-manager/js/pvemanagerlib.js
+@@ -1618,7 +1618,7 @@ Ext.define('PVE.qemu.Architecture', {
+     },
+ 
+     defaultMachines: {
+-        x86_64: 'pc',
++        x86_64: 'q35',
+         aarch64: 'virt',
+     },
+ 
+@@ -2240,7 +2240,7 @@ Ext.define('PVE.Utils', {
+ 
+         render_qemu_bios: function (value, arch = 'x86_64') {
+             if (!value) {
+-                let defaultBios = arch === 'aarch64' ? 'OVMF (UEFI)' : 'SeaBIOS';
++                let defaultBios = arch === 'aarch64' ? 'OVMF (UEFI)' : 'OVMF (UEFI)';
+                 return `${Proxmox.Utils.defaultText} (${defaultBios})`;
+             } else if (value === 'seabios') {
+                 return 'SeaBIOS';
+@@ -60893,7 +60893,7 @@ Ext.define('PVE.qemu.SystemInputPanel', {
+             xtype: 'proxmoxcheckbox',
+             name: 'agent',
+             uncheckedValue: 0,
+-            defaultValue: 0,
++            defaultValue: 1,
+             deleteDefaultValue: true,
+             fieldLabel: gettext('Qemu Agent'),
+         },

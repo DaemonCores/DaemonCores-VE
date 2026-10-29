@@ -1,0 +1,12 @@
+diff --git a/usr/share/perl5/PVE/QemuServer/Network.pm b/usr/share/perl5/PVE/QemuServer/Network.pm
+index b4893c0..1ad36e1 100644
+--- a/usr/share/perl5/PVE/QemuServer/Network.pm
++++ b/usr/share/perl5/PVE/QemuServer/Network.pm
+@@ -101,6 +101,7 @@ my $net_fmt = {
+     firewall => {
+         type => 'boolean',
+         description => 'Whether this interface should be protected by the firewall.',
++        default => 1,
+         optional => 1,
+     },
+     link_down => {

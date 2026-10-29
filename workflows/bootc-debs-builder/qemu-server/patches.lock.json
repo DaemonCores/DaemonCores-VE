@@ -1,0 +1,9 @@
+{
+  "usr/share/perl5/PVE/API2/Qemu.pm": "33c9b0dca650341e76e39c85c8d54ba1ee38474266632a26c8921121f055697f",
+  "usr/share/perl5/PVE/QemuServer.pm": "0ae970bfbee51fabfd9fbac97b0ff36f427316aa0513cfbecc3e170641c909e4",
+  "usr/share/perl5/PVE/QemuServer/Agent.pm": "e46c6c5d85dc28cbfac8b7fe9b15090747644bd434dbd01a9ec5da0df1510e96",
+  "usr/share/perl5/PVE/QemuServer/CPUConfig.pm": "504029a4aadcd922d67b2d2030bb595b15dd0581aa165f41b03b409a8ab34009",
+  "usr/share/perl5/PVE/QemuServer/Drive.pm": "b282bfbd7ad71668fe5b8f51ad4d1c8baea45183b77ae5f5fde70646d008d286",
+  "usr/share/perl5/PVE/QemuServer/Machine.pm": "21232cbad0c03b08f81ab1deddeb57cfb76692e4070f6b02354db641404d2954",
+  "usr/share/perl5/PVE/QemuServer/Network.pm": "bc5aadfd0d8c38e30ac765242d375cc0bad7c4b7cca2f0cd9ec71c3b63c3498e"
+}

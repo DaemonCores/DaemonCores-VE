@@ -11,7 +11,7 @@ use strict;
 use warnings;
 
 use PVE::SafeSyslog;
-use PVE::Tools qw(extract_param);
+use PVE::Tools qw(extract_param file_get_contents);
 use PVE::Exception qw(raise raise_param_exc raise_perm_exc);
 use PVE::INotify;
 use PVE::Cluster;
@@ -145,7 +145,7 @@ __PACKAGE__->register_method({
     method => 'POST',
     proxyto => 'node',
     protected => 1,
-    description => "Rebuild the guest from its recorded compose source",
+    description => "Rebuild the guest from its recorded compose source"
         . " (pvect-ostree refresh; previous deployment kept for rollback).",
     permissions => { check => ['perm', '/vms/{vmid}', ['VM.PowerMgmt']] },
     parameters => {
@@ -170,6 +170,27 @@ __PACKAGE__->register_method({
             'bootcrefresh', $vmid, $authuser,
             sub { PVE::Tools::run_command([$wrapper, 'refresh', $vmid],
                 errmsg => "bootc refresh $vmid failed"); });
+    },
+});
+
+__PACKAGE__->register_method({
+    name => 'list_templates',
+    path => 'templates',
+    method => 'GET',
+    proxyto => 'node',
+    protected => 1,
+    permissions => { user => 'all' },
+    description => "Published seed templates on the pvect-ostree storage.",
+    parameters => {
+        additionalProperties => 0,
+        properties => { node => get_standard_option('pve-node') },
+    },
+    returns => { type => 'array' },
+    code => sub {
+        my ($param) = @_;
+        my $storage_cfg = PVE::Storage::config();
+        PVE::Storage::activate_storage($storage_cfg, 'ostree', $param->{node});
+        return PVE::Storage::list_volumes($storage_cfg, 'ostree', $param->{node}, 'vztmpl');
     },
 });
 

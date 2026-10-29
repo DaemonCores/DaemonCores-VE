@@ -1,0 +1,13 @@
+diff --git a/usr/share/perl5/PVE/QemuServer/Machine.pm b/usr/share/perl5/PVE/QemuServer/Machine.pm
+index 35161d1..94ff0c4 100644
+--- a/usr/share/perl5/PVE/QemuServer/Machine.pm
++++ b/usr/share/perl5/PVE/QemuServer/Machine.pm
+@@ -122,7 +122,7 @@ sub print_machine {
+ }
+ 
+ my $default_machines = {
+-    x86_64 => 'pc',
++    x86_64 => 'q35',
+     aarch64 => 'virt',
+ };
+ 

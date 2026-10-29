@@ -1,0 +1,76 @@
+diff --git a/usr/share/perl5/PVE/API2/Nodes.pm b/usr/share/perl5/PVE/API2/Nodes.pm
+index 2ca3244..49d1648 100644
+--- a/usr/share/perl5/PVE/API2/Nodes.pm
++++ b/usr/share/perl5/PVE/API2/Nodes.pm
+@@ -51,6 +51,8 @@ use PVE::API2::Firewall::Host;
+ use PVE::API2::Hardware;
+ use PVE::API2::LXC::Status;
+ use PVE::API2::LXC;
++use PVE::API2::Bootc;
++use PVE::API2::Bootc::Status;
+ use PVE::API2::Network;
+ use PVE::API2::Network::SDN::Nodes::Status;
+ use PVE::API2::NodeConfig;
+@@ -119,6 +121,11 @@ __PACKAGE__->register_method({
+     path => 'lxc',
+ });
+ 
++__PACKAGE__->register_method({
++    subclass => "PVE::API2::Bootc",
++    path => 'bootc',
++});
++
+ __PACKAGE__->register_method({
+     subclass => "PVE::API2::Ceph",
+     path => 'ceph',
+@@ -240,6 +247,8 @@ __PACKAGE__->register_method({
+             { name => 'hardware' },
+             { name => 'hosts' },
+             { name => 'journal' },
++            # variant A: the bootc subtree is registered above
++        { name => 'bootc' },
+             { name => 'lxc' },
+             { name => 'migrateall' },
+             { name => 'netstat' },
+@@ -2045,6 +2054,8 @@ sub get_filtered_vmlist {
+                 $class = 'PVE::LXC::Config';
+             } elsif ($d->{type} eq 'qemu') {
+                 $class = 'PVE::QemuConfig';
++            } elsif ($d->{type} eq 'bootc') {
++                $class = 'PVE::Bootc';
+             } else {
+                 die "unknown virtual guest type '$d->{type}'\n";
+             }
+@@ -2250,6 +2261,11 @@ __PACKAGE__->register_method({
+                             print STDERR "Starting VM $vmid\n";
+                             $upid =
+                                 PVE::API2::Qemu->vm_start({ node => $nodename, vmid => $vmid });
++                        } elsif ($d->{type} eq 'bootc') {
++                            return if PVE::Bootc::guest_status($vmid, $nodename) eq 'running';
++                            print STDERR "Starting bootc guest $vmid\n";
++                            $upid =
++                                PVE::API2::Bootc::Status->vm_start({ node => $nodename, vmid => $vmid });
+                         } else {
+                             die "unknown VM type '$d->{type}'\n";
+                         }
+@@ -2303,6 +2319,10 @@ my $create_stop_worker = sub {
+         return PVE::API2::LXC::Status->vm_shutdown(
+             { node => $nodename, vmid => $vmid, timeout => $timeout, forceStop => $force_stop }
+         );
++    } elsif (defined($type) && $type eq 'bootc') {
++        # bootc guests stop through the lifecycle wrapper (pvect-bootc)
++        return PVE::API2::Bootc::Status->vm_shutdown(
++            { node => $nodename, vmid => $vmid, timeout => $timeout })
+     } elsif ($type eq 'qemu') {
+         return if !PVE::QemuServer::check_running($vmid, 1);
+         print STDERR "Stopping VM $vmid (timeout = $timeout seconds)\n";
+@@ -2591,6 +2611,9 @@ my $create_migrate_worker = sub {
+     my ($nodename, $type, $vmid, $target, $with_local_disks) = @_;
+ 
+     my $upid;
++    if ($type eq 'bootc') {
++        die "bootc guests are not migratable; publish on the target node and refresh a new guest there (pvect-bootc)\n";
++    }
+     if ($type eq 'lxc') {
+         my $online = PVE::LXC::check_running($vmid) ? 1 : 0;
+         print STDERR "Migrating CT $vmid\n";

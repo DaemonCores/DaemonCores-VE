@@ -105,6 +105,9 @@ __PACKAGE__->register_method({
 my $run_lifecycle = sub {
     my ($vmid, $node, $action, $user, $timeout) = @_;
 
+    my $rpcenv = PVE::RPCEnvironment::get();
+    $rpcenv->{type} = 'priv'; # to start tasks in background
+
     my $conf = PVE::Bootc::load_config($vmid, $node);
     die "guest is already in the requested state\n"
         if $action eq 'start' && PVE::Bootc::conf_status($conf) eq 'running';
@@ -226,6 +229,60 @@ __PACKAGE__->register_method({
             'bootcdestroy', $param->{vmid}, $rpcenv->get_user(),
             sub { PVE::Tools::run_command([$wrapper, 'destroy', $param->{vmid}],
                 errmsg => "bootc destroy $param->{vmid} failed"); });
+    },
+});
+
+__PACKAGE__->register_method({
+    name => 'read_compose',
+    path => 'compose',
+    method => 'GET',
+    proxyto => 'node',
+    protected => 1,
+    permissions => { check => ['perm', '/vms/{vmid}', ['VM.Audit']] },
+    description => "The recorded compose source of the guest.",
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => get_standard_option('pve-node'),
+            vmid => get_standard_option('pve-vmid'),
+        },
+    },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        my $conf = PVE::Bootc::load_config($param->{vmid}, $param->{node});
+        die "guest $param->{vmid} has no recorded compose source\n" if !$conf->{compose};
+        return PVE::Tools::file_get_contents($conf->{compose});
+    },
+});
+
+__PACKAGE__->register_method({
+    name => 'rollback',
+    path => 'rollback',
+    method => 'POST',
+    proxyto => 'node',
+    protected => 1,
+    permissions => { check => ['perm', '/vms/{vmid}', ['VM.PowerMgmt']] },
+    description => "Re-activate the previous deployment (ostree rollback).",
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => get_standard_option('pve-node'),
+            vmid => get_standard_option('pve-vmid'),
+        },
+    },
+    returns => { type => 'string' },
+    code => sub {
+        my ($param) = @_;
+        my $rpcenv = PVE::RPCEnvironment::get();
+        my $authuser = $rpcenv->get_user();
+        $rpcenv->{type} = 'priv'; # to start tasks in background
+        PVE::Bootc::load_config($param->{vmid}, $param->{node});
+
+        return $rpcenv->fork_worker(
+            'bootcrollback', $param->{vmid}, $authuser,
+            sub { PVE::Tools::run_command([$wrapper, 'rollback', $param->{vmid}],
+                errmsg => "bootc rollback $param->{vmid} failed"); });
     },
 });
 
