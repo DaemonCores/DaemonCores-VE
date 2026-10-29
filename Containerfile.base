@@ -1,0 +1,23 @@
+#####################################################################################
+# Shared base for the DaemonCores VE images
+#####################################################################################
+# The shared image pipeline (DaemonCores-CI/.github/workflows/bootc-build.yml)
+# builds this manifest once per build job as localhost/debian-bootc-base and
+# passes it to every product Containerfile as BASE_IMAGE. It is never pushed.
+#
+# Unlike debian-bootc's Containerfile.base (which assembles a Debian root from
+# scratch), VE derives from the PUBLISHED debian-bootc base image: the bootc
+# toolchain, kernel, ostree migration and initramfs come from it, and the
+# product Containerfile only layers the Proxmox packages from the VE APT
+# repository.
+#
+# The FROM line feeds the image content hash (the base digest is part of the
+# identity), so a newer published base invalidates the cached image. The
+# BOOTC_GPG_SHA256 / BOOTC_APT_URL build-args the pipeline passes for the bootc
+# APT repository are accepted but unused here: the derived values are the
+# caller's own repository, and the VE product Containerfile manages that
+# repository itself.
+FROM ghcr.io/daemoncores/debian-bootc:latest
+STOPSIGNAL SIGRTMIN+3
+ENV DEBIAN_FRONTEND=noninteractive
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
