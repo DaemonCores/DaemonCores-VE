@@ -1,0 +1,172 @@
+#!/bin/bash
+# dc-gpu-lxc — GPU passthrough glue for Proxmox LXC guests, vendor-generic.
+#
+# Prints (default) or applies (--apply) the lxc.conf lines that expose a GPU
+# to an LXC guest, for every vendor: the shared /dev/dri subtree for AMD and
+# Intel, the /dev/nvidia* character devices plus the proprietary user-space
+# libraries for NVIDIA. Probes the ACTUAL host at runtime — device nodes,
+# majors and library paths are read from the machine running the tool, so no
+# vendor knowledge is hardcoded:
+#
+#   amd / intel : cgroup allow every /dev/dri node's major, bind the whole
+#                 subtree, video/render group hints.
+#   nvidia      : cgroup allow every /dev/nvidia* node's major, bind each
+#                 node, bind the driver's user-space libraries so the guest
+#                 matches the host driver version (a libnvidia-ml to kernel
+#                 module mismatch breaks nvidia-smi), video/render/compute
+#                 group hints.
+#
+# Usage:
+#   dc-gpu-lxc <vmid> <amd|intel|nvidia>        print the lxc.conf lines
+#   dc-gpu-lxc --apply <vmid> <amd|intel|nvidia>
+#                                               append the missing lines to
+#                                               /etc/pve/lxc/<vmid>.conf
+#
+# The default output is text only; --apply is the only form that writes, it
+# requires root, is idempotent (a line already present in the guest config is
+# skipped) and is never run by this package itself — every call is a
+# deliberate, GO-gated operator step.
+
+set -euo pipefail
+
+usage() {
+  echo "usage: dc-gpu-lxc [--apply] <vmid> <amd|intel|nvidia>" >&2
+  exit 2
+}
+
+APPLY=0
+if [[ "${1:-}" == "--apply" ]]; then
+  APPLY=1
+  shift
+fi
+[[ $# -eq 2 ]] || usage
+VMID="$1"
+VENDOR="$2"
+
+case "${VENDOR}" in
+  amd | intel | nvidia) ;;
+  *) usage ;;
+esac
+
+CONF="/etc/pve/lxc/${VMID}.conf"
+
+if [[ "${APPLY}" == 1 && $(id -u) -ne 0 ]]; then
+  echo "dc-gpu-lxc: root required for --apply" >&2
+  exit 1
+fi
+
+conf_lines=()
+
+# Major of a character device node, empty when the node is absent.
+device_major() {
+  [[ -c "$1" ]] || return 0
+  stat -L -c '%t' "$1"
+}
+
+conf_allow() {
+  # One cgroup allow line per node; the major is read from the real node.
+  local node="$1" major
+  major=$(device_major "${node}") || return 0
+  [[ -n "${major}" ]] || return 0
+  conf_lines+=("lxc.cgroup2.devices.allow: c ${major}:* rwm")
+}
+
+conf_mount_file() {
+  # Bind-mount node `dev/<relpath>` into the guest under the matching path.
+  conf_lines+=("lxc.mount.entry: ${1} dev/${1#/dev/} none bind,optional,create=file")
+}
+
+conf_mount_dir() {
+  # Bind-mount dir `dev/<relpath>` into the guest under the matching path.
+  conf_lines+=("lxc.mount.entry: ${1} dev/${1#/dev/} none bind,optional,create=dir")
+}
+
+conf_group() {
+  # Access note: the guest user must sit in the guest group matching the
+  # host GID of <name>, printed when the host declares it.
+  local gid
+  gid=$(getent group "$1" | cut -d: -f3)
+  if [[ -n "${gid}" ]]; then
+    conf_lines+=("# guest access: run the GPU user in a group whose gid matches host '$1' (${gid})")
+  else
+    conf_lines+=("# WARN: host group '$1' not present; the guest user would lack GPU access")
+  fi
+}
+
+nvidia_libs() {
+  # The host user-space libraries the guest must see to match the kernel
+  # module: the private container-runtime library dir, plus the two
+  # top-level libs every GPU/CUDA client uses.
+  conf_mount_dir /usr/lib/x86_64-linux-gnu/nvidia
+  [[ -d /usr/lib/x86_64-linux-gnu/libnvidia-container ]] && \
+    conf_mount_dir /usr/lib/x86_64-linux-gnu/libnvidia-container
+  shopt -s nullglob
+  libs=(/usr/lib/x86_64-linux-gnu/libcuda.so.*.*)
+  ml=(/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.*.*)
+  shopt -u nullglob
+  [[ ${#libs[@]} -gt 0 ]] && conf_mount_file "${libs[0]}"
+  [[ ${#ml[@]} -gt 0 ]] && conf_mount_file "${ml[0]}"
+}
+
+# ── vendor sets ────────────────────────────────────────────────────────────
+
+case "${VENDOR}" in
+  amd | intel)
+    if [[ ! -d /dev/dri ]]; then
+      echo "dc-gpu-lxc: no /dev/dri on this host (driver loaded?)" >&2
+      exit 3
+    fi
+    found=0
+    for node in /dev/dri/*; do
+      [[ -c "${node}" ]] || continue
+      conf_allow "${node}"
+      conf_mount_file "${node}"
+      found=1
+    done
+    [[ ${found} -eq 1 ]] || { echo "dc-gpu-lxc: /dev/dri holds no devices" >&2; exit 3; }
+    conf_group video
+    conf_group render
+    ;;
+  nvidia)
+    shopt -s nullglob
+    nodes=(/dev/nvidia*)
+    shopt -u nullglob
+    if [[ ${#nodes[@]} -eq 0 ]]; then
+      echo "dc-gpu-lxc: no /dev/nvidia* on this host (proprietary driver loaded? — opt-in lane)" >&2
+      exit 3
+    fi
+    for node in "${nodes[@]}"; do
+      conf_allow "${node}"
+      conf_mount_file "${node}"
+    done
+    conf_group video
+    conf_group render
+    conf_group compute
+    nvidia_libs
+    ;;
+esac
+
+if [[ ${#conf_lines[@]} -eq 0 ]]; then
+  echo "dc-gpu-lxc: nothing to do for vendor ${VENDOR}" >&2
+  exit 4
+fi
+
+apply() {
+  local line
+  touch "${CONF}"
+  for line in "${conf_lines[@]}"; do
+    case "${line}" in \#*) continue ;; esac
+    if grep -xFq "${line}" "${CONF}"; then
+      echo "already present: ${line}"
+    else
+      echo "${line}" >> "${CONF}"
+      echo "appended: ${line}"
+    fi
+  done
+}
+
+if [[ "${APPLY}" == 1 ]]; then
+  apply
+else
+  printf '%s\n' "${conf_lines[@]}"
+fi

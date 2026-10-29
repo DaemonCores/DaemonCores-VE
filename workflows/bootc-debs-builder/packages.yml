@@ -118,3 +118,7 @@ packages:
         env:
           PKG: compose2bootc
           PKG_VER: 0.1.0
+      dc-gpu-lxc:
+        env:
+          PKG: dc-gpu-lxc
+          PKG_VER: 1.0.0

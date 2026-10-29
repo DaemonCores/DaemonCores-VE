@@ -15,7 +15,10 @@
 #   5. debs land in $KERNEL_OUT as artifacts, never auto-installed.
 #
 # Env read: KERNEL_SERIES, KERNEL_VERSION, KERNEL_FLAVOURS (amd64),
-#   KERNEL_ARCH (x86_64 | arm64). /src = checkout of the manifest repo.
+#   KERNEL_ARCH (x86_64 | arm64), KERNEL_GPU (space-separated GPU config sets
+#   merged from kconfig/gpu/, "all" = every fragment of that directory;
+#   default "all" — ONE optimised build carries every vendor transversely).
+#   /src = checkout of the manifest repo.
 set -euo pipefail
 
 KERNEL_SERIES="${KERNEL_SERIES:?}"
@@ -61,6 +64,22 @@ merge_config() {
   cat "$1" >> "${SRCDIR}/.config"
   make -C "${SRCDIR}" olddefconfig
 }
+
+# GPU sets (transverse vendor support, ONE build, no matrix): every set in
+# KERNEL_GPU (default "all") is merged AFTER the flavour fragments so a GPU
+# delta wins over the generic config. "all" follows the files actually
+# present in kconfig/gpu/, so adding a vendor is a file, not a script edit.
+for gs in ${KERNEL_GPU:-all}; do
+  if [[ "${gs}" == "all" ]]; then
+    for frag in "${KCFG_DIR}/gpu/"*.cfg; do
+      [[ -f "${frag}" ]] && merge_config "${frag}"
+    done
+  else
+    frag="${KCFG_DIR}/gpu/${gs}.cfg"
+    [[ -f "${frag}" ]] && merge_config "${frag}" || \
+      { echo "ERROR: unknown GPU set '${gs}' (no kconfig/gpu/${gs}.cfg)" >&2; exit 1; }
+  fi
+done
 
 if [[ "${KERNEL_ARCH}" = "x86_64" ]]; then
   for flavour in ${KERNEL_FLAVOURS}; do
