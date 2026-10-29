@@ -74,7 +74,9 @@ var changent par entrée (`PKG=...`, `VER_SUFFIX=...`):
    (script partagé DaemonCores-CI, exporté par `build-deb.sh:run_build`) :
    - le dossier paquet est le MIROIR EXACT de l'arbre du deb — fichiers
      NOUVEAUX copiés tels quels (`pve-manager/usr/...`) ;
-   - fichiers MODIFIÉS = `.patch` git-format à la racine du dossier paquet
+   - fichiers MODIFIÉS = `.patch` git-format au CHEMIN MIROIR du fichier
+     patché (ex: `pve-manager/usr/share/pve-manager/js/pvemanagerlib.js.patch`
+     à côté du vrai fichier)
      (les ancres sont les hunks ; `--fuzz=0 --forward`, dry-run complet
      AVANT toute application → jamais d'arbre à moitié patché ; drift =
      exit 3 + annotation + step summary) ;
