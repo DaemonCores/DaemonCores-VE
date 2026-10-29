@@ -129,6 +129,20 @@ info() { echo "$PROG: $*"; }
 need_root() { [[ $(id -u) -eq 0 ]] || die "must run as root"; }
 
 #######################################
+# Verify the image-deployment toolchain is on PATH (deploy path only).
+# Globals:
+#   PROG
+# Outputs:
+#   Error via die() naming the missing command.
+# Returns:
+#   Exits 1 when podman is not found.
+#######################################
+need_podman() {
+  command -v podman >/dev/null 2>&1 \
+    || die "missing required tool: podman (deploy needs it to flatten the image)"
+}
+
+#######################################
 # Verify every required external tool is on PATH.
 # Outputs:
 #   Error via die() naming the first missing tool.
@@ -259,7 +273,7 @@ deploy_path() {
 deploy_path_prev() {
   local stateroot=$1
   find "$SYSROOT/ostree/deploy/$stateroot/deploy" \
-    -maxdepth 1 -type d -name '*.0' 2>/dev/null | sort | tail -2 | head -1
+    -maxdepth 1 -type d -name '*.1' 2>/dev/null | head -1
 }
 
 #######################################
@@ -313,7 +327,13 @@ EOF
 }
 
 #######################################
-# Print the rootfs subvol path PVE allocated for a CT on the dir storage.
+# Print the rootfs subvol path allocated for a CT on the dir storage.
+#
+# Resolution order:
+#   1. the volume recorded in the CT config itself (pct config rootfs) — the
+#      created volume is authoritative wherever it lives (any storeid);
+#   2. the plugin storage (self-contained layout);
+#   3. the classic dir storage configured in the CONF.
 # Globals:
 #   STORAGE
 # Arguments:
@@ -322,7 +342,17 @@ EOF
 #   Subvol path on stdout.
 #######################################
 subvol_path() {
-  local vmid=$1 base
+  local vmid=$1 base vol
+  # The CT config records exactly which volume PVE allocated for the rootfs
+  # (`pct create --rootfs <storeid>:0` may point anywhere).
+  vol=$(pct config "$vmid" 2>/dev/null | awk '/^rootfs: /{print $2; exit}')
+  if [[ -n $vol ]]; then
+    base=$(pvesm path "$vol" 2>/dev/null)
+    if [[ -n $base ]]; then
+      echo "$base"
+      return 0
+    fi
+  fi
   # Prefer the plugin storage (self-contained layout), then the classic dir
   # storage configured in the CONF.
   for s in "$PLUGIN_STORAGE" "$STORAGE"; do
@@ -477,6 +507,13 @@ normalise_conf() {
     || cat >>"$conf" <<'EOF'
 lxc.mount.entry: /dev/null sys/module/apparmor/parameters/enabled none bind 0 0
 EOF
+  # The composefs view is read-only: give systemd its volatile dirs (tmpfs
+  # mount entries are applied onto the rootfs by lxc at start).
+  grep -q 'lxc.mount.entry: tmpfs run tmpfs' "$conf" \
+    || cat >>"$conf" <<'EOF'
+lxc.mount.entry: tmpfs run tmpfs rw,nosuid,nodev,create=dir,optional 0 0
+lxc.mount.entry: tmpfs tmp tmpfs rw,nosuid,nodev,create=dir,optional 0 0
+EOF
   sed -i '/^mp[0-9]\+: .*mp=\/etc\b/d; /^mp[0-9]\+: .*mp=\/var\b/d' "$conf"
   {
     echo "mp0: $etc,mp=/etc"
@@ -485,7 +522,129 @@ EOF
 }
 
 #######################################
+# Export an OCI image's root filesystem into a plain directory tree.
+#
+# `ostree container image deploy` does not exist in libostree 2026.5 (the
+# container builtins migrated into bootc and were then dropped from the CLI),
+# so the deploy is done here by hand: flatten the image through podman
+# (create a throwaway container, `podman export` — whiteouts handled by
+# the runtime itself), then untar it into the caller's scratch dir.
+# Globals:
+#   PROG
+# Arguments:
+#   $1 - image reference
+#   $2 - destination directory (created; must be empty or absent)
+# Outputs:
+#   Progress via info(); errors via die().
+# Returns:
+#   Exits 1 when the image is unknown or the export fails.
+#######################################
+export_image_rootfs() {
+  local imgref=$1 dst=$2 probe="pvect-export-$$"
+  if ! podman image exists "$imgref"; then
+    info "pulling $imgref"
+    podman pull "$imgref" >/dev/null \
+      || die "image $imgref not found locally and pull failed"
+  fi
+  podman create --entrypoint /bin/true --name "$probe" "$imgref" >/dev/null \
+    || die "cannot create the export container for $imgref"
+  mkdir -p "$dst"
+  if ! podman export "$probe" | tar -x -C "$dst"; then
+    podman rm -f "$probe" >/dev/null 2>&1
+    die "rootfs export failed for $imgref"
+  fi
+  podman rm -f "$probe" >/dev/null 2>&1
+  [[ -d $dst/usr ]] || die "$imgref does not look like a rootfs (no /usr)"
+}
+
+#######################################
+# Reshape an exported container rootfs into the ostree deployment layout.
+#
+# libostree seeds the deployment's /etc from the commit's /usr/etc (the
+# build_writable_layers seed path uses exactly that), while the composefs view
+# still needs an /etc dir to receive the mp0 bind mount. So the tree keeps
+# /etc and a copy of it at /usr/etc. Volatile runtime dirs are emptied: the
+# composefs view is read-only, /run and /tmp are covered by tmpfs mount
+# entries written by normalise_conf.
+# Arguments:
+#   $1 - tree directory
+#######################################
+reshape_tree() {
+  local tree=$1
+  if [[ -d $tree/etc && ! -e $tree/usr/etc ]]; then
+    cp -a "$tree/etc" "$tree/usr/etc" \
+      || die "cannot copy /etc into /usr/etc (seed layout)"
+  fi
+  [[ -e $tree/usr/etc ]] || die "no /etc and no /usr/etc in the image"
+  rm -rf "$tree/run" "$tree/tmp" 2>/dev/null
+  mkdir -p "$tree/run" "$tree/tmp" "$tree/var" "$tree/etc"
+}
+
+#######################################
+# Hand-build the stateroot deployment libostree normally writes for us.
+#
+# `ostree admin deploy` refuses trees without a kernel (no provision for
+# non-booting bootc containers), so the deployment directory is assembled
+# here in the exact layout the rest of this tool expects:
+#   <sysroot>/ostree/deploy/<stateroot>/deploy/<commit>.0/  checked-out tree
+#   <commit>.0/.ostree.cfs                                  composefs view
+#   <commit>.0.origin                                       bookkeeping
+# The newest deployment is index .0 (deploy_path), the previous one sits at
+# .1 for rollback (deploy_path_prev); existing indexes shift up on deploy.
+# Globals:
+#   SYSROOT
+# Arguments:
+#   $1 - stateroot name
+#   $2 - commit checksum
+#   $3 - image reference (recorded in the origin file)
+# Outputs:
+#   Errors via die().
+# Returns:
+#   Exits 1 when the checkout or the composefs generation fails.
+#######################################
+deployment_write() {
+  local stateroot=$1 commit=$2 imgref=$3
+  local parent dst max i
+  parent="$SYSROOT/ostree/deploy/$stateroot/deploy"
+  mkdir -p "$parent"
+  # Shift every existing index up so the newest stays .0 (new commit wins,
+  # the old .0 drops to .1 and remains the rollback target).
+  shopt -s nullglob
+  max=0
+  for dst in "$parent"*.[0-9]; do
+    i=${dst##*.}
+    (( i > max )) && max=$i
+  done
+  for (( i = max; i >= 0; i-- )); do
+    for dst in "$parent"*.$i; do
+      mv "$dst" "${dst%.*}.$(( i + 1 ))"
+    done
+  done
+  shopt -u nullglob
+  dst=$parent/$commit.0
+  ostree checkout --repo="$SYSROOT/ostree/repo" --force --disable-cache \
+    "$commit" "$dst" \
+    || die "ostree checkout of $commit failed"
+  # libostree's deploy would create an empty var/ (initial-var); mirror it.
+  mkdir -p "$dst/var"
+  mkcomposefs "$dst" "$dst/.ostree.cfs" \
+    || die "mkcomposefs failed for $dst"
+  {
+    echo "[origin]"
+    echo "refspec=ostree/$stateroot"
+    echo "branch=ostree/$stateroot"
+    echo "imgref=$imgref"
+  } >"$dst.origin"
+}
+
+#######################################
 # Deploy an image to a stateroot, creating the stateroot if needed.
+#
+# Reimplemented for libostree 2026.x without the `ostree container` builtins
+# (voie (c)): flatten the OCI image with podman, commit the tree into the
+# sysroot repo, then assemble the stateroot deployment by hand
+# (deployment_write). The kernel-free layout rule applies: nothing here
+# invokes `ostree admin deploy` (it refuses trees without a kernel).
 # Globals:
 #   PROG, SYSROOT
 # Arguments:
@@ -501,18 +660,37 @@ cmd_deploy() {
   local stateroot=${2:-default}
   need_root
   need_tools
+  need_podman
   ensure_sysroot
 
   if [[ ! -d "$SYSROOT/ostree/deploy/$stateroot" ]]; then
     ostree admin stateroot-init --sysroot "$SYSROOT" "$stateroot" \
       || die "stateroot-init failed"
   fi
-  info "deploying $imgref -> stateroot $stateroot"
-  ostree container image deploy \
-    --sysroot "$SYSROOT" --stateroot "$stateroot" --imgref "$imgref" \
-    || die "ostree container image deploy failed"
-  ostree admin status --sysroot "$SYSROOT"
-  info "deployment: $(deploy_path "$stateroot")"
+
+  local work tree commit deploy
+  work=$(mktemp -d "$SYSROOT/deploy-work.XXXXXX")
+  tree="$work/rootfs"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$work'" EXIT
+
+  info "exporting rootfs of $imgref (podman, flatten)"
+  export_image_rootfs "$imgref" "$tree"
+  reshape_tree "$tree"
+
+  info "committing tree to the ostree repo (branch ostree/$stateroot)"
+  commit=$(ostree commit --repo="$SYSROOT/ostree/repo" \
+    --branch "ostree/$stateroot" --tree=dir="$tree" \
+    --subject "bootc image deploy") \
+    || die "ostree commit failed"
+  rm -rf "$work"
+
+  info "deploying $imgref -> stateroot $stateroot (deployment_write)"
+  deployment_write "$stateroot" "$commit" "$imgref"
+  deploy=$(deploy_path "$stateroot")
+  [[ -n $deploy ]] || die "deployment_write produced no deployment directory"
+  ostree admin status --sysroot "$SYSROOT" 2>/dev/null || true
+  info "deployment: $deploy (commit $commit)"
 }
 
 #######################################
