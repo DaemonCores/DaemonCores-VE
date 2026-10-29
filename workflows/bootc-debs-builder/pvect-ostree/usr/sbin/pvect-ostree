@@ -483,6 +483,11 @@ build_writable_layers() {
       ln -sf /dev/null "$etc/systemd/system/$u"
     done
   fi
+  # PVE never writes the resolver for an unmanaged guest; aardvark-dns (netavark
+  # DNS) needs one at service start, so seed the host resolver once.
+  if [[ ! -s $etc/resolv.conf && -r /etc/resolv.conf ]]; then
+    cp /etc/resolv.conf "$etc/resolv.conf"
+  fi
   chown -R "$UID_BASE:$UID_BASE" "$etc" "$var"
   build_bootc_shadow "$vmid" "$deploy"
 }
