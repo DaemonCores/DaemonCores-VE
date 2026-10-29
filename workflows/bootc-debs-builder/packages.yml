@@ -5,6 +5,7 @@
 # manifest-expand action resolves each variant into a plain package entry.
 #
 # Shared deb logic: DaemonCores-CI scripts/deb_helpers.sh, imported
+# implicitly (strict mode enforced by build-deb.sh: -euo pipefail) by
 # implicitly by build-deb.sh (once, for every build) — no helper plumbing
 # appears in the build blocks. The overlay model: package dirs mirror the deb tree
 # (variant-source: "{variant}" hashes each mirror); modified upstream files
@@ -21,7 +22,6 @@ packages:
     env:
       HELPERS_VER: 1
     build: |
-      set -euo pipefail
       deb_repack "${PKG}" "${VER_SUFFIX}" "${PKG}"
     deb-glob: "{variant}_*"
     variants:
@@ -48,7 +48,6 @@ packages:
     env:
       HELPERS_VER: 1
     build: |
-      set -euo pipefail
       deb_overlay_tree "${PKG}" "${VER_SUFFIX}" "${PKG}" ${EXTRA_EXEC:-}
     deb-glob: "{variant}_*"
     variants:
@@ -75,7 +74,6 @@ packages:
     env:
       HELPERS_VER: 1
     build: |
-      set -euo pipefail
       deb_custom "${PKG}" "${PKG_VER}" "${PKG}"
     deb-glob: "{variant}_*"
     variants:
@@ -114,7 +112,6 @@ packages:
     env:
       HELPERS_VER: 1
     build: |
-      set -euo pipefail
       # Bespoke content surgery (temporary inline form, PENDING: the grub /
       # triggers removal becomes a mirror tree + deletion .patch like the
       # other repacks once generated against a pristine tree).
