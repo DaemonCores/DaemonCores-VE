@@ -3,7 +3,7 @@
 # pvect-ostree — run bootc/OCI images as unprivileged, immutable Proxmox LXC.
 #
 # Usage:
-#   pvect-ostree deploy   <image-ref> [<stateroot>]
+#   pvect-ostree deploy   <image-ref> <stateroot> <vmid>
 #   pvect-ostree create   <vmid> <image-ref> [pct-option ...]
 #   pvect-ostree update   <vmid> [<image-ref>]
 #   pvect-ostree rollback <vmid>
@@ -12,6 +12,8 @@
 #   pvect-ostree normalise <vmid>
 #   pvect-ostree list
 #   pvect-ostree destroy  <vmid>
+#   pvect-ostree migrate  <vmid>
+#   pvect-ostree retire
 #   pvect-ostree build    <compose.yml> [--name N]
 #   pvect-ostree publish  <compose.yml> [--name N] [--timer]
 #   pvect-ostree templates [<name>]
@@ -19,20 +21,32 @@
 #   pvect-ostree adopt    <vmid>
 #
 # What it does:
-#   A bootc image is an OCI image carrying a whole OS. This tool deploys such an
-#   image on the host as an ostree/composefs deployment, then presents that
-#   deployment as the rootfs of a *standard, unprivileged* Proxmox container:
+#   A bootc image is an OCI image carrying a whole OS. This tool deploys such
+#   an image as an ostree/composefs deployment, then presents that deployment
+#   as the rootfs of a *standard, unprivileged* Proxmox container:
 #
+#     * ALL container volumes are standard PVE ones, allocated via the PVE
+#       storage API (default: SSD-600G-VM-DISKS, content images+rootdir+backup):
+#       - rootfs  = SSD-600G-VM-DISKS:<vmid>/subvol-<vmid>-disk-0 (rootdir);
+#       - mp0/mp1/mp2 = the writable /etc, /var and /usr/lib/bootc layers,
+#         the same way — NEVER host bind mounts (invisible to PVE: no
+#         vzdump/move/quota/UI). `migrate` moves legacy binds.
+#       - vztmpl seed templates = local-btrfs:vztmpl/<stack>.tar.gz, uploaded
+#         through the storage API by `publish`.
+#     * The per-CT composefs sysroot lives INSIDE the rootfs volume, under
+#       pvect-ostree/sysroot: it is a rebuildable image of what `deploy`
+#       staged, re-pullable and jetable — never host state.
 #     * The rootfs is the composefs view of the deployment, mounted with
 #       `mount.composefs -o idmap=<userns>` so a file owned by root on-disk
-#       shows up as the id-mapped range on the host and, through the container's
-#       own user namespace, as root inside — no chown of the read-only image
-#       and no idmapped-mount of the overlay (which the kernel refuses).
-#     * /usr stays read-only and fs-verity-checked (the image is immutable); the
-#       container cannot modify its own OS.
-#     * /etc and /var are writable per-container layers, attached as ordinary
-#       PVE mount points (mp0/mp1) because PVE stages the rootfs non-recursively
-#       and would otherwise drop sub-mounts.
+#       shows up as the id-mapped range on the host and, through the
+#       container's own user namespace, as root inside — no chown of the
+#       read-only image and no idmapped-mount of the overlay (which the
+#       kernel refuses).
+#     * /usr stays read-only and fs-verity-checked (the image is immutable);
+#       the container cannot modify its own OS.
+#     * Writable /etc and /var are per-container PVE volumes (mp0/mp1) because
+#       PVE stages the rootfs non-recursively and would otherwise drop
+#       sub-mounts.
 #     * The container is `unprivileged: 1` + `features: nesting=1` — exactly
 #       the posture of a normal PVE systemd guest, no extra privilege.
 #
@@ -42,11 +56,15 @@
 #   prior deployment, never by mutating a live root.
 #
 #   Compose stacks: `build` and `publish` turn a docker-compose stack into a
-#   published LXC template on the pvect-ostree storage (via compose2bootc,
-#   smoke-gated); `pct create <vmid> ostree:vztmpl/<stack>.tar.zst` is then the
-#   standard entry point — the seed template is adopted at first activation.
-#   `refresh` rebuilds a CT from its recorded compose source; `templates` lists
-#   the published stacks.
+#   published LXC template on the PVE btrfs storage (via compose2bootc,
+#   smoke-gated); `pct create <vmid> local-btrfs:vztmpl/<stack>.tar.gz` is
+#   then the standard entry point — the seed template is adopted at first
+#   activation. `refresh` rebuilds a CT from its recorded compose source;
+#   `templates` lists the published stacks.
+#
+#   `retire` removes the legacy plugin storage 'ostree' (refuses while
+#   volumes still live on it); the ostree plugin type itself stays installed
+#   for migration reads only.
 #
 # Why the rootfs mount is re-established on boot:
 #   The composefs view is a runtime mount; it does not survive a host reboot.
@@ -62,19 +80,25 @@ readonly CONF=/etc/pvect-ostree/pvect-ostree.conf
 readonly PROG=${0##*/}
 
 # --- Defaults (overridden by CONF) ------------------------------------------
-SYSROOT=/var/lib/pvect-ostree/sysroot
-STATE_DIR=/var/lib/pvect-ostree/cts
-STORAGE=local
-TEMPLATE_STORAGE=local-btrfs # vztmpl source for rootfs allocation (local is disabled)
-ROOTFS_STORAGE=SSD-600G-VM-DISKS # rootdir target for pct create
+# Per-CT composefs sysroot: every staged deployment lives INSIDE the CT's own
+# rootfs volume, under <rootfs>/pvect-ostree/sysroot — it is re-pullable and
+# jetable (publish re-deploy rebuilds it), never host state.
+SYSROOT=
+STATE_DIR=/var/lib/pvect-ostree/cts # per-CT registry ($STATE_DIR/<vmid>.env)
+STORAGE=SSD-600G-VM-DISKS
+TEMPLATE_STORAGE=local-btrfs # vztmpl target: PVE btrfs storage, template/cache
+ROOTFS_STORAGE=SSD-600G-VM-DISKS # rootdir target for pct create (rootfs + mp)
 UID_BASE=100000
 UID_RANGE=65536
 USERNS=/run/pvect-ostree/userns
 ALLOC_TEMPLATE_MATCH=alpine-.*amd64
 GUEST_MASK_UNITS=""
-PLUGIN_STORAGE=ostree # storeid auto-registered for the pvect-ostree plugin
 COMPOSE_DIR=/var/lib/pvect-ostree/compose # recorded compose sources per stack
-TEMPLATE_DIR= # derived from SYSROOT (below); settable in the CONF
+# Writable per-CT layer volumes (/etc, /var, /usr/lib/bootc) allocated on the
+# PVE storage API when a CT is created or migrated — never host binds.
+MP_ETC_SIZE=1   # GB (writable /etc volume)
+MP_VAR_SIZE=16  # GB (writable /var volume — service data lives here)
+MP_BOOTC_SIZE=16 # GB (writable /usr/lib/bootc image store)
 
 # shellcheck source=/dev/null
 [[ -r $CONF ]] && . "$CONF"
@@ -230,54 +254,59 @@ pin_userns() {
 }
 
 #######################################
-# Initialise the ostree sysroot and enable composefs generation.
+# Initialise an ostree sysroot and enable composefs generation.
 # Globals:
-#   SYSROOT
+#   None
+# Arguments:
+#   $1 - sysroot directory
 # Outputs:
 #   Error via die() on ostree failure.
 # Returns:
 #   Exits 1 on failure.
 #######################################
 ensure_sysroot() {
-  if [[ ! -d "$SYSROOT/ostree" ]]; then
-    mkdir -p "$SYSROOT"
-    ostree admin init-fs --modern "$SYSROOT" \
+  local sysroot=$1
+  if [[ ! -d "$sysroot/ostree" ]]; then
+    mkdir -p "$sysroot"
+    ostree admin init-fs --modern "$sysroot" \
       || die "ostree admin init-fs failed"
   fi
   # Guarantee a .ostree.cfs is generated for every deployment.
-  ostree config --repo="$SYSROOT/ostree/repo" set ex-integrity.composefs true \
+  ostree config --repo="$sysroot/ostree/repo" set ex-integrity.composefs true \
     || die "ostree config ex-integrity.composefs failed"
 }
 
 #######################################
 # Print the newest deployment directory for a stateroot ('' if none).
 # Globals:
-#   SYSROOT
+#   None
 # Arguments:
 #   $1 - stateroot name
+#   $2 - sysroot directory
 # Outputs:
 #   Deployment directory path on stdout.
 #######################################
 deploy_path() {
-  local stateroot=$1
+  local stateroot=$1 sysroot=$2
   # Newest by mtime: commit checksums sort lexicographically, not by age, so
   # the `.0` suffix alone (find + sort) can pick a stale deployment.
-  ls -td "$SYSROOT/ostree/deploy/$stateroot/deploy"/*.0 2>/dev/null | head -1
+  ls -td "$sysroot/ostree/deploy/$stateroot/deploy"/*.0 2>/dev/null | head -1
 }
 
 #######################################
 # Print the previous deployment directory ('' if only one exists).
 # Globals:
-#   SYSROOT
+#   None
 # Arguments:
 #   $1 - stateroot name
+#   $2 - sysroot directory
 # Outputs:
 #   Deployment directory path on stdout.
 #######################################
 deploy_path_prev() {
-  local stateroot=$1
+  local stateroot=$1 sysroot=$2
   # Second newest by mtime (same caveat as deploy_path: no lexicographic sort).
-  ls -td "$SYSROOT/ostree/deploy/$stateroot/deploy"/*.0 2>/dev/null | sed -n 2p
+  ls -td "$sysroot/ostree/deploy/$stateroot/deploy"/*.0 2>/dev/null | sed -n 2p
 }
 
 #######################################
@@ -336,8 +365,7 @@ EOF
 # Resolution order:
 #   1. the volume recorded in the CT config itself (pct config rootfs) — the
 #      created volume is authoritative wherever it lives (any storeid);
-#   2. the plugin storage (self-contained layout);
-#   3. the classic dir storage configured in the CONF.
+#   2. the configured dir storage (STORAGE).
 # Globals:
 #   STORAGE
 # Arguments:
@@ -360,9 +388,8 @@ subvol_path() {
       return 0
     fi
   fi
-  # Prefer the plugin storage (self-contained layout), then the classic dir
-  # storage configured in the CONF.
-  for s in "$PLUGIN_STORAGE" "$STORAGE"; do
+  # Fall back to the configured dir storage.
+  for s in "$STORAGE"; do
     base=$(pvesm path "$s:$vmid/subvol-$vmid-disk-0.subvol" 2>/dev/null)
     if [[ -n $base ]]; then
       echo "$base"
@@ -380,29 +407,32 @@ subvol_path() {
 }
 
 #######################################
-# Print the writable per-CT /etc directory (persists in /var across reboot).
+# Print the writable per-CT /etc layer host path.
+#
+# Volume-backed CTs: the host path of the mp0 volume; legacy (pre-migration)
+# CTs: the registered host tree. Read-only helper; never a mount target.
 # Globals:
 #   STATE_DIR
 # Arguments:
 #   $1 - vmid
 # Outputs:
-#   /etc layer path on stdout.
+#   Layer host path on stdout.
 #######################################
-ct_etc() { echo "$STATE_DIR/$1/etc"; }
+ct_etc() { mp_vol_path "$1" mp0 || echo "$STATE_DIR/$1/etc"; }
 
 #######################################
-# Print the writable per-CT /var directory (persists across reboot).
+# Print the writable per-CT /var layer host path (same resolution as ct_etc).
 # Globals:
 #   STATE_DIR
 # Arguments:
 #   $1 - vmid
 # Outputs:
-#   /var layer path on stdout.
+#   Layer host path on stdout.
 #######################################
-ct_var() { echo "$STATE_DIR/$1/var"; }
+ct_var() { mp_vol_path "$1" mp1 || echo "$STATE_DIR/$1/var"; }
 
 #######################################
-# Print the writable per-CT /usr/lib/bootc shadow (bootc image store).
+# Print the writable per-CT /usr/lib/bootc shadow host path.
 # Globals:
 #   STATE_DIR
 # Arguments:
@@ -410,7 +440,40 @@ ct_var() { echo "$STATE_DIR/$1/var"; }
 # Outputs:
 #   Bootc shadow path on stdout.
 #######################################
-ct_bootc() { echo "$STATE_DIR/$1/bootc"; }
+ct_bootc() { mp_vol_path "$1" mp2 || echo "$STATE_DIR/$1/bootc"; }
+
+#######################################
+# Print the host path of a PVE mp volume allocated for a CT ('' if the mp is
+# a legacy host-path bind or absent).
+# Globals:
+#   None
+# Arguments:
+#   $1 - vmid
+#   $2 - mp slot (mp0, mp1, ...)
+# Outputs:
+#   Host path on stdout.
+#######################################
+mp_vol_path() {
+  local vmid=$1 mpx=$2 line vol
+  line=$(pct config "$vmid" 2>/dev/null | awk -v m="^$mpx: " '$0 ~ m {print; exit}')
+  [[ -n $line ]] || return 1
+  vol=${line#"$mpx": }
+  vol=${vol%%,*}
+  [[ $vol == /* ]] && return 1 # legacy host-path bind, not a volume
+  pvesm path "$vol" || return 1
+}
+
+#######################################
+# Print the per-CT composefs sysroot, hosted INSIDE the CT rootfs volume
+# (subfolder pvect-ostree/ — re-pullable, jetable, never host state).
+# Globals:
+#   None
+# Arguments:
+#   $1 - vmid
+# Outputs:
+#   Sysroot path on stdout.
+#######################################
+ct_sysroot() { echo "$(subvol_path "$1")/pvect-ostree/sysroot"; }
 
 #######################################
 # Shadow /usr/lib/bootc with a writable copy plus the storage/ directory.
@@ -443,23 +506,32 @@ build_bootc_shadow() {
 
 #######################################
 # Build the writable /etc from the deployment's default /usr/etc and mask the
-# host-only units so the guest boots clean. Idempotent-ish: only (re)builds
-# /etc when it is missing, to preserve local changes across updates.
+# host-only units so the guest boots clean. Only (re)builds /etc when it is
+# missing, to preserve local changes across updates.
+#
+# The layers are the PVE mp VOLUMES (mp0=/etc, mp1=/var, mp2=/usr/lib/bootc)
+# resolved host-side via pct config; legacy (pre-migration) CTs still resolve
+# to the registered host trees, which is where their data lives until
+# `pvect-ostree migrate` moves it.
 # Globals:
-#   GUEST_MASK_UNITS, UID_BASE
+#   GUEST_MASK_UNITS, UID_BASE, STATEROOT
 # Arguments:
 #   $1 - vmid
-#   $2 - deployment directory
 # Outputs:
 #   Error via die() if /etc cannot be seeded.
 # Returns:
 #   Exits 1 on failure.
 #######################################
 build_writable_layers() {
-  local vmid=$1 deploy=$2
-  local etc var u
+  local vmid=$1
+  local etc var u deploy
   etc=$(ct_etc "$vmid")
   var=$(ct_var "$vmid")
+  # The deployment tree (plain checkout inside the per-CT sysroot) carries the
+  # seed /etc and the bootc shadow sources — readable host-side without the
+  # composefs mount.
+  # shellcheck disable=SC2153  # STATEROOT sourced from the registry entry.
+  deploy=$(deploy_path "$STATEROOT" "$(ct_sysroot "$vmid")")
 
   mkdir -p "$var"
   if [[ ! -d "$etc/systemd" ]]; then
@@ -503,7 +575,7 @@ build_writable_layers() {
 #######################################
 # Mount the composefs view (id-shifted) onto the CT rootfs subvol.
 # Globals:
-#   SYSROOT, USERNS, STATEROOT
+#   USERNS
 # Arguments:
 #   $1 - vmid
 # Outputs:
@@ -516,32 +588,38 @@ mount_rootfs() {
   reg_load "$vmid"
   pin_userns
 
-  local deploy root
+  local deploy root sysroot
   # STATEROOT comes from the sourced registry .env (reg_load above).
   # shellcheck disable=SC2153
-  deploy=$(deploy_path "$STATEROOT")
-  [[ -n $deploy ]] || die "no deployment for CT $vmid (stateroot $STATEROOT)"
   root=$(subvol_path "$vmid")
   [[ -d $root ]] || die "rootfs subvol missing: $root (was the CT created?)"
+  # The per-CT sysroot lives inside the rootfs volume (re-pullable, jetable).
+  sysroot="$root/pvect-ostree/sysroot"
+  deploy=$(deploy_path "$STATEROOT" "$sysroot")
+  [[ -n $deploy ]] || die "no deployment for CT $vmid (stateroot $STATEROOT)"
 
   if mountpoint -q "$root"; then
     return 0 # already mounted (e.g. CT already running)
   fi
 
+  # Stage the writable /etc + /var + bootc layers into the PVE mp volumes.
+  build_writable_layers "$vmid" ""
+
   # The subvol PVE allocated may hold leftover template content; clear it so
-  # the composefs view is what the container sees.
-  find "$root" -mindepth 1 -delete 2>/dev/null || true
+  # the composefs view is what the container sees. The pvect-ostree/ folder
+  # (sysroot) is protected — the mounts read out of it while it is shadowed
+  # behind the composefs view.
+  find "$root" -mindepth 1 -name pvect-ostree -prune -o -mindepth 1 \
+    -print0 | xargs -0 -r rm -rf -- 2>/dev/null || true
 
   # The digest store lives inside the deployment (mkcomposefs names its files
   # by content digest); fall back to the bare repo objects for older layouts.
   local store="$deploy/.ostree-cfs-store"
-  local basedir="$SYSROOT/ostree/repo/objects"
+  local basedir="$sysroot/ostree/repo/objects"
   [[ -d $store ]] && basedir="$store"
   mount -t composefs "$deploy/.ostree.cfs" \
     -o "basedir=$basedir,idmap=$USERNS" "$root" \
     || die "mount.composefs failed for CT $vmid"
-
-  build_writable_layers "$vmid" "$root"
 }
 
 #######################################
@@ -564,20 +642,21 @@ umount_rootfs() {
 #   - no idmap= on rootfs   -> avoids the fatal mount_setattr on the overlay
 #   - ostype: unmanaged     -> PVE does not rewrite our /etc
 #   - apparmor param bind   -> apparmor.service skips instead of asserting
-#   - mp0=/etc mp1=/var     -> writable layers survive non-recursive staging
+#   - mp0=/etc mp1=/var     -> writable layers as PVE mp VOLUMES (storage API
+#                              allocated, host-bind-free); legacy host-path
+#                              binds are migrated by `pvect-ostree migrate`.
+# Globals:
+#   ROOTFS_STORAGE, MP_ETC_SIZE, MP_VAR_SIZE, MP_BOOTC_SIZE
 # Arguments:
 #   $1 - vmid
 # Outputs:
-#   Error via die() if the CT config is absent.
+#   Error via die() if the CT config is absent or an allocation fails.
 # Returns:
 #   Exits 1 when the config is missing.
 #######################################
 normalise_conf() {
   local vmid=$1 conf="/etc/pve/lxc/$1.conf"
   [[ -f $conf ]] || die "CT config not found: $conf"
-  local etc var
-  etc=$(ct_etc "$vmid")
-  var=$(ct_var "$vmid")
 
   sed -i 's/,idmap=passthrough//; s/,idmap=[^, ]*//' "$conf"
   sed -i 's/^ostype:.*/ostype: unmanaged/' "$conf"
@@ -593,12 +672,21 @@ EOF
 lxc.mount.entry: tmpfs run tmpfs rw,nosuid,nodev,create=dir,optional 0 0
 lxc.mount.entry: tmpfs tmp tmpfs rw,nosuid,nodev,create=dir,optional 0 0
 EOF
-  sed -i '/^mp[0-9]\+: .*mp=\/etc\b/d; /^mp[0-9]\+: .*mp=\/var\b/d' "$conf"
-  {
-    echo "mp0: $etc,mp=/etc"
-    echo "mp1: $var,mp=/var"
-    echo "mp2: $(ct_bootc "$vmid"),mp=/usr/lib/bootc"
-  } >>"$conf"
+  # Allocate the writable layers that are missing from the config: a fresh
+  # `create` carries them already (--mp0/1/2 via the storage API); a CT
+  # normalised before the volume rework carries host-path binds which are ONLY
+  # replaced by the guarded `migrate` flow (data copied first), never here.
+  local slot mpoint need
+  for slot in 0 1 2; do
+    case $slot in
+      0) mpoint=/etc; need=mp0 ;;
+      1) mpoint=/var; need=mp1 ;;
+      2) mpoint=/usr/lib/bootc; need=mp2 ;;
+    esac
+    grep -qE "^mp$slot: [^/]" "$conf" || grep -qE "^mp$slot: " "$conf" || \
+      pct set "$vmid" --mp$slot "$ROOTFS_STORAGE:1,mp=$mpoint" \
+      || die "allocation of $need ($mpoint) on $STORAGE failed"
+  done
 }
 
 #######################################
@@ -683,9 +771,9 @@ reshape_tree() {
 #   Exits 1 when the checkout or the composefs generation fails.
 #######################################
 deployment_write() {
-  local stateroot=$1 commit=$2 imgref=$3
+  local sysroot=$1 stateroot=$2 commit=$3 imgref=$4
   local parent dst max i
-  parent="$SYSROOT/ostree/deploy/$stateroot/deploy"
+  parent="$sysroot/ostree/deploy/$stateroot/deploy"
   mkdir -p "$parent"
   # Shift every existing index up so the newest stays .0 (new commit wins,
   # the old .0 drops to .1 and remains the rollback target).
@@ -702,7 +790,7 @@ deployment_write() {
   done
   shopt -u nullglob
   dst=$parent/$commit.0
-  ostree checkout --repo="$SYSROOT/ostree/repo" --disable-cache \
+  ostree checkout --repo="$sysroot/ostree/repo" --disable-cache \
     "$commit" "$dst" \
     || die "ostree checkout of $commit failed"
   # libostree's deploy would create an empty var/ (initial-var); mirror it.
@@ -721,38 +809,41 @@ deployment_write() {
 }
 
 #######################################
-# Deploy an image to a stateroot, creating the stateroot if needed.
+# Deploy an image to a stateroot inside a CT's own sysroot.
 #
 # Reimplemented for libostree 2026.x without the `ostree container` builtins
-# (voie (c)): flatten the OCI image with podman, commit the tree into the
-# sysroot repo, then assemble the stateroot deployment by hand
-# (deployment_write). The kernel-free layout rule applies: nothing here
-# invokes `ostree admin deploy` (it refuses trees without a kernel).
+# (voie (c)): flatten the OCI image with podman, commit the tree into the CT
+# sysroot repo (hosted INSIDE the rootfs volume), then assemble the stateroot
+# deployment by hand (deployment_write). The kernel-free layout rule applies:
+# nothing here invokes `ostree admin deploy` (it refuses trees without a
+# kernel).
 # Globals:
-#   PROG, SYSROOT
+#   PROG
 # Arguments:
 #   $1 - image reference
-#   $2 - stateroot (default: default)
+#   $2 - stateroot
+#   $3 - sysroot directory (rootfs-volume-backed)
 # Outputs:
 #   Progress via info(); errors via die().
 # Returns:
 #   Exits 1 on failure.
 #######################################
 cmd_deploy() {
-  local imgref=${1:?usage: $PROG deploy <image-ref> [<stateroot>]}
-  local stateroot=${2:-default}
+  local imgref=${1:?usage: $PROG deploy <image-ref> <stateroot> <vmid>}
+  local stateroot=${2:?usage: $PROG deploy <image-ref> <stateroot> <vmid>}
+  local sysroot=${3:?usage: $PROG deploy <image-ref> <stateroot> <vmid>}
   need_root
   need_tools
   need_podman
-  ensure_sysroot
+  ensure_sysroot "$sysroot"
 
-  if [[ ! -d "$SYSROOT/ostree/deploy/$stateroot" ]]; then
-    ostree admin stateroot-init --sysroot "$SYSROOT" "$stateroot" \
+  if [[ ! -d "$sysroot/ostree/deploy/$stateroot" ]]; then
+    ostree admin stateroot-init --sysroot "$sysroot" "$stateroot" \
       || die "stateroot-init failed"
   fi
 
   local work tree commit deploy
-  work=$(mktemp -d "$SYSROOT/deploy-work.XXXXXX")
+  work=$(mktemp -d "$sysroot/deploy-work.XXXXXX")
   tree="$work/rootfs"
   # shellcheck disable=SC2064
   trap "rm -rf '$work'" EXIT
@@ -762,17 +853,17 @@ cmd_deploy() {
   reshape_tree "$tree"
 
   info "committing tree to the ostree repo (branch ostree/$stateroot)"
-  commit=$(ostree commit --repo="$SYSROOT/ostree/repo" \
+  commit=$(ostree commit --repo="$sysroot/ostree/repo" \
     --branch "ostree/$stateroot" --tree=dir="$tree" \
     --subject "bootc image deploy") \
     || die "ostree commit failed"
   rm -rf "$work"
 
   info "deploying $imgref -> stateroot $stateroot (deployment_write)"
-  deployment_write "$stateroot" "$commit" "$imgref"
-  deploy=$(deploy_path "$stateroot")
+  deployment_write "$sysroot" "$stateroot" "$commit" "$imgref"
+  deploy=$(deploy_path "$stateroot" "$sysroot")
   [[ -n $deploy ]] || die "deployment_write produced no deployment directory"
-  ostree admin status --sysroot "$SYSROOT" 2>/dev/null || true
+  ostree admin status --sysroot "$sysroot" 2>/dev/null || true
   info "deployment: $deploy (commit $commit)"
 }
 
@@ -810,10 +901,11 @@ alloc_template() {
 }
 
 #######################################
-# Create a new pvect-ostree container: deploy the image, allocate the rootfs
-# subvol via a discarded template, mount the composefs view, normalise config.
+# Create a new pvect-ostree container: allocate the rootfs + writable-layer
+# volumes via the PVE storage API, deploy the image into the per-CT sysroot
+# (inside the rootfs volume), mount the composefs view, normalise the config.
 # Globals:
-#   PROG, STORAGE
+#   PROG, ROOTFS_STORAGE
 # Arguments:
 #   $1  - vmid
 #   $2  - image reference
@@ -835,22 +927,25 @@ cmd_create() {
   cd /
   [[ -f "/etc/pve/lxc/$vmid.conf" ]] && die "CT $vmid already exists"
 
-  local stateroot="ct$vmid"
-  cmd_deploy "$imgref" "$stateroot"
-  reg_write "$vmid" "$stateroot" "$imgref"
-
   local tmpl
   tmpl=$(alloc_template)
-  info "allocating rootfs subvol via pct create (template $tmpl, discarded)"
+  info "allocating rootfs + writable layers via pct create (template $tmpl, discarded)"
   pct create "$vmid" "$TEMPLATE_STORAGE:vztmpl/$tmpl" \
     --unprivileged 1 --features nesting=1 \
     --hostname "ct$vmid" --rootfs "$ROOTFS_STORAGE:0" \
+    --mp0 "$ROOTFS_STORAGE:$MP_ETC_SIZE,mp=/etc" \
+    --mp1 "$ROOTFS_STORAGE:$MP_VAR_SIZE,mp=/var" \
+    --mp2 "$ROOTFS_STORAGE:$MP_BOOTC_SIZE,mp=/usr/lib/bootc" \
     --net0 name=eth0,bridge=vmbr0,ip=dhcp,type=veth,firewall=1 \
     "$@" \
     || die "pct create failed"
 
-  mount_rootfs "$vmid"
+  local stateroot="ct$vmid"
+  reg_write "$vmid" "$stateroot" "$imgref"
+  cmd_deploy "$imgref" "$stateroot" "$(ct_sysroot "$vmid")"
+
   normalise_conf "$vmid"
+  mount_rootfs "$vmid"
   info "CT $vmid created. Start it from the Web UI or: pct start $vmid"
 }
 
@@ -880,7 +975,7 @@ cmd_update() {
   [[ "$(pct status "$vmid" 2>/dev/null)" == *running* ]] && running=1
   [[ $running -eq 1 ]] && pct shutdown "$vmid" --timeout 60 2>/dev/null
 
-  cmd_deploy "$imgref" "$STATEROOT"
+  cmd_deploy "$imgref" "$STATEROOT" "$(ct_sysroot "$vmid")"
   reg_write "$vmid" "$STATEROOT" "$imgref" "$compose_saved"
   umount_rootfs "$vmid"
   mount_rootfs "$vmid"
@@ -892,11 +987,11 @@ cmd_update() {
 # Roll a container back to its previous deployment by undeploying the current
 # one. Restarts the CT onto the previous deployment if it was running.
 # Globals:
-#   PROG, SYSROOT, STATEROOT
+#   PROG, STATEROOT
 # Arguments:
 #   $1 - vmid
 # Outputs:
-#   Progress via info(); warnings via warn(); errors via die().
+#   Progress via info(); errors via die().
 # Returns:
 #   Exits 1 when there is no previous deployment.
 #######################################
@@ -906,8 +1001,11 @@ cmd_rollback() {
   need_root
   need_tools
 
+  # shellcheck disable=SC2153  # STATEROOT comes from the sourced entry above.
+  local sysroot
+  sysroot=$(ct_sysroot "$vmid")
   local prev
-  prev=$(deploy_path_prev "$STATEROOT")
+  prev=$(deploy_path_prev "$STATEROOT" "$sysroot")
   [[ -n $prev ]] || die "no previous deployment to roll back to for CT $vmid"
 
   local running=0
@@ -915,7 +1013,7 @@ cmd_rollback() {
   [[ $running -eq 1 ]] && pct shutdown "$vmid" --timeout 60 2>/dev/null
 
   # Undeploy the current (index 0) so the previous becomes current.
-  ostree admin undeploy --sysroot "$SYSROOT" --stateroot "$STATEROOT" 0 \
+  ostree admin undeploy --sysroot "$sysroot" --stateroot "$STATEROOT" 0 \
     || warn "ostree undeploy reported an error; continuing"
   umount_rootfs "$vmid"
   mount_rootfs "$vmid"
@@ -967,33 +1065,29 @@ cmd_umount() {
 }
 
 #######################################
-# Register the pvect-ostree storage once, idempotently (writes to pmxcfs).
+# Retire the legacy pvect-ostree plugin storage (storeid 'ostree').
+#
+# The storage must never be re-created automatically: rootdir volumes now come
+# from the standard dir storage and vztmpl from local-btrfs. Refuses while
+# volumes still live on the old storeid (migrate them first).
 # Globals:
-#   PLUGIN_STORAGE, SYSROOT
+#   None
 # Outputs:
-#   Progress via info(); warnings via warn().
+#   Progress via info(); errors via die().
 # Returns:
-#   0 when pvesm is absent or pmxcfs is not up yet.
+#   Exits 1 on failure or refusal.
 #######################################
-cmd_seed() {
+cmd_retire() {
   need_root
-  command -v pvesm >/dev/null 2>&1 || return 0
-  if ! pvesm status 2>/dev/null | awk '{print $1}' \
-    | grep -qx "$PLUGIN_STORAGE"; then
-    # pmxcfs not up yet; retry next boot
-    mountpoint -q /etc/pve 2>/dev/null || return 0
-    # `&& info || warn`: info never fails, so this reports success/failure of
-    # the pvesm add (A); warn (C) only runs when A fails.
-    # shellcheck disable=SC2015
-    pvesm add pvect-ostree "$PLUGIN_STORAGE" --content rootdir,vztmpl \
-      --pvect-sysroot "$SYSROOT" 2>/dev/null \
-      && info "registered storage '$PLUGIN_STORAGE' (type pvect-ostree)" \
-      || warn "could not register storage '$PLUGIN_STORAGE' (plugin loaded?)"
-  else
-    # Older registrations may lack the vztmpl content; keep it current.
-    pvesm set "$PLUGIN_STORAGE" --content rootdir,vztmpl 2>/dev/null \
-      || true
-  fi
+  command -v pvesm >/dev/null 2>&1 || die "pvesm not found"
+  pvesm status 2>/dev/null | awk '{print $1}' | grep -qx "ostree" \
+    || { info "storage 'ostree' already absent"; return 0; }
+  local n
+  n=$(pvesm list ostree 2>/dev/null | awk 'NR > 1' | wc -l)
+  [[ $n -eq 0 ]] || die "storage 'ostree' still holds $n volume(s); migrate first"
+  pvesm remove ostree 2>/dev/null \
+    || die "pvesm remove ostree failed"
+  info "storage 'ostree' retired (plugin type pvect-ostree stays installed for migration reads)"
 }
 
 #######################################
@@ -1009,7 +1103,6 @@ cmd_remount_all() {
   need_root
   need_tools
   pin_userns
-  cmd_seed || true
   local f vmid rc=0
   shopt -s nullglob
   for f in "$REG_DIR"/*.env; do
@@ -1053,10 +1146,12 @@ cmd_list() {
 
 #######################################
 # Stop, unmount, destroy and de-register a container, then purge the ostree
-# stateroot (branch ref, deployment tree, volume dir and cts shadow): a
-# destroy that left the sysroot half-populated made renames a manual sweep.
+# stateroot (branch ref + deployment tree): a destroy that left the sysroot
+# half-populated made renames a manual sweep. The per-CT sysroot lives inside
+# the rootfs volume, so it goes away with the volume itself; pct destroy
+# --purge frees the rootfs and the writable-layer mp volumes.
 # Globals:
-#   PROG, SYSROOT, STATE_DIR
+#   PROG, STATE_DIR
 # Arguments:
 #   $1 - vmid
 # Outputs:
@@ -1076,14 +1171,22 @@ cmd_destroy() {
   fi
   pct stop "$vmid" 2>/dev/null
   umount_rootfs "$vmid"
+  # Purge the stateroot BEFORE the volume (and the per-CT sysroot inside it)
+  # goes away. The legacy host sysroot is cleaned too while it still exists.
+  local sysroot legacy_root=/var/lib/pvect-ostree/sysroot
+  if [[ -d $legacy_root/ostree/deploy/$stateroot ]]; then
+    sysroot=$legacy_root
+  elif [[ -d "$(ct_sysroot "$vmid")/ostree/deploy/$stateroot" ]]; then
+    sysroot=$(ct_sysroot "$vmid")
+  fi
+  if [[ -n ${sysroot:-} ]]; then
+    ostree refs --repo="$sysroot/ostree/repo" --delete "ostree/$stateroot" \
+      2>/dev/null || true
+    rm -rf "$sysroot/ostree/deploy/$stateroot"
+  fi
   pct destroy "$vmid" --purge 2>/dev/null
   rm -f "$(reg_file "$vmid")"
   rm -rf "${STATE_DIR:?}/$vmid" "${STATE_DIR:?}/$vmid.env"
-  # Purge what deploy built for this stateroot: branch ref and deployment
-  # tree. Repo objects stay behind and are collected lazily by ostree.
-  ostree refs --repo="$SYSROOT/ostree/repo" --delete "ostree/$stateroot" \
-    2>/dev/null || true
-  rm -rf "$SYSROOT/ostree/deploy/$stateroot" "$SYSROOT/volumes/$vmid"
   info "CT $vmid destroyed (stateroot $stateroot purged)"
 }
 
@@ -1155,12 +1258,14 @@ cmd_build() {
 }
 
 #######################################
-# Publish a compose stack as an LXC seed template on the pvect-ostree
-# storage: build (smoke-gated), then write <stack>.tar.gz plus the
-# relocation report and a listing sidecar. `pct create <vmid>
-# ostree:vztmpl/<stack>.tar.gz` is the standard entry point.
+# Publish a compose stack as an LXC seed template on the PVE btrfs storage,
+# uploaded through the storage API: build (smoke-gated), then
+# $TEMPLATE_STORAGE:vztmpl/<stack>.tar.gz. The payload + relocation sidecars
+# live beside the recorded compose source ($COMPOSE_DIR/<stack>/).
+# `pct create <vmid> $TEMPLATE_STORAGE:vztmpl/<stack>.tar.gz` is the standard
+# entry point.
 # Globals:
-#   TEMPLATE_DIR, COMPOSE_DIR
+#   COMPOSE_DIR, TEMPLATE_STORAGE
 # Arguments:
 #   $1 - compose file
 #   $2+ - [--name N] [--timer]
@@ -1190,7 +1295,7 @@ cmd_publish() {
 
   local tmp
   tmp=$(mktemp -d)
-  mkdir -p "$tmp/pvect-ostree" "$tmp/etc" "$TEMPLATE_DIR"
+  mkdir -p "$tmp/pvect-ostree" "$tmp/etc" "$COMPOSE_DIR/$STACK"
   cat >"$tmp/pvect-ostree/payload.env" <<EOF
 STACK=$STACK
 IMGREF=$imgref
@@ -1210,21 +1315,25 @@ EOF
   cat >"$tmp/etc/debian_version" <<'EOF'
 12/bookworm
 EOF
-  tar -czf "$TEMPLATE_DIR/$STACK.tar.gz" -C "$tmp" pvect-ostree etc \
+  tar -czf "$tmp/$STACK.tar.gz" -C "$tmp" pvect-ostree etc \
     || die "seed template tar failed"
-  cp "$tmp/pvect-ostree/payload.env" "$TEMPLATE_DIR/$STACK.payload.env"
-  # Keep the relocation report beside the template when compose2bootc wrote one.
+  pvesh create "/nodes/$(hostname)/storage/$TEMPLATE_STORAGE/upload" \
+    -filename "$tmp/$STACK.tar.gz" -content vztmpl \
+    || die "template upload to $TEMPLATE_STORAGE:vztmpl failed"
+  cp "$tmp/pvect-ostree/payload.env" "$COMPOSE_DIR/$STACK/$STACK.payload.env"
+  # Keep the relocation report beside the compose source when compose2bootc
+  # wrote one.
   cp "/var/lib/compose2bootc/$STACK/context/RELOCATIONS.txt" \
-    "$TEMPLATE_DIR/$STACK.RELOCATIONS.txt" 2>/dev/null \
+    "$COMPOSE_DIR/$STACK/$STACK.RELOCATIONS.txt" 2>/dev/null \
     || warn "no RELOCATIONS.txt found (kept report absent)"
   rm -rf "$tmp"
-  info "published template: pct create <vmid> ostree:vztmpl/$STACK.tar.gz"
+  info "published template: pct create <vmid> $TEMPLATE_STORAGE:vztmpl/$STACK.tar.gz"
 }
 
 #######################################
 # List the published compose templates with their image and compose source.
 # Globals:
-#   TEMPLATE_DIR
+#   COMPOSE_DIR
 # Arguments:
 #   $1 - optional stack name filter
 #######################################
@@ -1233,7 +1342,7 @@ cmd_templates() {
   local f stack
   printf '%-16s %-28s %s\n' STACK IMAGE COMPOSE
   shopt -s nullglob
-  for f in "$TEMPLATE_DIR"/*.payload.env; do
+  for f in "$COMPOSE_DIR"/*/*.payload.env; do
     # shellcheck source=/dev/null
     . "$f"
     # STACK/IMGREF/COMPOSE come from the sourced payload above.
@@ -1308,11 +1417,100 @@ cmd_adopt() {
   imgref=${IMGREF:-$imgref}
   compose=${COMPOSE:-$compose}
   info "adopting CT $vmid from seed template (stack ${stack:-?}, image $imgref)"
-  cmd_deploy "$imgref" "ct$vmid"
+  cmd_deploy "$imgref" "ct$vmid" "$(ct_sysroot "$vmid")"
   reg_write "$vmid" "ct$vmid" "$imgref" "${compose:-}"
-  mount_rootfs "$vmid"
   normalise_conf "$vmid"
+  mount_rootfs "$vmid"
   info "CT $vmid adopted; start it from the Web UI or: pct start $vmid"
+}
+
+#######################################
+# Migrate a legacy CT's writable-layer host-path binds to PVE mp volumes
+# (storage API allocated on ROOTFS_STORAGE), copying the data first.
+#
+# Per-CT, stop-then-copy discipline: the CT is stopped, each host-path mp
+# (etc/var/bootc/data/...) is copied byte-for-byte into a freshly allocated
+# rootdir volume, the conf line is swapped, then the CT is started back. The
+# source trees are PRESERVED (cleanup is an explicit, separate decision).
+# Hard gate: this refuses every production vmid unless PVECT_MIGRATE_GO=1 is
+# exported — the prototype window runs on 999x test CTs only.
+# Globals:
+#   PROG, ROOTFS_STORAGE
+# Arguments:
+#   $1 - vmid
+# Outputs:
+#   Progress via info(); errors via die().
+#######################################
+cmd_migrate() {
+  local vmid=${1:?usage: $PROG migrate <vmid>}
+  need_root
+  need_tools
+  local conf="/etc/pve/lxc/$1.conf"
+  [[ -f $conf ]] || die "CT config not found: $conf"
+  if ! [[ $vmid =~ ^99[0-9][0-9]$ ]]; then
+    [[ ${PVECT_MIGRATE_GO:-0} == 1 ]] \
+      || die "refusing production vmid $vmid: set PVECT_MIGRATE_GO=1 for the cutover"
+  fi
+
+  local was_running=0
+  [[ "$(pct status "$vmid" 2>/dev/null)" == *running* ]] && was_running=1
+  [[ $was_running -eq 1 ]] && {
+    info "stopping CT $vmid"
+    pct shutdown "$vmid" --timeout 120 || die "pct shutdown $vmid failed"
+  }
+
+  # Collect the legacy host-path mp lines (slot, source dir, ct mountpoint).
+  python3 - "$conf" <<'PY' >/tmp/pvect-migrate-$vmid.tsv || die "conf parse failed"
+import re, sys
+for line in open(sys.argv[1]):
+    m = re.match(r"^(mp\d+):\s*(\S+?)(?:,|$)", line)
+    if not m:
+        continue
+    slot, first = m.group(1), m.group(2)
+    mm = re.search(r",mp=(\S+?)(?:,|$)", line)
+    if mm:
+        target = mm.group(1)
+    else:
+        target = first  # legacy mp without mp= (PVE 5.x style)
+    if first.startswith("/"):
+        print(f"{slot}\t{first}\t{target}")
+PY
+
+  local slot src target volid volpath size next idx
+  while IFS=$'\t' read -r slot src target; do
+    [[ -n $slot && -n $src && -n $target ]] || continue
+    info "migrating $slot: $src -> $target"
+    [[ -d $src ]] || { warn "source missing: $src (skipped)"; continue; }
+    [[ $target == /* ]] || { warn "weird mountpoint $target (skipped)"; continue; }
+    # Size: du + 2G margin, GB, minimum 4 (1 G would be too tight for /etc
+    # trees that grew beyond the seed).
+    size=$(du -sk "$src" 2>/dev/null | awk '{print $1}')
+    (( size = (size + 2097152) / 1048576 ))
+    (( size < 4 )) && size=4
+    # Find the next free disk index across the storage for this vmid (disk-0
+    # is the rootfs, always present in the listing).
+    next=$(pvesm list "$ROOTFS_STORAGE" 2>/dev/null \
+      | grep "^${ROOTFS_STORAGE}:${vmid}/subvol-${vmid}-disk-" \
+      | grep -oE 'disk-[0-9]+' | sed 's/disk-//' | sort -n | tail -1)
+    next=${next:-0}
+    idx=$(( next + 1 ))
+    volid=$(pvesm alloc "$ROOTFS_STORAGE" "$vmid" \
+      "subvol-$vmid-disk-$idx.subvol" "${size}G") \
+      || die "allocation of the $slot volume ($size G) failed"
+    volpath=$(pvesm path "$volid") || die "cannot resolve $volid"
+    info "copying $src -> $volpath ($size G)"
+    mkdir -p "$volpath"
+    rsync -aHAX --numeric-ids --delete "$src/" "$volpath/" \
+      || die "copy of $slot failed"
+    info "swapping conf: $slot -> $volid"
+    sed -i "s~^$slot: .*~$slot: $volid,mp=$target~" "$conf" \
+      || die "conf swap failed for $slot"
+  done </tmp/pvect-migrate-$vmid.tsv
+  rm -f /tmp/pvect-migrate-$vmid.tsv
+
+  normalise_conf "$vmid"
+  [[ $was_running -eq 1 ]] && pct start "$vmid"
+  info "CT $vmid migrated to volume-backed layers (source trees preserved pre-cleanup)"
 }
 
 #######################################
@@ -1372,6 +1570,8 @@ main() {
     seed) cmd_seed "$@" ;;
     list) cmd_list "$@" ;;
     destroy) cmd_destroy "$@" ;;
+    migrate) cmd_migrate "$@" ;;
+    retire) cmd_retire "$@" ;;
     build) cmd_build "$@" ;;
     publish) cmd_publish "$@" ;;
     templates) cmd_templates "$@" ;;
