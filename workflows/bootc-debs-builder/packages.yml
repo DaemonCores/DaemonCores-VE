@@ -262,7 +262,8 @@ packages:
           && echo "WARN: key fetch failed (CDN SNI), using pre-mounted keyring" \
           || { echo "ERROR: no proxmox repo key available" >&2; exit 1; }; }
       apt-get update
-      KERNEL_VERSION=$(apt-cache policy proxmox-kernel-7.0 | sed -n 2p | awk '{print $2}')
+      KERNEL_VERSION=$(apt-cache policy proxmox-kernel-7.0 \
+        | awk '/Candidate:/ {print $2; exit}')
       test -n "${KERNEL_VERSION}" \
         || { echo "ERROR: cannot resolve the PVE kernel version" >&2; exit 1; }
 
