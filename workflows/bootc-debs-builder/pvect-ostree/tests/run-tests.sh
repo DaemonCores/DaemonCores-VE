@@ -176,6 +176,32 @@ else
   bad "seed resolution message: $out"
 fi
 
+info "== stage_mp_dir (mp file volumes) =="
+# Dir targets pass through unchanged; anything else (raw file) needs a loop
+# mount — root-only, so unit-test the passthrough and loud-death branches and
+# verify the descriptor shape the seed loop relies on.
+mkdir -p "$TMP/legacy-ct/9994/etc" "$TMP/legacy-ct/9994/var"
+out=$(stage_mp_dir "$TMP/legacy-ct/9994/etc")
+eq "$out" "$TMP/legacy-ct/9994/etc|" "stage_mp_dir passes an existing dir through (empty cleanup id)"
+out=$(stage_mp_dir "$TMP/legacy-ct/9994/var")
+eq "$out" "$TMP/legacy-ct/9994/var|" "stage_mp_dir passes a second dir through"
+out=$(stage_mp_dir "$TMP/does-not-exist" 2>&1 >/dev/null)
+if [[ $out == *"mp target does not exist"* ]]; then
+  ok "stage_mp_dir dies loudly on a missing target"
+else
+  bad "stage_mp_dir missing-target death: $out"
+fi
+# Raw FILE volumes must map to a loop-staged mount, never a directory op on
+# the file itself. Without root (no losetup), assert the function reaches the
+# mount path and dies loud — never silently treating the file as a dir.
+: >"$TMP/vm-214-disk-1.raw"
+out=$(stage_mp_dir "$TMP/vm-214-disk-1.raw" 2>&1 >/dev/null)
+if [[ $out == *"$TMP/vm-214-disk-1.raw"* ]] && [[ -f $TMP/vm-214-disk-1.raw ]]; then
+  ok "stage_mp_dir treats a raw file as a volume (loud stage attempt, file untouched)"
+else
+  bad "stage_mp_dir raw-file handling: $out"
+fi
+
 info "== publish --no-test flag parsing =="
 parse_stack_args 1 --name s --no-test
 eq "$STACK" "s" "publish: --name parsed with --no-test"
