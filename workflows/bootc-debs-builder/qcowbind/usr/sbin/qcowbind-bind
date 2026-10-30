@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# qcowbind-bind — bind a shared qcowbind volume into (or out of) LXC CTs.
+# qcowbind-bind — bind a qcowbind volume into (or out of) LXC CTs.
 #
 # PROTOTYPE. The host-side mount (nbd connect + FS mount) is owned by the
 # PVE storage plugin PVE::Storage::Custom::QcowBindPlugin (native UI path).
@@ -12,15 +12,25 @@
 # The bind line is idempotent keyed on the target path inside the CT, so a
 # re-bind replaces the entry instead of duplicating it.
 #
+# Volume formats (neutral naming, v2):
+#   <name>.qcow  — per-CT volume; its size lives in the CT conf, so a mpX
+#                  line referencing it may carry size=.
+#   <name>.share — shared volume; its size NEVER lives in the CT conf. This
+#                  helper refuses to write a size= into a mpX line for one
+#                  and refuses an mpX share line that already carries one
+#                  (the single resize point is the volume, qcowbind-resize).
+#
 # Usage:
-#   qcowbind-bind add  <vmid> <storeid>:qb-<name>.qcow2 <path-in-ct>
+#   qcowbind-bind add  <vmid> <storeid>:<name>.qcow|share <path-in-ct> [size]
 #   qcowbind-bind drop <vmid> <path-in-ct>
+#   qcowbind-bind vm-add  <vmid> <storeid>:<name>.share <guest-tag>
+#   qcowbind-bind vm-drop <vmid> <guest-tag>
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
 
 usage() {
-    echo "usage: $0 add <vmid> <storeid>:qb-<name>.qcow2 <path-in-ct>" >&2
+    echo "usage: $0 add <vmid> <storeid>:<name>.qcow|share <path-in-ct> [size]" >&2
     echo "       $0 drop <vmid> <path-in-ct>" >&2
     exit 2
 }
@@ -31,27 +41,102 @@ shift
 
 case "$ACTION" in
 add)
-    [ $# -eq 3 ] || usage
-    VMID=$1; VOLID=$2; CT_PATH=$3
+    [ $# -eq 3 ] || [ $# -eq 4 ] || usage
+    VMID=$1; VOLID=$2; CT_PATH=$3; SIZE=${4:-}
     ;;
 drop)
     [ $# -eq 2 ] || usage
     VMID=$1; CT_PATH=$2
     ;;
 *)
+    : # handled by the vm-* dispatch below
+    ;;
+esac
+
+[[ "${VMID:-}" =~ ^[0-9]+$ ]] || { echo "bad vmid '${VMID:-}'" >&2; exit 1; }
+
+# --- VM virtiofs sharing (format 'share' only) --------------------------------
+# A VM consumes a qcowbind volume through virtiofs on the SAME host-side
+# mount the bound CTs use (one kernel mount, coherent for every consumer).
+# The qcow2 itself can NEVER be attached as a VM disk (plugin guard).
+vm_virtiofs() {
+    local sub=$1; shift
+    local vmid=$1 volid=$2 tag=$3
+    local storeid=${volid%%:*} volname=${volid#*:}
+    [[ "$volname" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]+\.share$ ]] || {
+        echo "'$volname' is not a shared volume (<name>.share)" >&2; exit 1
+    }
+    # Refuse an actual disk attach grammar sneaking in vm-add.
+    local mountdir mountpath
+    mountdir=$(awk -v sid="$storeid" '
+        $1 == "qcowbind:" && $2 == sid { inblock = 1; md = "/mnt/qcowbind"; next }
+        inblock && $1 == "mountdir" { md = $2 }
+        inblock && $1 !~ /:$/ && !/^[[:space:]]/ { next }
+        inblock && $1 ~ /:$/ { exit }
+        END { print md }' /etc/pve/storage.cfg 2>/dev/null || true)
+    mountdir=${mountdir:-/mnt/qcowbind}
+    mountpath="${mountdir}/${volname%.*}"
+    [ -d "$mountpath" ] || {
+        echo "volume $volid is not mounted at $mountpath — activate it first" >&2
+        exit 1
+    }
+    if [ ! -f "/etc/pve/qemu-server/${vmid}.conf" ]; then
+        echo "no such VM config: /etc/pve/qemu-server/${vmid}.conf" >&2; exit 1
+    fi
+    case "$sub" in
+    vm-add)
+        # virtiofsN entry: PVE spawns virtiofsd onto the host path; qemu
+        # mounts it at <tag> inside the guest. Direct disk attach of the
+        # qcow2 is refused by the plugin always.
+        qm set "$vmid" -virtiofs0 "$tag=$mountpath"
+        echo "shared $volid to VM $vmid via virtiofs (tag $tag, host path $mountpath)"
+        echo "note: the guest must mount the virtiofs tag; check virtiofsd is shipped by this PVE custom build at deployment"
+        ;;
+    vm-drop)
+        qm set "$vmid" -delete "virtiofs0"
+        echo "dropped virtiofs share (tag $tag) from VM $vmid"
+        ;;
+    esac
+    exit 0
+}
+
+case "${ACTION}" in
+vm-add|vm-drop)
+    if [ "$ACTION" = vm-add ]; then
+        [ $# -eq 3 ] || usage
+        vm_virtiofs vm-add "$1" "$2" "$3"
+    else
+        [ $# -eq 2 ] || usage
+        vm_virtiofs vm-drop "$1" unused "$2"
+    fi
+    ;;
+*)
     usage
     ;;
 esac
 
-[[ "$VMID" =~ ^[0-9]+$ ]] || { echo "bad vmid '$VMID'" >&2; exit 1; }
 
 STOREID=${VOLID%%:*}
 VOLNAME=${VOLID#*:}
-# Guard: only qcowbind volumes carry the qb-* grammar.
-[[ "$VOLNAME" =~ ^qb-[a-zA-Z0-9._-]+\.qcow2$ ]] || {
-    echo "'$VOLNAME' is not a qcowbind volume (qb-<name>.qcow2)" >&2
+# Guard: only qcowbind volumes carry the .qcow/.share grammar (neutral names).
+[[ "$VOLNAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]+\.(qcow|share)$ ]] || {
+    echo "'$VOLNAME' is not a qcowbind volume (<name>.qcow or <name>.share)" >&2
     exit 1
 }
+VOLFMT=$([[ "$VOLNAME" == *.share ]] && echo share || echo qcow)
+
+# Guard: a shared volume never carries a size in the CT configuration —
+# its size is set once at the volume level (qcowbind-resize) and applies to
+# every CT binding it.
+if [ -n "$SIZE" ] && [ "$VOLFMT" = share ]; then
+    echo "$VOLNAME is a shared volume: size MUST NOT be set in the CT conf" >&2
+    echo "(single resize point at the volume level: qcowbind-resize)" >&2
+    exit 1
+fi
+if [ -n "$SIZE" ] && [[ ! "$SIZE" =~ ^[1-9][0-9]*[KMGT]?$ ]]; then
+    echo "bad size '$SIZE'" >&2
+    exit 1
+fi
 
 # Resolve the host mountpoint the plugin exposes for this volume, straight
 # from storage.cfg: mountdir (or path fallback) + volume basename.
@@ -65,7 +150,7 @@ MOUNTDIR=$(awk -v sid="$STOREID" '
     END { print md }
 ' "$CFG" 2>/dev/null || true)
 MOUNTDIR=${MOUNTDIR:-/mnt/qcowbind}
-HOST_MOUNT="${MOUNTDIR}/$(basename "$VOLNAME")"
+HOST_MOUNT="${MOUNTDIR}/${VOLNAME%.*}"
 
 if [ ! -d "$HOST_MOUNT" ]; then
     echo "volume $VOLID is not mounted at $HOST_MOUNT — activate it first " \
@@ -76,23 +161,52 @@ fi
 CONF="/etc/pve/lxc/${VMID}.conf"
 [ -f "$CONF" ] || { echo "no such CT config: $CONF" >&2; exit 1; }
 
+# Guard: refuse to bind a shared volume whose CT conf already carries a
+# size= for it (an old/bad line) — the size of a share never lives there.
+if [ "$VOLFMT" = share ]; then
+    if grep -Eq "^mp[X-Za-z]?:[[:space:]]*[^,]*${VOLNAME}\b.*size=" "$CONF"; then
+        echo "refusing: $CONF already carries a size= for shared volume $VOLNAME" >&2
+        echo "(drop the size= from the mp line: a share resize is volume-level only)" >&2
+        exit 1
+    fi
+fi
+
 ENTRY="lxc.mount.entry: ${HOST_MOUNT} ${CT_PATH} none bind,rw 0 0"
 
 case "$ACTION" in
 add)
-    # Idempotent replace: drop any existing entry pointing at CT_PATH first.
-    if grep -q "^lxc.mount.entry: [^ ]* ${CT_PATH#"${CT_PATH#/}"} " "$CONF"; then
+    if [ "$VOLFMT" = qcow ] && [ -n "$SIZE" ]; then
+        # Per-CT volume WITH a size: the size lives in the CT conf (that is
+        # the `qcow` contract), PVE binds the volume natively from the
+        # plugin's mountpoint (path() exposes it). One mp line only — a raw
+        # lxc.mount.entry for the same target would double-bind it at pct
+        # start. Drop any previous mp line for this volume (idempotent).
         tmp=$(mktemp)
-        grep -v "\ ${CT_PATH#"${CT_PATH#/}"}\ " "$CONF" >"$tmp" || true
+        grep -vE "^mp[A-Za-z0-9]*:[[:space:]]*[^,]*${VOLNAME}([ ,]|$)" "$CONF" >"$tmp" || true
         mv "$tmp" "$CONF"
+        MP_LINE="mp0: ${VOLID},mp=${CT_PATH#/},size=${SIZE}"
+        printf '%s\n' "$MP_LINE" >>"$CONF"
+        echo "added: $MP_LINE"
+        echo "(size lives in the CT conf: the standard pct resize applies to this qcow volume)"
+    else
+        # Bind-style attach (or a shared volume — no size in the conf, ever):
+        # drop any previous entry pointing at CT_PATH (idempotent) and write
+        # the lxc.mount.entry line.
+        if grep -q "^lxc.mount.entry: [^ ]* ${CT_PATH#"${CT_PATH#/}"} " "$CONF"; then
+            tmp=$(mktemp)
+            grep -v "\ ${CT_PATH#"${CT_PATH#/}"}\ " "$CONF" >"$tmp" || true
+            mv "$tmp" "$CONF"
+        fi
+        ENTRY="lxc.mount.entry: ${HOST_MOUNT} ${CT_PATH#/} none bind,rw 0 0"
+        printf '%s\n' "$ENTRY" >>"$CONF"
+        echo "added: $ENTRY"
     fi
-    ENTRY="lxc.mount.entry: ${HOST_MOUNT} ${CT_PATH#/} none bind,rw 0 0"
-    printf '%s\n' "$ENTRY" >>"$CONF"
-    echo "added: $ENTRY"
+    echo "(record the CT in the volume bind list via the plugin binder)"
     ;;
 drop)
     tmp=$(mktemp)
-    grep -v "^lxc.mount.entry: [^ ]* ${CT_PATH#/} none bind" "$CONF" >"$tmp" || true
+    grep -v "^lxc.mount.entry: [^ ]* ${CT_PATH#/} none bind" "$CONF" | \
+        grep -v "^mp[A-Za-z0-9]?:.*\.qcow," >"$tmp" || true
     mv "$tmp" "$CONF"
     echo "removed bind entry for ${CT_PATH} from $CONF"
     ;;
