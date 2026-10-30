@@ -1,0 +1,69 @@
+#!/usr/bin/env perl
+# ---------------------------------------------------------------------------
+# qcowbind-resize — THE single resize point for qcowbind 'share' volumes.
+#
+# A share's size never lives in any CT configuration (nor in a VM), so the
+# resize happens once, here, at the volume level, and applies to every CT
+# bound to it (and every VM sharing it through virtiofs). `pct resize` and
+# friends are refused by the plugin for shares: this helper is the only
+# sanctioned caller (it marks the call with QCOWBIND_DIRECT_RESIZE=1).
+#
+# Usage:
+#   qcowbind-resize <storeid>:<name>.share <new-size>
+#     <new-size>  absolute size (e.g. 40G, 512M, bytes) — or +/- relative
+#                 adjustment (e.g. +10G) resolved against the current size.
+#
+# A shrink requires the filesystem inside to have been shrunk first, the
+# volume unmounted (no CT bound): the plugin enforces it and refuses
+# otherwise, reporting what must happen first.
+# ---------------------------------------------------------------------------
+
+use strict;
+use warnings;
+
+$ENV{QCOWBIND_DIRECT_RESIZE} = 1;    # the only sanctioned caller marker
+
+use PVE::Storage ();
+
+sub usage {
+    die "usage: qcowbind-resize <storeid>:<name>.share <new-size|+N|-N>\n";
+}
+
+my ($volid, $size) = @ARGV;
+usage() if !defined($volid) || !defined($size);
+
+my ($storeid, $volname) = $volid =~ m/^([a-zA-Z0-9_-]+):(.+)$/
+    or usage();
+die "qcowbind-resize: '$volname' is not a shared volume (<name>.share)\n"
+    if $volname !~ m/^[a-zA-Z0-9][a-zA-Z0-9._-]*\.share$/;
+
+my $cfg = PVE::Storage::config();
+my $scfg = PVE::Storage::storage_config($cfg, $storeid);
+
+# Resolve /relative/ adjustments against the current virtual size.
+if ($size =~ m/^-?(\d+[KMGT]?)$/i) {
+    # Resolve absolute and relative sizes into bytes (no suffix = bytes).
+    my %u = (K => 1024, M => 1024**2, G => 1024**3, T => 1024**4);
+    my $requested = $size;
+    my $sign = +1;
+    if ($size =~ m/^([+-])(\d+[KMGT]?)$/i) {
+        $sign = $1 eq '-' ? -1 : +1;
+        $requested = $2;
+    }
+    my ($num, $suf) = $requested =~ m/^(\d+)([KMGT]?)$/i;
+    my $bytes = $num * ($suf ? $u{uc($suf)} : 1);
+    if ($size =~ m/^[+-]/) {
+        my $cur = PVE::Storage::volume_size_info($cfg, $volid, 5);
+        die "qcowbind-resize: cannot determine the current size of $volid\n" if !$cur;
+        $size = $cur + $sign * $bytes;
+        die "qcowbind-resize: relative resize would produce a non-positive size for $volid\n"
+            if $size <= 0;
+    } else {
+        $size = $bytes;
+    }
+}
+
+PVE::Storage::activate_storage($cfg, $storeid);
+my $new = PVE::Storage::resize_volume($cfg, $volid, $size);
+print "resized $volid to $new bytes\n";
+exit 0;
