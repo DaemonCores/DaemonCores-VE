@@ -1,34 +1,63 @@
 package PVE::Storage::Custom::QcowBindPlugin;
 
 # ---------------------------------------------------------------------------
-# PROTOTYPE — not enabled by default. See README.plugin.md and the wiki page
-# "qcowbind-design.md".
+# PROTOTYPE v2 — not enabled by default. See README.plugin.md and the wiki
+# page "qcowbind-design.md".
 #
-# A PVE storage plugin for SHARED multi-LXC volumes backed by qcow2 images.
-# The qcow2 IS the volume: it is the only format where a shrink really
-# returns space (qemu-img convert/sparsify — a ZFS refquota never reclaims).
-# The ZFS dataset underneath (e.g. SSD-600G/ia-ssd) is only the container:
-# pool-level compression and snapshots still apply.
+# A PVE storage plugin backing LXC volumes with qcow2 images on a
+# dataset-backed directory storage. The qcow2 IS the volume; the ZFS dataset
+# underneath is only the container (pool-level compression + snapshots).
+#
+# TWO VOLUME FORMATS (v2 arbitration, Gabriel 2026-10-30; neutral naming, no
+# workload suffix in any format/plugin/storage name):
+#
+#   format 'qcow'  — file <name>.qcow (content is qcow2). A PER-CT volume:
+#     owned by ONE CT. Its size lives in the CT configuration (rootfs/mp
+#     size=), so the standard `pct resize` path applies; the plugin only
+#     guarantees the same grow/shrink mechanics as before.
+#
+#   format 'share' — file <name>.share (content is qcow2). A SHARED volume:
+#     bindable by N CTs (multi-writer by design — that is the point). Its
+#     size is NEVER written in the CT configuration: the setting is carried
+#     by the volume itself (sidecar), so there is exactly ONE resize point,
+#     at the plugin/volume level, and every bound CT inherits it
+#     (no divergent size between VMs/CTs).
 #
 # Mount model (host-side, never inside a single CT):
 #   qcow2 image -> qemu-nbd connect -> kernel FS mount -> one host mountpoint
-#   -> bind-mounted (lxc.mount.entry) into N containers.
+#   -> bind-mounted (lxc.mount.entry) into the CT (or N CTs for 'share').
 #
-# Lifecycle via the standard PVE storage API, so everything is native UI,
-# no CLI needed:
+# Lifecycle via the standard PVE storage API, so everything is native UI:
 #   alloc_image   -> qemu-img create
 #   free_image    -> refuse if attached, unmount, disconnect nbd, remove file
 #   resize_volume -> grow: qemu-img resize; shrink: qemu-img convert to a
-#                    sparse temp file + swap (the only path that returns blocks)
+#                    sparse temp file + swap (the only path that returns
+#                    blocks). Shares ONLY resize through the plugin-side
+#                    helper (see RESIZE POLICY below).
 #   activate_volume / deactivate_volume -> nbd connect + FS mount / unmount
 #
+# RESIZE POLICY:
+#   - a 'share' volume refuses ANY resize coming through the CT volume path
+#     (`pct resize` writes a size in the CT conf — exactly what shares must
+#     avoid). A share is only resized through the dedicated plugin-side
+#     helper `qcowbind-resize`, which marks the call with
+#     QCOWBIND_DIRECT_RESIZE=1; any other caller dies.
+#   - a 'qcow' volume keeps the standard path: `pct resize` (grow, and
+#     shrink through the same plugin-side convert+swap when unmounted and
+#     unbound).
+#   - shrink of either format requires: filesystem shrunk inside, volume
+#     unmounted, no CT bound. Grow is metadata-only and safe while mounted.
+#
 # Guards:
-#   - refuse any activation while a KVM VM config references the volume
-#     (qcow2 LXC-bind usage conflicts with qcow2-as-VM-disk usage);
-#   - a JSON sidecar (<vol>.qbind.json) records nbd device, mountpoint and
-#     bound CTs; it is cross-checked against the real system state at every
-#     activation (mount table + /sys/block/nbd*) and an inconsistency dies
-#     loudly instead of being silently repaired.
+#   - refusing to attach the qcow2 as a KVM VM disk is permanent: a VM
+#     consumes a volume through virtiofs sharing of the SAME host-side
+#     mount (virtiofsN line pointing at bind_path) — multi-consumer VM + CT
+#     binding of one share by design; direct disk attach dies;
+#   - a 'qcow' volume is owned by exactly ONE CT (bind list guard);
+#   - a JSON sidecar (<vol>.qbind.json) records nbd device, mountpoint,
+#     bound CTs and format; it is cross-checked against the real system
+#     state at every activation (mount table + /sys/block/nbd*) and an
+#     inconsistency dies loudly instead of being silently repaired.
 # ---------------------------------------------------------------------------
 
 use strict;
@@ -44,12 +73,27 @@ use base qw(PVE::Storage::Plugin);
 
 my $QEMU_IMG = '/usr/bin/qemu-img';
 my $QEMU_NBD = '/usr/bin/qemu-nbd';
-my $QEMU_SERVER_DIR = '/etc/pve/qemu-server';
+# The qemu-server config dir is overridable (sandboxed spec tests); on a PVE
+# host it is always /etc/pve/qemu-server.
+my $QEMU_SERVER_DIR_DEFAULT = '/etc/pve/qemu-server';
+sub _qemu_server_dir { return $ENV{QCOWBIND_QEMU_SERVER_DIR} // $QEMU_SERVER_DIR_DEFAULT; }
+# nbd device/sysfs roots are overridable too (sandboxed spec tests; on a real
+# host these always stay /dev and /sys/block).
+my $NBD_DEV_BASE_DEFAULT = '/dev';
+my $NBD_SYS_DIR_DEFAULT = '/sys/block';
+sub _nbd_dev_base { return $ENV{QCOWBIND_NBD_DEV_BASE} // $NBD_DEV_BASE_DEFAULT; }
+sub _nbd_sys_dir { return $ENV{QCOWBIND_NBD_SYS_DIR} // $NBD_SYS_DIR_DEFAULT; }
 
 use constant {
-    FMT => 'qcow2',
+    FILE_FORMAT => 'qcow2',           # on-disk image format of BOTH formats
     SIDECAR_EXT => '.qbind.json',
+    # The marker set by the qcowbind-resize helper: the only sanctioned
+    # caller of resize_volume() on a 'share' volume.
+    DIRECT_RESIZE_ENV => 'QCOWBIND_DIRECT_RESIZE',
 };
+
+my $QCOW_RE = qr/^([a-zA-Z0-9][a-zA-Z0-9._-]*)\.qcow$/;
+my $SHARE_RE = qr/^([a-zA-Z0-9][a-zA-Z0-9._-]*)\.share$/;
 
 sub api {
     return 15;
@@ -62,15 +106,15 @@ sub type {
 sub plugindata {
     return {
         content => [{ images => 1, rootdir => 1 }, { images => 1, rootdir => 1 }],
-        format  => [{ qcow2 => 1 }, 'qcow2'],
+        format  => [{ qcow => 1, share => 1 }, 'qcow', 'share'],
     };
 }
 
 sub properties {
     return {
-        # Inherited 'path' is the directory holding the .qcow2 files (ideally
-        # a ZFS dataset mount such as /SSD-600G/qcowbind so pool snapshots
-        # cover them).
+        # Inherited 'path' is the directory holding the .qcow/.share files
+        # (ideally a ZFS dataset mount such as /SSD-600G/qcowbind so pool
+        # snapshots cover them).
         'mountdir' => {
             description => "Host directory where volumes are mounted for bind " .
                 "into LXC containers (e.g. /mnt/qcowbind).",
@@ -90,25 +134,53 @@ sub options {
     };
 }
 
-# Volname grammar: 'qb-<name>.qcow2'. Volumes are SHARED across CTs, so no
-# vmid is embedded in the name and parse_volname returns an undefined vmid.
-# This is a deliberate (documented) deviation from PVE conventions: vzdump and
-# vmid-scoped listing do not apply to shared volumes.
-sub parse_volname {
-    my ($class, $volname) = @_;
+#######################################
+# Volume format ('qcow' or 'share') from the volname, or dies.
+# Arguments:
+#   $volname - the volume name
+# Outputs:
+#   Nothing.
+# Returns:
+#   The format string 'qcow' or 'share'.
+#######################################
+sub _volformat {
+    my ($volname) = @_;
 
-    if ($volname =~ m/^qb-([a-zA-Z0-9._-]+)\.qcow2$/) {
-        return ('rootdir', $volname, undef, undef, undef, undef, FMT);
-    }
+    return 'qcow'  if $volname =~ $QCOW_RE;
+    return 'share' if $volname =~ $SHARE_RE;
     die "unable to parse qcowbind volume name '$volname'\n";
 }
 
+# Volname grammar: '<name>.qcow' (per-CT) or '<name>.share' (shared). No
+# vmid is embedded in either name: a .qcow carries the size in the CT conf
+# (which references the volid), a .share is shared by design. Both return a
+# rootdir vtype so pct rootfs/mp paths accept them.
+sub parse_volname {
+    my ($class, $volname) = @_;
+
+    my $fmt = _volformat($volname); # dies on an unknown grammar
+    return ('rootdir', $volname, undef, undef, undef, undef, $fmt);
+}
+
+# The path of the backing image file — internal use only (alloc, resize,
+# sidecar, guards). The public path() below returns the host mountpoint so
+# the native mp binding path (and the bind helper) reference the mounted
+# filesystem, never the raw qcow2 file.
+sub _image_path {
+    my ($class, $scfg, $volname) = @_;
+
+    return "$scfg->{path}/$volname";
+}
+
+# Like dir storages, path() exposes the volume DIRECTORY the consumer binds:
+# the host mountpoint of the mounted filesystem. This is what PVE binds for
+# mp volumes and what lxc.mount.entry lines reference.
 sub path {
     my ($class, $scfg, $volname, $storeid, $snapname) = @_;
 
     die "snapshots are not supported by qcowbind\n" if defined($snapname);
-    my $vtype = ($class->parse_volname($volname))[0];
-    return "$scfg->{path}/$volname";
+    _volformat($volname);
+    return $class->bind_path($scfg, $volname);
 }
 
 # The path exposed to the CT bind layer: the host mountpoint of the mounted
@@ -116,18 +188,18 @@ sub path {
 sub bind_path {
     my ($class, $scfg, $volname) = @_;
 
-    my (undef, $volname_stripped) = ($volname =~ m/^(qb-[a-zA-Z0-9._-]+)\.qcow2$/);
-    $volname_stripped //= $volname;
+    my ($base) = ($volname =~ m/^([a-zA-Z0-9][a-zA-Z0-9._-]*)\.(?:qcow|share)$/);
+    $base //= $volname;
     my $mountdir = $scfg->{mountdir} // '/mnt/qcowbind';
-    return "$mountdir/$volname_stripped";
+    return "$mountdir/$base";
 }
 
 sub filesystem_path {
     my ($class, $scfg, $volname, $snapname) = @_;
 
     die "snapshots are not supported by qcowbind\n" if defined($snapname);
-    my $image = $class->path($scfg, $volname);
-    return wantarray ? ($image, undef, 'rootdir') : $image;
+    my $mount = $class->bind_path($scfg, $volname);
+    return wantarray ? ($mount, undef, 'rootdir') : $mount;
 }
 
 #######################################
@@ -141,6 +213,7 @@ sub filesystem_path {
 #######################################
 sub _run {
     my @argv = @_;
+    @argv = @{ $argv[0] } if @argv == 1 && ref($argv[0]) eq 'ARRAY';
     run_command(\@argv, errmsg => "qcowbind: command failed: @argv");
     return 1;
 }
@@ -156,6 +229,8 @@ sub _run {
 #######################################
 sub _run_out {
     my @argv = @_;
+    shift @argv if !ref($argv[0]);     # drop the invocant from a method call
+    @argv = @{ $argv[0] } if @argv == 1 && ref($argv[0]) eq 'ARRAY';
     my $out = '';
     eval {
         run_command(\@argv, outfunc => sub { $out .= $_[0] // '' });
@@ -168,7 +243,7 @@ sub _run_out {
 # Arguments:
 #   $class - the plugin class
 #   $scfg  - the storage configuration hash
-#   $volname - the volume name ('qb-<name>.qcow2')
+#   $volname - the volume name ('<name>.qcow' or '<name>.share')
 # Outputs:
 #   Nothing.
 # Returns:
@@ -177,7 +252,7 @@ sub _run_out {
 sub _sidecar_get {
     my ($class, $scfg, $volname) = @_;
 
-    my $file = $class->path($scfg, $volname) . SIDECAR_EXT;
+    my $file = $class->_image_path($scfg, $volname) . SIDECAR_EXT;
     return {} if !-f $file;
     my $raw = eval {
         local $/;
@@ -206,9 +281,9 @@ sub _sidecar_get {
 sub _sidecar_set {
     my ($class, $scfg, $volname, $data) = @_;
 
-    my $file = $class->path($scfg, $volname) . SIDECAR_EXT;
+    my $file = $class->_image_path($scfg, $volname) . SIDECAR_EXT;
     my $json = JSON::PP->new->canonical->pretty->encode($data);
-    my $dir = $class->path($scfg, $volname);
+    my $dir = $class->_image_path($scfg, $volname);
     $dir =~ s{/[^/]+$}{};
     File::Path::make_path($dir);
     open(my $fh, '>', $file) or die "qcowbind: cannot write sidecar $file: $!\n";
@@ -219,8 +294,12 @@ sub _sidecar_set {
 }
 
 #######################################
-# Find every KVM VM config line referencing a qcowbind volume (by volid,
-# file path or bind mountpoint) and return the offending VMIDs.
+# Scan every KVM VM config for references to a qcowbind volume (by volid,
+# backing image path) and classify them.
+# Direct attach of the qcow2 as a VM disk is NEVER allowed. A virtiofs share
+# (virtiofsN line pointing at the plugin host-side mountpoint) is the
+# sanctioned way for a VM to consume the SAME host-side mount as the bound
+# LXC CTs — allowed and recorded.
 # Arguments:
 #   $class - the plugin class
 #   $scfg  - the storage configuration hash
@@ -228,27 +307,44 @@ sub _sidecar_set {
 # Outputs:
 #   Nothing.
 # Returns:
-#   The sorted list of VMIDs whose qemu-server config references the volume.
+#   Two sorted VMID lists: [ disks, virtiofs ] — disks = offenders whose
+#   config attaches the volume as a disk, virtiofs = legal virtiofs sharers.
 #######################################
-sub _vm_users {
+sub _vm_refs {
     my ($class, $scfg, $volname) = @_;
 
-    my $image = $class->path($scfg, $volname);
-    my %found;
-    return [] if !-d $QEMU_SERVER_DIR;
-    if (opendir(my $dh, $QEMU_SERVER_DIR)) {
+    my $image = $class->_image_path($scfg, $volname);
+    my $mount = $class->bind_path($scfg, $volname);
+    my (%disks, %virtiofs);
+    my $qsdir = $class->_qemu_server_dir();
+    return [[], []] if !-d $qsdir;
+    if (opendir(my $dh, $qsdir)) {
         while (defined(my $fn = readdir($dh))) {
             next if $fn !~ m/^(\d+)\.conf$/;
             my $vmid = $1;
-            if (open(my $fh, '<', "$QEMU_SERVER_DIR/$fn")) {
+            if (open(my $fh, '<', "$qsdir/$fn")) {
                 while (defined(my $line = <$fh>)) {
                     next if $line =~ m/^\s*#/;
-                    # Match volid ('storeid:qb-x.qcow2'), raw image path, or
-                    # the bind mount path (all are KVM-incompatible usages).
-                    if ($line =~ m/:\s*\Q$volname\E\b/
-                        || index($line, $image) >= 0
-                        || index($line, $class->bind_path($scfg, $volname)) >= 0) {
-                        $found{$vmid} = 1;
+                    my $refers = ($line =~ m/:\s*\Q$volname\E\b/
+                        || index($line, $image) >= 0);
+                    # virtiofsN lines reference the host mountpoint only —
+                    # the sanctioned VM sharing path, never a disk attach.
+                    if ($line =~ m/^virtiofs\d+:\s/) {
+                        if (index($line, $mount) >= 0
+                            || (index($line, $image) >= 0)) {
+                            $virtiofs{$vmid} = 1;
+                        }
+                        next;
+                    }
+                    # Any other line carrying the volid or the raw backing
+                    # image path is a (forbidden or stale) disk attach.
+                    if ($refers
+                        # A disk line may also point at the mountpoint by
+                        # mistake; only attach lines count, virtiofs ones
+                        # were handled above.
+                        || ($line =~ m/^(?:scsi|virtio|sata|ide|efidisk|tpm?)\d+:\s/
+                            && index($line, $mount) >= 0)) {
+                        $disks{$vmid} = 1;
                         last;
                     }
                 }
@@ -257,7 +353,8 @@ sub _vm_users {
         }
         closedir($dh);
     }
-    return [ sort { $a <=> $b } keys %found ];
+    return [ [ sort { $a <=> $b } keys %disks ],
+             [ sort { $a <=> $b } keys %virtiofs ] ];
 }
 
 #######################################
@@ -283,10 +380,11 @@ sub _audit_state {
         (_run_out(['/usr/bin/findmnt', '-n', '-o', 'TARGET', $mount]) // '') =~ m/\Q$mount\E/ ? 1 : 0;
     my $nbd = $state->{nbd};
     my $nbd_linked;
-    if (defined($nbd) && $nbd =~ m/^\/dev\/nbd(\d+)$/) {
+    my $devbase = $class->_nbd_dev_base();
+    if (defined($nbd) && $nbd =~ m/^\Q$devbase\E\/nbd(\d+)$/) {
         # qemu-nbd holds the device through a PID file exposed by the kernel.
         my $idx = $1;
-        my $pid = (_run_out(['/bin/cat', "/sys/block/nbd$idx/pid"]) // '') =~ m/^\d+$/ ? 1 : 0;
+        my $pid = (_run_out(['/bin/cat', $class->_nbd_sys_dir() . "/nbd$idx/pid"]) // '') =~ m/^\d+$/ ? 1 : 0;
         $nbd_linked = $pid;
     }
 
@@ -329,10 +427,10 @@ sub _alloc_nbd {
     my ($class) = @_;
 
     for my $i (0 .. 63) {
-        my $dev = "/dev/nbd$i";
+        my $dev = $class->_nbd_dev_base() . "/nbd$i";
         next if !-e $dev;
         my $pid = '';
-        if (open(my $fh, '<', "/sys/block/nbd$i/pid")) { $pid = <$fh> // ''; }
+        if (open(my $fh, '<', $class->_nbd_sys_dir() . "/nbd$i/pid")) { $pid = <$fh> // ''; }
         next if $pid =~ m/^\d+$/;
         return $dev;
     }
@@ -343,7 +441,7 @@ sub _alloc_nbd {
 # Activate a volume: nbd connect + FS mount (idempotent, guarded).
 # Arguments:
 #   $class - the plugin class
-#   $scfg  - storage config
+#   $scfg - storage config
 #   $volname - volume name
 # Outputs:
 #   Mounts the volume and updates its sidecar.
@@ -357,11 +455,14 @@ sub _activate_mount {
     my $state = $class->_sidecar_get($scfg, $volname);
     return 1 if $state->{mounted};
 
-    my $kvmids = $class->_vm_users($scfg, $volname);
-    die "qcowbind: refusing to mount $volname — referenced by KVM VM(s) @$kvmids; " .
-        "a qcowbind volume cannot also be a VM disk\n" if @$kvmids;
+    my ($diskids, $virtiofs) = @{ $class->_vm_refs($scfg, $volname) };
+    die "qcowbind: refusing to mount $volname — attached as a VM disk by " .
+        "@$diskids (a qcowbind volume cannot be a VM disk; VM sharing goes " .
+        "through virtiofs — see README)\n" if @$diskids;
+    warn "qcowbind: $volname also shared to VM(s) @$virtiofs via virtiofs\n"
+        if @$virtiofs;
 
-    my $image = $class->path($scfg, $volname);
+    my $image = $class->_image_path($scfg, $volname);
     die "qcowbind: $volname is already attached to a VM/KVM process\n"
         if _run_out(['/usr/bin/fuser', '-vm', $image]);
 
@@ -374,7 +475,7 @@ sub _activate_mount {
         mounted => 1,
         nbd     => $nbd,
         mount   => $mount,
-        format  => FMT,
+        format  => _volformat($volname),
         bound_cts => $state->{bound_cts} // [],
     });
     return 1;
@@ -410,7 +511,7 @@ sub _deactivate_mount {
         mounted => 0,
         nbd     => undef,
         mount   => $mount,
-        format  => FMT,
+        format  => _volformat($volname),
         bound_cts => [],
     });
     return 1;
@@ -442,7 +543,8 @@ sub activate_volume {
 sub deactivate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
 
-    return 1 if !-f $class->path($scfg, $volname);
+    return 1 if !-f $class->_image_path($scfg, $volname)
+        && !-f $class->_image_path($scfg, $volname) . SIDECAR_EXT;
     # Best-effort: never block CT teardown here — a failing unmount is left
     # for the next activation to surface through the consistency audit.
     eval { $class->_deactivate_mount($scfg, $volname) };
@@ -459,12 +561,12 @@ sub list_images {
     return $res if !-d $dir;
     if (opendir(my $dh, $dir)) {
         while (defined(my $fn = readdir($dh))) {
-            next if $fn !~ m/^(qb-[a-zA-Z0-9._-]+\.qcow2)$/;
+            next if $fn !~ m/^([a-zA-Z0-9][a-zA-Z0-9._-]*\.(?:qcow|share))$/;
             my $file = "$dir/$fn";
             next if !-f $file;
             push @$res, {
                 volid  => "$storeid:$fn",
-                format => FMT,
+                format => (eval { _volformat($fn) } // FILE_FORMAT),
                 size   => (-s $file),
                 vmid   => undef,
             };
@@ -486,19 +588,14 @@ sub volume_size_info {
     # Report the VIRTUAL size (what the FS sees), like the dir/qcow2 storages.
     my ($class, $scfg, $storeid, $volname, $timeout) = @_;
 
-    my $image = $class->path($scfg, $volname);
-    my $out = $class->_run_out([$QEMU_IMG, 'info', '--output=json', $image]);
-    return 0 if !defined($out);
-    my $info = eval { JSON::PP->new->decode($out) };
-    return 0 if ref($info) ne 'HASH';
-    return ($info->{'virtual-size'} // 0);
+    return $class->_virtual_size($scfg, $volname);
 }
 
 #######################################
 # Current virtual size of a volume.
 # Arguments:
 #   $class - the plugin class
-#   $scfg  - storage config
+#   $scfg - storage config
 #   $volname - volume name
 # Outputs:
 #   Nothing.
@@ -508,7 +605,7 @@ sub volume_size_info {
 sub _virtual_size {
     my ($class, $scfg, $volname) = @_;
 
-    my $image = $class->path($scfg, $volname);
+    my $image = $class->_image_path($scfg, $volname);
     my $out = $class->_run_out([$QEMU_IMG, 'info', '--output=json', $image]);
     return 0 if !defined($out);
     my $info = eval { JSON::PP->new->decode($out) };
@@ -518,26 +615,30 @@ sub _virtual_size {
 sub alloc_image {
     my ($class, $storeid, $scfg, $vmid, $fmt, $name, $size) = @_;
 
-    die "unsupported format '$fmt' - only qcow2 is supported\n"
-        if defined($fmt) && $fmt ne FMT;
-    die "qcowbind volumes are shared: no vmid-scoped allocation\n"
-        if defined($vmid);
-    $name //= 'qb-unnamed.qcow2';
+    # $fmt here is the volume format ('qcow' or 'share'); the on-disk image
+    # is always a qcow2 file.
+    die "unsupported format '$fmt' - only 'qcow' and 'share' are supported\n"
+        if defined($fmt) && $fmt ne 'qcow' && $fmt ne 'share';
     die "allocation without size is not supported\n" if !$size;
+    $name //= 'unnamed.' . ($fmt // 'share');
 
-    $class->parse_volname($name);
-    my $image = "$scfg->{path}/$name";
+    my $volfmt = _volformat($name); # dies on an unknown grammar
+    my $image = $class->_image_path($scfg, $name);
     die "qcowbind: volume '$name' already exists\n" if -f $image;
 
     File::Path::make_path($scfg->{path});
-    _run([$QEMU_IMG, 'create', '-f', FMT, $image, $size]);
+    _run([$QEMU_IMG, 'create', '-f', FILE_FORMAT, $image, $size]);
     $class->_sidecar_set($scfg, $name, {
         mounted => 0,
         nbd     => undef,
         mount   => $class->bind_path($scfg, $name),
-        format  => FMT,
+        format  => $volfmt,
+        size    => $size,
         bound_cts => [],
         created => time(),
+        # A per-CT ('qcow') volume records its owning CT when known at alloc
+        # time; a share never carries one.
+        owner   => ($volfmt eq 'qcow' && defined($vmid)) ? int($vmid) : undef,
     });
     return $name;
 }
@@ -547,11 +648,11 @@ sub free_image {
 
     my $vtype = eval { ($class->parse_volname($volname))[0] } // '';
     return undef if $vtype ne 'rootdir';
-    my $image = $class->path($scfg, $volname);
+    my $image = $class->_image_path($scfg, $volname);
 
-    my $kvmids = $class->_vm_users($scfg, $volname);
-    die "qcowbind: refusing to remove $volname - referenced by KVM VM(s) @$kvmids\n"
-        if @$kvmids;
+    my ($diskids, undef) = @{ $class->_vm_refs($scfg, $volname) };
+    die "qcowbind: refusing to remove $volname - attached as a VM disk by " .
+        "@$diskids\n" if @$diskids;
     my $state = $class->_sidecar_get($scfg, $volname);
     die "qcowbind: $volname is still bound to CT(s) " .
         join(', ', @{ $state->{bound_cts} // [] }) . " — unbind first\n"
@@ -570,6 +671,8 @@ sub free_image {
 
 #######################################
 # Record a CT in the volume bind list (called by the bind helper).
+# A 'qcow' volume is owned by exactly ONE CT — a second bind dies. A 'share'
+# volume accepts any number of binds (multi-writer is its purpose).
 # Arguments:
 #   $class - the plugin class
 #   $scfg  - storage config
@@ -584,9 +687,13 @@ sub binder_add_ct {
     my ($class, $scfg, $volname, $ctid) = @_;
 
     $ctid = int($ctid);
+    my $fmt = _volformat($volname);
     my $state = $class->_sidecar_get($scfg, $volname);
     my $cts = $state->{bound_cts} // [];
     return 1 if grep { $_ == $ctid } @$cts;
+    die "qcowbind: $volname is a per-CT volume already owned by CT(s) " .
+        join(', ', @$cts) . " — a 'qcow' volume cannot be bound to a second CT\n"
+        if $fmt eq 'qcow' && @$cts;
     push @$cts, $ctid;
     @$cts = sort { $a <=> $b } @$cts;
     $state->{bound_cts} = $cts;
@@ -617,15 +724,48 @@ sub binder_remove_ct {
     return 1;
 }
 
+#######################################
+# Resize a volume.
+# RESIZE POLICY:
+#   - 'share': the size lives with the volume, never in the CT conf. Only
+#     the plugin-side helper (QCOWBIND_DIRECT_RESIZE=1 in the environment)
+#     may resize one; `pct resize` or any other caller dies. One resize
+#     point, at the volume level, for every bound CT.
+#   - 'qcow': the size lives in the CT conf; the standard `pct resize` path
+#     routes here and is allowed for grows and shrinks alike.
+#   - shrink (both formats): requires an unmounted, unbound volume — the
+#     filesystem inside must have been shrunk first; the reclamation uses a
+#     sparse convert + swap (the only path that actually returns blocks).
+# Arguments:
+#   $class - the plugin class
+#   $scfg  - storage config
+#   $storeid - the storage id
+#   $volname - volume name
+#   $size  - the new (absolute) size in bytes
+# Outputs:
+#   Resizes the image file and updates the sidecar size for a share.
+# Returns:
+#   The new size.
+#######################################
 sub resize_volume {
     my ($class, $scfg, $storeid, $volname, $size) = @_;
 
+    my $fmt = _volformat($volname);
     my $cur = $class->_virtual_size($scfg, $volname);
     die "qcowbind: cannot determine current size of $volname\n" if !$cur;
 
+    if ($fmt eq 'qcow' && !$ENV{+DIRECT_RESIZE_ENV}) {
+        # Standard path: size lives in the CT conf, `pct resize` is fine.
+    } elsif ($fmt eq 'share' && !$ENV{+DIRECT_RESIZE_ENV}) {
+        die "qcowbind: $volname is a shared volume — its size is NOT in the CT " .
+            "configuration and cannot be resized through it; resize it once at " .
+            "the volume level with qcowbind-resize\n";
+    }
+
     if ($size >= $cur) {
         # Straight grow: qcow2 grow is metadata-only and safe while mounted.
-        _run([$QEMU_IMG, 'resize', $class->path($scfg, $volname), $size]);
+        _run([$QEMU_IMG, 'resize', $class->_image_path($scfg, $volname), $size]);
+        $class->_sidecar_update_size($scfg, $volname, $size);
         return $size;
     }
 
@@ -640,15 +780,39 @@ sub resize_volume {
     die "qcowbind: refusing to shrink bound $volname — unbind all CTs first\n"
         if @{ $state->{bound_cts} // [] };
 
-    my $image = $class->path($scfg, $volname);
+    my $image = $class->_image_path($scfg, $volname);
     my $tmp = "$image.tmp.$$.qcow2";
-    _run([$QEMU_IMG, 'convert', '-O', FMT, '--sparse', $image, $tmp]);
+    _run([$QEMU_IMG, 'convert', '-O', FILE_FORMAT, '--sparse', $image, $tmp]);
     _run([$QEMU_IMG, 'resize', $tmp, $size]);
     _run(['/usr/bin/mv', $tmp, $image]);
+    $class->_sidecar_update_size($scfg, $volname, $size);
     return $size;
 }
 
-# create/clone of base images does not apply to shared volumes.
+#######################################
+# Keep the sidecar 'size' in step after a volume-level resize (shares carry
+# their size there; harmless — and kept in step — for 'qcow' too).
+# Arguments:
+#   $class - the plugin class
+#   $scfg  - storage config
+#   $volname - volume name
+#   $size  - the new size
+# Outputs:
+#   Updates the sidecar.
+# Returns:
+#   True.
+#######################################
+sub _sidecar_update_size {
+    my ($class, $scfg, $volname, $size) = @_;
+
+    my $state = $class->_sidecar_get($scfg, $volname);
+    return 1 if !keys %$state;
+    $state->{size} = $size;
+    $class->_sidecar_set($scfg, $volname, $state);
+    return 1;
+}
+
+# create/clone of base images does not apply to qcowbind volumes.
 sub create_base { die "create_base is not supported by qcowbind\n"; }
 sub clone_image { die "clone_image is not supported by qcowbind\n"; }
 sub volume_export { die "volume_export is not supported by qcowbind\n"; }
