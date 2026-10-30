@@ -157,11 +157,10 @@ packages:
         topic: xanmod
         stage: common
       - name: 0002-kbuild-llvm-plo
-        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0002-XANMOD-kbuild-Add-LLVM-polyhedral-loop-optimizer-fla.patch
-        topic: xanmod
-        stage: common
-      - name: 0003-kbuild-sms-pipelining
-        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0003-XANMOD-kbuild-Add-SMS-based-software-pipelining-flag.patch
+        # PINNED to the active 7.3 file (patches.yml, series 7.0 review): the
+        # EOL 7.0 sibling does not apply to the 7.0.x tree; absolute URL so a
+        # series bump does not silently move it.
+        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/linux-7.3.y-xanmod/xanmod/0002-XANMOD-kbuild-Add-LLVM-polyhedral-loop-optimizer-fla.patch
         topic: xanmod
         stage: common
       - name: 0004-kbuild-debpkg-dbg
@@ -236,10 +235,9 @@ packages:
         url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0003-locking-rwsem-spin-faster.patch
         topic: clearlinux
         stage: common
-      - name: 0004-ata-before-graphics
-        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0004-drivers-initialize-ata-before-graphics.patch
-        topic: clearlinux
-        stage: common
+      # 0004-ata-before-graphics REMOVED (patches.yml, series 7.0 review):
+      # downloads but no longer applies to the 7.0.x tree — drivers
+      # initialize ata before graphics upstream now.
     env:
       HELPERS_VER: 4
       # Bump when the build contract changes in a way `sources:` alone
