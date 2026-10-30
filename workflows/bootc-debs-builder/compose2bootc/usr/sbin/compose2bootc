@@ -143,6 +143,10 @@ services still resolve each other by their compose service name (no URL rewrite)
 Persistent data is relocated under ${FHS_VAR_PREFIX} on the LXC (FHS-correct, and the
 only mutable location an OSTree/bootc image ships), while the container-side mount
 target is preserved. Non-FHS targets such as /config are detected and reported.
+Shared multi-CT volumes: a top-level volume declared with an x-shared: key
+(x-shared: '<storage>:<vol>.qcow2' or x-shared: {volume: ..., mountdir: ...}) is
+bound from the qcowbind plugin mounttree (/mnt/qcowbind/<vol>) instead of a /var
+local; SHARED-VOLUMES.txt carries the qcowbind-bind commands to replay per CT.
 EOF
 }
 
@@ -307,9 +311,9 @@ def parse_healthcheck(hc):
     if hc.get("retries"): out["HealthRetries"] = str(hc["retries"])
     return out
 
-def parse_volume(v, stack, svc, var_prefix):
-    # Returns (host_path, target, options, non_fhs:bool). Long-form dicts and
-    # short "src:dst[:opts]" strings are both handled.
+def parse_volume(v, stack, svc, var_prefix, shared=None):
+    # Returns (host_path, target, options, non_fhs:bool, shared_volid:str|None).
+    # Long-form dicts and short "src:dst[:opts]" strings are both handled.
     if isinstance(v, dict):
         src, target, opts = v.get("source"), v.get("target"), ""
     else:
@@ -320,6 +324,11 @@ def parse_volume(v, stack, svc, var_prefix):
             src, target = parts[0], parts[1]
             opts = parts[2] if len(parts) > 2 else ""
     named = bool(src) and not src.startswith(("/", "./", "../", "~"))
+    # Shared qcowbind volume: the plugin owns the host-side mount; the bind
+    # source is the plugin mountdir/<vol> path, NOT a /var local.
+    if named and shared and slug(src) in shared:
+        sv = shared[slug(src)]
+        return shared_bind_path(sv), target, opts, False, sv["volid"]
     # Host side always lands under /var (FHS-correct, mutable, backup-able on the LXC).
     if named:
         host = f"{var_prefix}/{stack}/{svc}/{slug(src)}"
@@ -329,7 +338,44 @@ def parse_volume(v, stack, svc, var_prefix):
         host = f"{var_prefix}/{stack}/{svc}/{slug(target)}"
     top = target.lstrip("/").split("/")[0] if target else ""
     non_fhs = bool(target) and top not in FHS_OK
-    return host, target, opts, non_fhs
+    return host, target, opts, non_fhs, None
+
+QCOWBIND_DEFAULT_MOUNTDIR = "/mnt/qcowbind"
+
+def shared_volumes(vols):
+    # Shared multi-CT volumes are top-level volume declarations carrying the
+    # x-shared extension key (ignored by plain docker compose):
+    #   volumes:
+    #     ia-data:
+    #       x-shared:
+    #         volume: qcowbind-ia:qb-ia-ssd.qcow2   # storage:volid, required
+    #         mountdir: /mnt/qcowbind               # optional, plugin mountdir
+    # A string shorthand is accepted too: x-shared: qcowbind-ia:qb-ia-ssd.qcow2
+    out = {}
+    for name, decl in (vols or {}).items():
+        if not isinstance(decl, dict) or "x-shared" not in decl:
+            continue
+        spec = decl["x-shared"]
+        d = {"volume": spec} if isinstance(spec, str) else dict(spec or {})
+        volid = d.get("volume")
+        if not volid or ":" not in str(volid):
+            sys.exit(f"shared volume '{name}': x-shared.volume must be "
+                     f"'<storage>:<vol>.qcow2'")
+        storage, _, volfile = str(volid).partition(":")
+        if not storage or not volfile.endswith(".qcow2"):
+            sys.exit(f"shared volume '{name}': x-shared.volume '{volid}' is not "
+                     f"a qcow2 volid ('<storage>:<vol>.qcow2')")
+        out[slug(name)] = {
+            "volid": str(volid), "storage": storage,
+            "name": volfile[:-len(".qcow2")],
+            "mountdir": d.get("mountdir") or QCOWBIND_DEFAULT_MOUNTDIR,
+        }
+    return out
+
+def shared_bind_path(sv):
+    # The plugin mounts each volume host-side at <mountdir>/<vol> (README.plugin.md);
+    # the bind source inside the qcowbind mounttree.
+    return f"{sv['mountdir']}/{sv['name']}"
 
 data = load(compose_path)
 services = data.get("services") or {}
@@ -357,7 +403,6 @@ with open(os.path.join(ctx, "policy.json"), "w") as fh:
 
 network = f"{stack}"
 images, host_dirs, bound, relocations, summary = {}, set(), [], [], []
-
 # --- network unit -------------------------------------------------------------
 with open(os.path.join(ctx, "systemd", f"{network}.network"), "w") as fh:
     fh.write("[Unit]\n"
@@ -366,6 +411,10 @@ with open(os.path.join(ctx, "systemd", f"{network}.network"), "w") as fh:
              f"NetworkName={network}\n"
              "[Install]\n"
              "WantedBy=default.target\n")
+
+# --- shared qcowbind volumes ---------------------------------------------------
+shared = shared_volumes(data.get("volumes"))
+binds = []
 
 for svc, spec in services.items():
     spec = spec or {}
@@ -401,10 +450,16 @@ for svc, spec in services.items():
         lines.append(f"# unresolved (host env file): " + ", ".join(_unresolved))
         lines.append(f"EnvironmentFile=/etc/compose2bootc/{stack}.env")
     for v in as_list(spec.get("volumes")):
-        host, target, opts, non_fhs = parse_volume(v, stack, svc, var_prefix)
-        host_dirs.add(host)
+        host, target, opts, non_fhs, svolid = parse_volume(v, stack, svc, var_prefix, shared)
         suffix = f":{opts}" if opts else ""
         lines.append(f"Volume={host}:{target}{suffix}")
+        if svolid:
+            # Shared qcowbind volume: source lives on the qcowbind storage,
+            # mounted host-side by the plugin. No /var tmpfiles dir, and the
+            # bind must be registered on every CT running the stack.
+            binds.append((svolid, svc, target, host))
+            continue
+        host_dirs.add(host)
         if non_fhs:
             relocations.append((svc, target, host))
     hc = parse_healthcheck(spec.get("healthcheck"))
@@ -456,6 +511,21 @@ with open(os.path.join(ctx, "RELOCATIONS.txt"), "w") as fh:
             fh.write(f"  {svc}: {target}  ->  host {host}\n")
     else:
         fh.write("No non-FHS container mount targets detected.\n")
+
+# --- shared-volume bind sidecar ------------------------------------------------
+# The qcowbind plugin owns the host-side mount (`qcowbind-bind add <vmid>
+# <storage>:<vol> <path>` writes the lxc.mount.entry). The sidecar carries the
+# exact command per bind, ready to replay on every CT running this stack.
+with open(os.path.join(ctx, "SHARED-VOLUMES.txt"), "w") as fh:
+    if binds:
+        fh.write("Shared multi-CT volumes (qcowbind plugin, host-side bind).\n")
+        fh.write("Every CT running this stack must replay these binds after create:\n\n")
+        for svolid, svc, target, host in binds:
+            fh.write(f"  {svolid}  {svc}: {target}\n")
+            fh.write(f"    qcowbind-bind add <vmid> {svolid} {target}\n")
+            fh.write(f"    (lxc.mount.entry: {host} {target} none bind,rw 0 0)\n\n")
+    else:
+        fh.write("No shared volumes declared.\n")
 
 # --- Containerfile ------------------------------------------------------------
 RULE = "#" * 85
@@ -515,7 +585,8 @@ with open(os.path.join(ctx, "Containerfile"), "w") as fh:
 
 print(json.dumps({"stack": stack, "network": network,
                   "services": summary, "images": images,
-                  "relocations": len(relocations)}))
+                  "relocations": len(relocations),
+                  "shared_volumes": len(shared), "shared_binds": len(binds)}))
 PYEOF
   python3 "${py}" "${compose}" "${stack}" "${base}" "${ctx}" \
     "${FHS_VAR_PREFIX}"
@@ -580,6 +651,7 @@ do_generate() {
     | python3 -c 'import json,sys;print(json.load(sys.stdin)["relocations"])')"
   local msg="generated ${nsvc} service unit(s); "
   msg+="${nreloc} non-FHS path(s) relocated (see RELOCATIONS.txt)"
+  msg+=", $(printf '%s' "${summary}" | python3 -c 'import json,sys;print(json.load(sys.stdin)["shared_binds"])') shared volume bind(s) (see SHARED-VOLUMES.txt)"
   info "${msg}"
   CTX_OUT="${ctx}"
   STACK_OUT="${stack}"
@@ -880,6 +952,7 @@ services:
     volumes:
       - redis-data:/data
       - redis-conf:/config
+      - ia-data:/data-ia
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -889,6 +962,9 @@ services:
 volumes:
   redis-data:
   redis-conf:
+  ia-data:
+    x-shared:
+      volume: qcowbind-test:qb-test-ia.qcow2
 YML
   local ctx
   ctx="$(mktemp -d /tmp/${PROG}.selftest.XXXXXX)"
@@ -935,6 +1011,23 @@ YML
   check "${ctx}/RELOCATIONS.txt" "/config" "non-FHS /config detected"
   check "${ctx}/tmpfiles/whoami-stack.conf" \
     "d /var/lib/${PROG}/whoami-stack" "tmpfiles /var dir"
+  check "${ctx}/systemd/redis.container" \
+    "Volume=/mnt/qcowbind/qb-test-ia:/data-ia" "shared volume binds from the qcowbind mounttree"
+  check "${ctx}/SHARED-VOLUMES.txt" \
+    "qcowbind-bind add <vmid> qcowbind-test:qb-test-ia.qcow2 /data-ia" "shared bind sidecar command"
+  if grep -q "d /mnt/qcowbind" "${ctx}/tmpfiles/whoami-stack.conf"; then
+    warn "  MISSING: no tmpfiles dir for shared volumes (only the plugin mounts them)"
+    ok=0
+  else
+    dbg "  OK: no tmpfiles dir created for shared volumes"
+  fi
+  if grep -qF "d ${FHS_VAR_PREFIX}/whoami-stack/redis/ia-data" \
+    "${ctx}/tmpfiles/whoami-stack.conf"; then
+    warn "  MISSING: shared volume must not land under /var"
+    ok=0
+  else
+    dbg "  OK: shared volume not relocated under /var"
+  fi
   if [ "${ok}" -eq 1 ]; then
     info "selftest PASSED"
   else
