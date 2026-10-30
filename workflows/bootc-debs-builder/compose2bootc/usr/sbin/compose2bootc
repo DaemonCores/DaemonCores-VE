@@ -46,6 +46,7 @@ BASE="${DEFAULT_BASE}"
 REGISTRY=""
 WORKDIR=""
 PROMOTE=0
+NO_TEST=0
 
 ######################################################################
 # Logging helpers
@@ -133,6 +134,7 @@ OPTIONS
   --registry REF     output image reference (default: localhost/<name>:latest)
   --workdir DIR      build context directory (default: ${STATE_ROOT}/<name>/context)
   --promote          on a passing test, retag the image to --registry (CI/timer mode)
+  --no-test          skip the healthcheck smoke test (promote without gating)
   --dry-run          generate the context only; do not build (alias: generate)
   --keep             keep the build context after a successful build
   -v, --verbose      verbose logging
@@ -1081,6 +1083,10 @@ parse_flags() {
         KEEP=1
         shift
         ;;
+      --no-test)
+        NO_TEST=1
+        shift
+        ;;
       -v | --verbose)
         VERBOSE=1
         shift
@@ -1143,7 +1149,15 @@ main() {
         exit 0
       fi
       do_build "${CTX_OUT}" "${STACK_OUT}"
-      if do_test "${IMAGE_OUT}"; then
+      if [ "${NO_TEST}" -eq 1 ]; then
+        info "smoke test skipped (--no-test): promoting ${IMAGE_OUT} ungated"
+        do_test_result=0
+      elif do_test "${IMAGE_OUT}"; then
+        do_test_result=0
+      else
+        do_test_result=1
+      fi
+      if [ "${do_test_result}" -eq 0 ]; then
         if [ "${PROMOTE}" -eq 1 ] && [ -n "${REGISTRY}" ]; then
           require_builder
           "${BUILDER}" tag "${IMAGE_OUT}" "${REGISTRY}"
