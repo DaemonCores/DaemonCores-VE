@@ -37,8 +37,8 @@
 #         each selectable on its own (MP0/1/2_STORAGE or --mpN-storage),
 #         the same way — NEVER host bind mounts (invisible to PVE: no
 #         vzdump/move/quota/UI). `migrate` moves legacy binds.
-#       - vztmpl seed templates = local-btrfs:vztmpl/<stack>.tar.gz, uploaded
-#         through the storage API by `publish`.
+#       - vztmpl seed templates = $TEMPLATE_STORAGE:vztmpl/<stack>.tar.gz
+#         (resolved the same way), uploaded through the storage API by `publish`.
 #     * The per-CT composefs sysroot lives INSIDE the rootfs volume, under
 #       pvect-ostree/sysroot: it is a rebuildable image of what `deploy`
 #       staged, re-pullable and jetable — never host state.
@@ -1260,8 +1260,9 @@ cmd_umount() {
 # Retire the legacy pvect-ostree plugin storage (storeid 'ostree').
 #
 # The storage must never be re-created automatically: rootdir volumes now come
-# from the standard dir storage and vztmpl from local-btrfs. Refuses while
-# volumes still live on the old storeid (migrate them first).
+# from the resolved standard storages and vztmpl from the resolved vztmpl
+# target. Refuses while volumes still live on the old storeid (migrate them
+# first).
 # Globals:
 #   None
 # Outputs:
