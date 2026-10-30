@@ -146,7 +146,7 @@ Persistent data is relocated under ${FHS_VAR_PREFIX} on the LXC (FHS-correct, an
 only mutable location an OSTree/bootc image ships), while the container-side mount
 target is preserved. Non-FHS targets such as /config are detected and reported.
 Shared multi-CT volumes: a top-level volume declared with an x-shared: key
-(x-shared: '<storage>:<vol>.qcow2' or x-shared: {volume: ..., mountdir: ...}) is
+(x-shared: '<storage>:<vol>.share' or x-shared: {volume: ..., mountdir: ...}) is
 bound from the qcowbind plugin mounttree (/mnt/qcowbind/<vol>) instead of a /var
 local; SHARED-VOLUMES.txt carries the qcowbind-bind commands to replay per CT.
 EOF
@@ -348,11 +348,11 @@ def shared_volumes(vols):
     # Shared multi-CT volumes are top-level volume declarations carrying the
     # x-shared extension key (ignored by plain docker compose):
     #   volumes:
-    #     ia-data:
+    #     data:
     #       x-shared:
-    #         volume: qcowbind-ia:qb-ia-ssd.qcow2   # storage:volid, required
+    #         volume: qco-test:ci-scratch.share    # storage:volid, required
     #         mountdir: /mnt/qcowbind               # optional, plugin mountdir
-    # A string shorthand is accepted too: x-shared: qcowbind-ia:qb-ia-ssd.qcow2
+    # A string shorthand is accepted too: x-shared: qco-test:ci-scratch.share
     out = {}
     for name, decl in (vols or {}).items():
         if not isinstance(decl, dict) or "x-shared" not in decl:
@@ -362,14 +362,14 @@ def shared_volumes(vols):
         volid = d.get("volume")
         if not volid or ":" not in str(volid):
             sys.exit(f"shared volume '{name}': x-shared.volume must be "
-                     f"'<storage>:<vol>.qcow2'")
+                     f"'<storage>:<vol>.share'")
         storage, _, volfile = str(volid).partition(":")
-        if not storage or not volfile.endswith(".qcow2"):
+        if not storage or not volfile.endswith(".share"):
             sys.exit(f"shared volume '{name}': x-shared.volume '{volid}' is not "
-                     f"a qcow2 volid ('<storage>:<vol>.qcow2')")
+                     f"a shared-volume volid ('<storage>:<vol>.share')")
         out[slug(name)] = {
             "volid": str(volid), "storage": storage,
-            "name": volfile[:-len(".qcow2")],
+            "name": volfile[:-len(".share")],
             "mountdir": d.get("mountdir") or QCOWBIND_DEFAULT_MOUNTDIR,
         }
     return out
@@ -954,7 +954,7 @@ services:
     volumes:
       - redis-data:/data
       - redis-conf:/config
-      - ia-data:/data-ia
+      - data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -964,9 +964,9 @@ services:
 volumes:
   redis-data:
   redis-conf:
-  ia-data:
+  data:
     x-shared:
-      volume: qcowbind-test:qb-test-ia.qcow2
+      volume: qcowbind-test:ci-scratch.share
 YML
   local ctx
   ctx="$(mktemp -d /tmp/${PROG}.selftest.XXXXXX)"
@@ -1014,16 +1014,16 @@ YML
   check "${ctx}/tmpfiles/whoami-stack.conf" \
     "d /var/lib/${PROG}/whoami-stack" "tmpfiles /var dir"
   check "${ctx}/systemd/redis.container" \
-    "Volume=/mnt/qcowbind/qb-test-ia:/data-ia" "shared volume binds from the qcowbind mounttree"
+    "Volume=/mnt/qcowbind/ci-scratch:/data" "shared volume binds from the qcowbind mounttree"
   check "${ctx}/SHARED-VOLUMES.txt" \
-    "qcowbind-bind add <vmid> qcowbind-test:qb-test-ia.qcow2 /data-ia" "shared bind sidecar command"
+    "qcowbind-bind add <vmid> qcowbind-test:ci-scratch.share /data" "shared bind sidecar command"
   if grep -q "d /mnt/qcowbind" "${ctx}/tmpfiles/whoami-stack.conf"; then
     warn "  MISSING: no tmpfiles dir for shared volumes (only the plugin mounts them)"
     ok=0
   else
     dbg "  OK: no tmpfiles dir created for shared volumes"
   fi
-  if grep -qF "d ${FHS_VAR_PREFIX}/whoami-stack/redis/ia-data" \
+  if grep -qF "d ${FHS_VAR_PREFIX}/whoami-stack/redis/data" \
     "${ctx}/tmpfiles/whoami-stack.conf"; then
     warn "  MISSING: shared volume must not land under /var"
     ok=0
