@@ -1529,9 +1529,15 @@ EOF
   if [[ -z $TEMPLATE_STORAGE ]]; then
     die "no storage with 'content vztmpl' found in $STORAGE_CFG (set TEMPLATE_STORAGE in $CONF)"
   fi
+  # The PVE 9 upload API only accepts content staged at a /var/tmp/pveupload-*
+  # temporary name (Status.pm validates the pattern); -filename alone is the
+  # public basename, -tmpfilename must point at the staged copy.
+  local stage="/var/tmp/pveupload-$(tr -dc a-f0-9 </dev/urandom | head -c16)"
+  cp "$tmp/$STACK.tar.gz" "$stage" || die "could not stage the template for upload"
   pvesh create "/nodes/$(hostname)/storage/$TEMPLATE_STORAGE/upload" \
-    -filename "$tmp/$STACK.tar.gz" -content vztmpl \
-    || die "template upload to $TEMPLATE_STORAGE:vztmpl failed"
+    -filename "$STACK.tar.gz" -tmpfilename "$stage" -content vztmpl \
+    || { rm -f "$stage"; die "template upload to $TEMPLATE_STORAGE:vztmpl failed"; }
+  rm -f "$stage"
   cp "$tmp/pvect-ostree/payload.env" "$COMPOSE_DIR/$STACK/$STACK.payload.env"
   # Keep the relocation report beside the compose source when compose2bootc
   # wrote one.
