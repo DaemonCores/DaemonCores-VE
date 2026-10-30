@@ -1,9 +1,10 @@
+
 diff --git a/etc/kernel/postinst.d/zz-proxmox-boot b/etc/kernel/postinst.d/zz-proxmox-boot
-deleted file mode 100644
-index 1d2abea..0000000
+deleted file mode 100755
+index f1d51fa..0000000
 --- a/etc/kernel/postinst.d/zz-proxmox-boot
 +++ /dev/null
-@@ -1,315 +0,0 @@
+@@ -1,317 +0,0 @@
 -#! /bin/sh
 -# shellcheck disable=SC2317  # Don't warn about unreachable commands in this file
 -
@@ -84,6 +85,8 @@ index 1d2abea..0000000
 -	mount -t vfat -o umask=0077 "${path}" "${mountpoint}" || \
 -		{ warn "mount of ${path} failed - skipping"; return; }
 -
+-	# reset per ESP, an earlier GRUB ESP must not decide the mode of this one
+-	grub=
 -	if [ -e "${mountpoint}/EFI/proxmox/grubx64.efi" ]; then
 -		grub=1
 -	fi
