@@ -176,6 +176,20 @@ else
   bad "seed resolution message: $out"
 fi
 
+info "== publish --no-test flag parsing =="
+parse_stack_args 1 --name s --no-test
+eq "$STACK" "s" "publish: --name parsed with --no-test"
+eq "$NO_TEST" "1" "publish: --no-test sets NO_TEST"
+NO_TEST=
+out=$(parse_stack_args 1 --name s2 2>&1 >/dev/null)
+eq "${NO_TEST:-0}" "0" "publish: NO_TEST defaults to 0"
+out=$(parse_stack_args 0 --no-test 2>&1 >/dev/null)
+if [[ $out == *"unknown option: --no-test"* ]]; then
+  ok "build (smoke-gated) rejects --no-test"
+else
+  bad "build acceptance of --no-test: $out"
+fi
+
 if (( fail )); then
   info "pvect-ostree tests FAILED"
   exit 1

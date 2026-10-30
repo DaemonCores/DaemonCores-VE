@@ -17,7 +17,7 @@
 #   pvect-ostree migrate  <vmid>
 #   pvect-ostree retire
 #   pvect-ostree build    <compose.yml> [--name N]
-#   pvect-ostree publish  <compose.yml> [--name N] [--timer]
+#   pvect-ostree publish  <compose.yml> [--name N] [--timer] [--no-test]
 #   pvect-ostree templates [<name>]
 #   pvect-ostree refresh  <vmid>
 #   pvect-ostree adopt    <vmid>
@@ -1384,9 +1384,10 @@ cmd_destroy() {
 }
 
 #######################################
-# Parse --name (and, for publish, --timer) after a positional compose file.
+# Parse --name (and, for publish, --timer and --no-test) after a positional
+# compose file.
 # Globals:
-#   STACK, WITH_TIMER (set)
+#   STACK, WITH_TIMER, NO_TEST (set)
 # Arguments:
 #   $@ - the remaining arguments
 #######################################
@@ -1395,6 +1396,7 @@ parse_stack_args() {
   shift
   STACK=""
   WITH_TIMER=0
+  NO_TEST=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --name)
@@ -1404,6 +1406,11 @@ parse_stack_args() {
       --timer)
         [ "$want_timer" -eq 1 ] || die "unknown option: --timer"
         WITH_TIMER=1
+        shift
+        ;;
+      --no-test)
+        [ "$want_timer" -eq 1 ] || die "unknown option: --no-test"
+        NO_TEST=1
         shift
         ;;
       *) die "unknown option: $1" ;;
@@ -1427,7 +1434,7 @@ parse_stack_args() {
 #   Exits 1 (via compose2bootc) when the smoke test fails.
 #######################################
 cmd_build() {
-  local compose=${1:?usage: $PROG build <compose.yml> [--name N]}
+  local compose=${1:?usage: $PROG build <compose.yml> [--name N] [--no-test]}
   shift
   need_root
   need_compose
@@ -1436,9 +1443,12 @@ cmd_build() {
   [[ -f $compose ]] || die "compose file not found: $compose"
 
   local imgref="localhost/$STACK:latest"
+  local no_test_flags=()
+  [[ $NO_TEST -eq 1 ]] && no_test_flags=(--no-test)
   # stdout stays reserved for the image reference; narration goes to stderr.
   echo "$PROG: building stack $STACK (compose2bootc: transpile, build, lint, smoke test)" >&2
   compose2bootc convert "$compose" --name "$STACK" --registry "$imgref" --keep \
+    "${no_test_flags[@]}" \
     >/dev/null \
     || die "compose2bootc build failed (smoke test not passed; image not published)"
 
@@ -1455,6 +1465,9 @@ cmd_build() {
 # uploaded through the storage API: build (smoke-gated), then
 # $TEMPLATE_STORAGE:vztmpl/<stack>.tar.gz. The payload + relocation sidecars
 # live beside the recorded compose source ($COMPOSE_DIR/<stack>/).
+# --no-test builds without the healthcheck smoke gate: required for stacks
+# that hold a single Forgejo connection (a real runner cannot share it with
+# a smoke-test runner, which would register itself as a new runner).
 # `pct create <vmid> $TEMPLATE_STORAGE:vztmpl/<stack>.tar.gz` is the standard
 # entry point.
 # Globals:
