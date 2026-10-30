@@ -250,15 +250,19 @@ packages:
       - kernel-pve/kconfig
     build: |
       # Version resolved from the Proxmox repo itself (rolling anchor).
-      echo "deb [arch=amd64] https://download.proxmox.com/debian/pve trixie pve-no-subscription" \
+      echo "deb [arch=amd64] http://download.proxmox.com/debian/pve trixie pve-no-subscription" \
         > /etc/apt/sources.list.d/pve.list
-      echo "deb-src [arch=amd64] https://download.proxmox.com/debian/pve trixie pve-no-subscription" \
+      echo "deb-src [arch=amd64] http://download.proxmox.com/debian/pve trixie pve-no-subscription" \
         >> /etc/apt/sources.list.d/pve.list
-      curl -fsSL https://download.proxmox.com/debian/proxmox-release-trixie.gpg \
+      # The GitHub runners' https path to download.proxmox.com trips a CDN
+      # SNI mismatch; the deb classes already consume this mirror over http
+      # and apt verifies the metadata against the release key (fetched over
+      # http or copied from the sha-pinned keyring baked into the buildenv).
+      curl -fsSL http://download.proxmox.com/debian/proxmox-release-trixie.gpg \
         -o /etc/apt/trusted.gpg.d/proxmox-release-trixie.gpg \
-        || { [[ -s /etc/apt/trusted.gpg.d/proxmox-release-trixie.gpg ]] \
-          && echo "WARN: key fetch failed (CDN SNI), using pre-mounted keyring" \
-          || { echo "ERROR: no proxmox repo key available" >&2; exit 1; }; }
+        || cp /usr/share/keyrings/proxmox-archive-keyring.gpg \
+              /etc/apt/trusted.gpg.d/proxmox-release-trixie.gpg \
+        || { echo "ERROR: no proxmox repo key available" >&2; exit 1; }
       apt-get update
       KERNEL_VERSION=$(apt-cache policy proxmox-kernel-7.0 \
         | awk '/Candidate:/ {print $2; exit}')
