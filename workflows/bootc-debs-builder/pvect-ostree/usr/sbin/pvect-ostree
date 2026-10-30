@@ -112,6 +112,10 @@ MP_BOOTC_SIZE=16 # GB (writable /usr/lib/bootc image store)
 MP0_STORAGE=
 MP1_STORAGE=
 MP2_STORAGE=
+# publish --no-test: build without the healthcheck smoke gate (single Forgejo
+# connection stacks). Global, so cmd_build (which re-parses its args via
+# parse_stack_args) inherits publish's choice.
+NO_TEST=0
 
 # shellcheck source=/dev/null
 [[ -r $CONF ]] && . "$CONF"
@@ -1396,7 +1400,6 @@ parse_stack_args() {
   shift
   STACK=""
   WITH_TIMER=0
-  NO_TEST=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --name)
