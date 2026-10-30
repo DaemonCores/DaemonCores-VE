@@ -4,7 +4,9 @@
 #
 # Usage:
 #   pvect-ostree deploy   <image-ref> <stateroot> <vmid>
-#   pvect-ostree create   <vmid> <image-ref> [pct-option ...]
+#   pvect-ostree create   <vmid> <image-ref> [--rootfs-storage S]
+#                         [--mp0-storage S] [--mp1-storage S]
+#                         [--mp2-storage S] [pct-option ...]
 #   pvect-ostree update   <vmid> [<image-ref>]
 #   pvect-ostree rollback <vmid>
 #   pvect-ostree remount-all
@@ -26,9 +28,13 @@
 #   as the rootfs of a *standard, unprivileged* Proxmox container:
 #
 #     * ALL container volumes are standard PVE ones, allocated via the PVE
-#       storage API (default: SSD-600G-VM-DISKS, content images+rootdir+backup):
-#       - rootfs  = SSD-600G-VM-DISKS:<vmid>/subvol-<vmid>-disk-0 (rootdir);
+#       storage API. The target storage is RESOLVED, never a frozen default:
+#       an explicit choice (per-volume CONF key or create CLI flag) wins after
+#       validation against /etc/pve/storage.cfg content types, and otherwise
+#       the first available storage offering the content type is used:
+#       - rootfs  = <resolved-rootdir>:<vmid>/subvol-<vmid>-disk-0 (rootdir);
 #       - mp0/mp1/mp2 = the writable /etc, /var and /usr/lib/bootc layers,
+#         each selectable on its own (MP0/1/2_STORAGE or --mpN-storage),
 #         the same way — NEVER host bind mounts (invisible to PVE: no
 #         vzdump/move/quota/UI). `migrate` moves legacy binds.
 #       - vztmpl seed templates = local-btrfs:vztmpl/<stack>.tar.gz, uploaded
@@ -56,8 +62,8 @@
 #   prior deployment, never by mutating a live root.
 #
 #   Compose stacks: `build` and `publish` turn a docker-compose stack into a
-#   published LXC template on the PVE btrfs storage (via compose2bootc,
-#   smoke-gated); `pct create <vmid> local-btrfs:vztmpl/<stack>.tar.gz` is
+#   published LXC template on the PVE vztmpl storage (via compose2bootc,
+#   smoke-gated); `pct create <vmid> $TEMPLATE_STORAGE:vztmpl/<stack>.tar.gz` is
 #   then the standard entry point — the seed template is adopted at first
 #   activation. `refresh` rebuilds a CT from its recorded compose source;
 #   `templates` lists the published stacks.
@@ -85,9 +91,11 @@ readonly PROG=${0##*/}
 # jetable (publish re-deploy rebuilds it), never host state.
 SYSROOT=
 STATE_DIR=/var/lib/pvect-ostree/cts # per-CT registry ($STATE_DIR/<vmid>.env)
-STORAGE=SSD-600G-VM-DISKS
-TEMPLATE_STORAGE=local-btrfs # vztmpl target: PVE btrfs storage, template/cache
-ROOTFS_STORAGE=SSD-600G-VM-DISKS # rootdir target for pct create (rootfs + mp)
+# Storage targets are resolved at runtime (resolve_default_storages, below)
+# from /etc/pve/storage.cfg + pvesm/pveam when left empty here or in CONF.
+STORAGE=
+TEMPLATE_STORAGE=
+ROOTFS_STORAGE=
 UID_BASE=100000
 UID_RANGE=65536
 USERNS=/run/pvect-ostree/userns
@@ -99,6 +107,11 @@ COMPOSE_DIR=/var/lib/pvect-ostree/compose # recorded compose sources per stack
 MP_ETC_SIZE=1   # GB (writable /etc volume)
 MP_VAR_SIZE=16  # GB (writable /var volume — service data lives here)
 MP_BOOTC_SIZE=16 # GB (writable /usr/lib/bootc image store)
+# Per-volume storage targets for the writable layers; empty follows the
+# resolved ROOTFS_STORAGE (both CONF- and CLI-selectable per volume).
+MP0_STORAGE=
+MP1_STORAGE=
+MP2_STORAGE=
 
 # shellcheck source=/dev/null
 [[ -r $CONF ]] && . "$CONF"
@@ -195,6 +208,148 @@ need_tools() {
 need_compose() {
   command -v compose2bootc >/dev/null 2>&1 \
     || die "missing required tool: compose2bootc (install the compose2bootc package)"
+}
+
+# Location of the PVE storage configuration (respected overrides are for
+# tests only; production always reads the real pmxcfs file).
+STORAGE_CFG=${PVECT_STORAGE_CFG:-/etc/pve/storage.cfg}
+
+#######################################
+# Print the storage ids whose /etc/pve/storage.cfg stanza declares
+# 'content <type>', in declaration order. No invented names: only what PVE
+# itself has configured is ever considered.
+# Arguments:
+#   $1 - content type (vztmpl, rootdir, ...)
+# Outputs:
+#   Storeid list on stdout (one per line).
+#######################################
+storage_ids_with_content() {
+  local want=$1
+  awk -v w="$want" '
+    /^[[:space:]]*(#|$)/ { next }
+    /^[^[:space:]]/ {
+      # Stanza line "type: <storeid>": the first colon delimits the plugin
+      # type, the storeid runs until the next whitespace.
+      sid = $0
+      sub(/^[^:]*:[[:space:]]*/, "", sid)
+      sub(/[[:space:]].*$/, "", sid)
+      if (sid == "") { next }
+      if (!(sid in seen)) { seen[sid] = 1; order[++n] = sid }
+      cur = sid
+      next
+    }
+    $1 == "content" {
+      # Both PVE spellings parse: "content rootdir,images" (comma-separated)
+      # and "content rootdir images" (whitespace) — normalise to a comma list.
+      line = $0
+      sub(/^[[:space:]]*content[[:space:]]+/, "", line)
+      gsub(/[[:space:],]+/, ",", line)
+      content[cur] = content[cur] "," line
+    }
+    END {
+      for (i = 1; i <= n; i++)
+        if (index("," content[order[i]] ",", "," w) > 0) print order[i]
+    }
+  ' "$STORAGE_CFG"
+}
+
+#######################################
+# Print the first DECLARED storage with 'content <type>' that pvesm also
+# reports active for that content type (the declaration order of
+# /etc/pve/storage.cfg is the tiebreak-free deterministic order).
+# Arguments:
+#   $1 - content type (vztmpl, rootdir, ...)
+# Outputs:
+#   Storeid on stdout; exit 1 when no candidate is active.
+#######################################
+first_active_storage() {
+  local want=$1 sid active
+  active=$(pvesm status -content "$want" 2>/dev/null \
+    | awk '$3 == "active" {print $1}')
+  for sid in $(storage_ids_with_content "$want"); do
+    if grep -qxF "$sid" <<<"$active"; then
+      echo "$sid"
+      return 0
+    fi
+  done
+  return 1
+}
+
+#######################################
+# Print the default vztmpl target: among the vztmpl-capable storages, one
+# that already holds templates wins (templates stay where they are), else
+# the first active vztmpl-capable storage. Detection is /etc/pve/storage.cfg
+# ordering + pveam listing — never a hard-coded storeid.
+# Outputs:
+#   Storeid on stdout; exit 1 when no vztmpl-capable storage is usable.
+#######################################
+default_template_storage() {
+  local sid
+  for sid in $(storage_ids_with_content vztmpl); do
+    if pveam list "$sid" 2>/dev/null | grep -q .; then
+      echo "$sid"
+      return 0
+    fi
+  done
+  first_active_storage vztmpl
+}
+
+#######################################
+# Fill in the storage targets left empty (by defaults or CONF): explicit
+# configuration always wins, empty targets are resolved from the PVE
+# storage configuration — first active 'content rootdir' for rootfs/mp
+# volumes, existing-templates-then-first-vztmpl for seed templates.
+# Globals:
+#   STORAGE, ROOTFS_STORAGE, TEMPLATE_STORAGE, STORAGE_CFG
+#######################################
+resolve_default_storages() {
+  if [[ -z $ROOTFS_STORAGE ]]; then
+    ROOTFS_STORAGE=$(first_active_storage rootdir) || ROOTFS_STORAGE=
+  fi
+  # STORAGE is the legacy alias for the rootdir target (kept for the
+  # subvol-path fallback); it follows ROOTFS_STORAGE unless set explicitly.
+  if [[ -z $STORAGE ]]; then
+    STORAGE=$ROOTFS_STORAGE
+  fi
+  if [[ -z $TEMPLATE_STORAGE ]]; then
+    TEMPLATE_STORAGE=$(default_template_storage) || TEMPLATE_STORAGE=
+  fi
+}
+
+#######################################
+# Print the storeid backing a container volume (rootfs subvol or writable mp
+# layer). Selection order: explicit per-volume choice (create CLI flag or MP
+# CONF key) wins after validation against the /etc/pve/storage.cfg content
+# declarations — an unknown storeid is a hard error, not a silent fallback;
+# an empty choice follows the fallback (the resolved ROOTFS_STORAGE) and, if
+# even that is unusable, the first active storage with the content type.
+# Never a hard-coded name.
+# Globals:
+#   STORAGE_CFG
+# Arguments:
+#   $1 - content type (rootdir)
+#   $2 - preferred storeid ('' allowed)
+#   $3 - fallback storeid when the preferred is empty ('' allowed)
+#   $4 - context label used in error messages
+# Outputs:
+#   Storeid on stdout; error via die() when nothing usable resolves.
+#######################################
+volume_storage() {
+  local want=$1 pref=$2 fallback=$3 label=$4
+  if [[ -n $pref ]]; then
+    if storage_ids_with_content "$want" | grep -qxF "$pref"; then
+      echo "$pref"
+      return 0
+    fi
+    die "storage '$pref' (volume '$label') offers no 'content $want'"
+  fi
+  if [[ -n $fallback ]] \
+    && storage_ids_with_content "$want" | grep -qxF "$fallback"; then
+    echo "$fallback"
+    return 0
+  fi
+  first_active_storage "$want" \
+    || die "no active storage with 'content $want' for volume '$label'"
 }
 
 #######################################
@@ -646,7 +801,8 @@ umount_rootfs() {
 #                              allocated, host-bind-free); legacy host-path
 #                              binds are migrated by `pvect-ostree migrate`.
 # Globals:
-#   ROOTFS_STORAGE, MP_ETC_SIZE, MP_VAR_SIZE, MP_BOOTC_SIZE
+#   ROOTFS_STORAGE, MP0_STORAGE, MP1_STORAGE, MP2_STORAGE,
+#   MP_ETC_SIZE, MP_VAR_SIZE, MP_BOOTC_SIZE
 # Arguments:
 #   $1 - vmid
 # Outputs:
@@ -676,16 +832,18 @@ EOF
   # `create` carries them already (--mp0/1/2 via the storage API); a CT
   # normalised before the volume rework carries host-path binds which are ONLY
   # replaced by the guarded `migrate` flow (data copied first), never here.
-  local slot mpoint need
+  local slot mpoint need mp_pref mp_st
   for slot in 0 1 2; do
     case $slot in
-      0) mpoint=/etc; need=mp0 ;;
-      1) mpoint=/var; need=mp1 ;;
-      2) mpoint=/usr/lib/bootc; need=mp2 ;;
+      0) mpoint=/etc; need=mp0; mp_pref=$MP0_STORAGE ;;
+      1) mpoint=/var; need=mp1; mp_pref=$MP1_STORAGE ;;
+      2) mpoint=/usr/lib/bootc; need=mp2; mp_pref=$MP2_STORAGE ;;
     esac
-    grep -qE "^mp$slot: [^/]" "$conf" || grep -qE "^mp$slot: " "$conf" || \
-      pct set "$vmid" --mp$slot "$ROOTFS_STORAGE:1,mp=$mpoint" \
-      || die "allocation of $need ($mpoint) on $STORAGE failed"
+    grep -qE "^mp$slot: [^/]" "$conf" || grep -qE "^mp$slot: " "$conf" || {
+      mp_st=$(volume_storage rootdir "$mp_pref" "$ROOTFS_STORAGE" "$need")
+      pct set "$vmid" --mp$slot "$mp_st:1,mp=$mpoint" \
+        || die "allocation of $need ($mpoint) on $mp_st failed"
+    }
   done
 }
 
@@ -878,6 +1036,9 @@ cmd_deploy() {
 #   Exits 1 when no template can be resolved.
 #######################################
 alloc_template() {
+  if [[ -z $TEMPLATE_STORAGE ]]; then
+    die "no storage with 'content vztmpl' found in $STORAGE_CFG (set TEMPLATE_STORAGE in $CONF)"
+  fi
   local t
   t=$(pveam list "$TEMPLATE_STORAGE" 2>/dev/null | awk -v m="$ALLOC_TEMPLATE_MATCH" \
     '$1 ~ m {print $1}' | sed 's#.*/##' | tail -1)
@@ -905,11 +1066,12 @@ alloc_template() {
 # volumes via the PVE storage API, deploy the image into the per-CT sysroot
 # (inside the rootfs volume), mount the composefs view, normalise the config.
 # Globals:
-#   PROG, ROOTFS_STORAGE
+#   PROG, ROOTFS_STORAGE, MP0_STORAGE, MP1_STORAGE, MP2_STORAGE, STORAGE_CFG
 # Arguments:
 #   $1  - vmid
 #   $2  - image reference
-#   $3+ - extra pct create options
+#   $3+ - per-volume storage flags (--rootfs-storage, --mpN-storage) and
+#         extra pct create options
 # Outputs:
 #   Progress via info(); errors via die().
 # Returns:
@@ -927,17 +1089,47 @@ cmd_create() {
   cd /
   [[ -f "/etc/pve/lxc/$vmid.conf" ]] && die "CT $vmid already exists"
 
+  # Per-volume storage choice at creation: --rootfs-storage/--mpN-storage win
+  # over the CONF preference (MPn_STORAGE), anything empty follows the
+  # resolved ROOTFS_STORAGE — every candidate is validated against the
+  # storage.cfg content declarations, never hard-coded.
+  local arg roots_pref="" mp0_pref="" mp1_pref="" mp2_pref=""
+  local pct_opts=()
+  while (($#)); do
+    arg=$1
+    shift
+    case $arg in
+      --rootfs-storage=*) roots_pref=${arg#*=} ;;
+      --rootfs-storage) roots_pref=${1?--rootfs-storage needs a value}; shift ;;
+      --mp0-storage=*) mp0_pref=${arg#*=} ;;
+      --mp0-storage) mp0_pref=${1?--mp0-storage needs a value}; shift ;;
+      --mp1-storage=*) mp1_pref=${arg#*=} ;;
+      --mp1-storage) mp1_pref=${1?--mp1-storage needs a value}; shift ;;
+      --mp2-storage=*) mp2_pref=${arg#*=} ;;
+      --mp2-storage) mp2_pref=${1?--mp2-storage needs a value}; shift ;;
+      *) pct_opts+=("$arg") ;;
+    esac
+  done
+
+  local rootfs_st mp0_st mp1_st mp2_st
+  rootfs_st=$(volume_storage rootdir "${roots_pref:-$ROOTFS_STORAGE}" \
+    "${roots_pref:+$ROOTFS_STORAGE}" rootfs)
+  mp0_st=$(volume_storage rootdir "${mp0_pref:-$MP0_STORAGE}" "$rootfs_st" mp0)
+  mp1_st=$(volume_storage rootdir "${mp1_pref:-$MP1_STORAGE}" "$rootfs_st" mp1)
+  mp2_st=$(volume_storage rootdir "${mp2_pref:-$MP2_STORAGE}" "$rootfs_st" mp2)
+  info "volume stores: rootfs=$rootfs_st mp0=$mp0_st mp1=$mp1_st mp2=$mp2_st"
+
   local tmpl
   tmpl=$(alloc_template)
   info "allocating rootfs + writable layers via pct create (template $tmpl, discarded)"
   pct create "$vmid" "$TEMPLATE_STORAGE:vztmpl/$tmpl" \
     --unprivileged 1 --features nesting=1 \
-    --hostname "ct$vmid" --rootfs "$ROOTFS_STORAGE:0" \
-    --mp0 "$ROOTFS_STORAGE:$MP_ETC_SIZE,mp=/etc" \
-    --mp1 "$ROOTFS_STORAGE:$MP_VAR_SIZE,mp=/var" \
-    --mp2 "$ROOTFS_STORAGE:$MP_BOOTC_SIZE,mp=/usr/lib/bootc" \
+    --hostname "ct$vmid" --rootfs "$rootfs_st:0" \
+    --mp0 "$mp0_st:$MP_ETC_SIZE,mp=/etc" \
+    --mp1 "$mp1_st:$MP_VAR_SIZE,mp=/var" \
+    --mp2 "$mp2_st:$MP_BOOTC_SIZE,mp=/usr/lib/bootc" \
     --net0 name=eth0,bridge=vmbr0,ip=dhcp,type=veth,firewall=1 \
-    "$@" \
+    "${pct_opts[@]}" \
     || die "pct create failed"
 
   local stateroot="ct$vmid"
@@ -1317,6 +1509,9 @@ EOF
 EOF
   tar -czf "$tmp/$STACK.tar.gz" -C "$tmp" pvect-ostree etc \
     || die "seed template tar failed"
+  if [[ -z $TEMPLATE_STORAGE ]]; then
+    die "no storage with 'content vztmpl' found in $STORAGE_CFG (set TEMPLATE_STORAGE in $CONF)"
+  fi
   pvesh create "/nodes/$(hostname)/storage/$TEMPLATE_STORAGE/upload" \
     -filename "$tmp/$STACK.tar.gz" -content vztmpl \
     || die "template upload to $TEMPLATE_STORAGE:vztmpl failed"
@@ -1476,12 +1671,13 @@ for line in open(sys.argv[1]):
         print(f"{slot}\t{first}\t{target}")
 PY
 
-  local slot src target volid volpath size next idx
+  local slot src target volid volpath size next idx mp_st
   while IFS=$'\t' read -r slot src target; do
     [[ -n $slot && -n $src && -n $target ]] || continue
     info "migrating $slot: $src -> $target"
     [[ -d $src ]] || { warn "source missing: $src (skipped)"; continue; }
     [[ $target == /* ]] || { warn "weird mountpoint $target (skipped)"; continue; }
+    mp_st=$(volume_storage rootdir "" "$ROOTFS_STORAGE" "$slot")
     # Size: du + 2G margin, GB, minimum 4 (1 G would be too tight for /etc
     # trees that grew beyond the seed).
     size=$(du -sk "$src" 2>/dev/null | awk '{print $1}')
@@ -1489,12 +1685,12 @@ PY
     (( size < 4 )) && size=4
     # Find the next free disk index across the storage for this vmid (disk-0
     # is the rootfs, always present in the listing).
-    next=$(pvesm list "$ROOTFS_STORAGE" 2>/dev/null \
-      | grep "^${ROOTFS_STORAGE}:${vmid}/subvol-${vmid}-disk-" \
+    next=$(pvesm list "$mp_st" 2>/dev/null \
+      | grep "^${mp_st}:${vmid}/subvol-${vmid}-disk-" \
       | grep -oE 'disk-[0-9]+' | sed 's/disk-//' | sort -n | tail -1)
     next=${next:-0}
     idx=$(( next + 1 ))
-    volid=$(pvesm alloc "$ROOTFS_STORAGE" "$vmid" \
+    volid=$(pvesm alloc "$mp_st" "$vmid" \
       "subvol-$vmid-disk-$idx.subvol" "${size}G") \
       || die "allocation of the $slot volume ($size G) failed"
     volpath=$(pvesm path "$volid") || die "cannot resolve $volid"
@@ -1538,7 +1734,7 @@ cmd_subvol_path() {
 #   Exits with the given code.
 #######################################
 usage() {
-  sed -n '3,18p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -1558,6 +1754,12 @@ main() {
   local cmd=${1:-}
   [[ -n $cmd ]] || usage 1
   shift
+  case "$cmd" in
+    -h | --help | help) usage 0 ;;
+  esac
+  # Explicit conf/CLI-set storages are honoured; the empty ones are resolved
+  # from the node's own storage configuration before any subcommand runs.
+  resolve_default_storages
   case "$cmd" in
     deploy) cmd_deploy "$@" ;;
     create) cmd_create "$@" ;;
@@ -1583,4 +1785,8 @@ main() {
   esac
 }
 
-main "$@"
+# Run only when executed directly: sourcing the file (tests) loads the
+# functions without dispatching.
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
+fi
