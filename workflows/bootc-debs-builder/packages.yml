@@ -242,7 +242,7 @@ packages:
       HELPERS_VER: 4
       # Bump when the build contract changes in a way `sources:` alone
       # cannot express (e.g. the lib's behaviour for the same tree).
-      KERNEL_BUILD_VER: 2
+      KERNEL_BUILD_VER: 3
       KERNEL_SERIES: "7.3"
       KERNEL_ARCH: x86_64
       KERNEL_OUT: /debs
@@ -310,17 +310,17 @@ packages:
           FRAGS+=("${KERNEL_DATA_DIR}/kconfig/${KERNEL_ARCH_LEVEL}.cfg")
         kernel_merge_config "${SRCDIR}" "${FRAGS[@]}"
         KCFLAGS=$(kernel_flavour_kcflags "${KERNEL_ARCH_LEVEL}")
-        kernel_build_debs "${SRCDIR}" deb-pkg "${KCFLAGS}"
+        kernel_build_debs "${SRCDIR}" bindeb-pkg "${KCFLAGS}"
       else
         # arm64 (coded but disabled): ONE generic kernel, cross-compiled.
         [[ -z "${PVE_SEED_CONFIG}" ]] && make -C "${SRCDIR}" defconfig
         [[ -f "${KERNEL_DATA_DIR}/kconfig/arm64-common.cfg" ]] && \
           FRAGS+=("${KERNEL_DATA_DIR}/kconfig/arm64-common.cfg")
         kernel_merge_config "${SRCDIR}" "${FRAGS[@]}"
-        kernel_build_debs "${SRCDIR}" deb-pkg
+        kernel_build_debs "${SRCDIR}" bindeb-pkg
       fi
 
-      # make deb-pkg writes the debs one directory above the tree.
+      # make deb-pkg/bindeb-pkg writes the debs one directory above the tree.
       cp "$(dirname "${SRCDIR}")"/*.deb /debs/
       # Free the ~10 GB source tree now that the debs are in /debs.
       rm -rf "${SRCDIR}" /build

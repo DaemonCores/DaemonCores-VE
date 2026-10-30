@@ -651,16 +651,76 @@ ct_sysroot() { echo "$(subvol_path "$1")/pvect-ostree/sysroot"; }
 #   $2 - deployment directory
 #######################################
 build_bootc_shadow() {
-  local vmid=$1 deploy=$2 shadow
+  local vmid=$1 deploy=$2 shadow shadow_run stage
   shadow=$(ct_bootc "$vmid")
   [[ -d $deploy/usr/lib/bootc ]] || return 0
-  if [[ ! -d $shadow/bound-images.d ]]; then
-    mkdir -p "$shadow"
-    cp -a "$deploy/usr/lib/bootc/." "$shadow/" \
-      || die "cannot seed the bootc shadow from $deploy/usr/lib/bootc"
+  # mp2 is a PVE mp VOLUME (raw file on a dir storage); stage it as a dir
+  # for the copy (loop-mount when the volume is not already mounted).
+  stage=$(stage_mp_dir "$shadow")
+  shadow_run=${stage%%|*}
+  if [[ ! -d $shadow_run/bound-images.d ]]; then
+    mkdir -p "$shadow_run"
+    cp -a "$deploy/usr/lib/bootc/." "$shadow_run/" \
+      || { unstage_mp_dir "$stage"; die "cannot seed the bootc shadow from $deploy/usr/lib/bootc"; }
   fi
-  mkdir -p "$shadow/storage"
-  chown -R "$UID_BASE:$UID_BASE" "$shadow"
+  mkdir -p "$shadow_run/storage"
+  chown -R "$UID_BASE:$UID_BASE" "$shadow_run"
+  unstage_mp_dir "$stage"
+}
+
+#######################################
+# Resolve an mp target (writable layer) into a usable host DIRECTORY.
+#
+# `pct create` allocates mp volumes as raw FILES (vm-N-disk-M.raw) on dir
+# storages, but every caller seeds a directory tree. When the target is such
+# a file: format it ext4 if it carries no filesystem yet, then loop-mount it
+# to a scratch dir and return "<mountpoint>|<dev>". When the target is
+# already a dir (legacy state tree) or already mounted (findmnt; e.g. PVE
+# mounted the mp for a start), return "<path|" with no cleanup needed.
+# Globals:
+#   None
+# Arguments:
+#   $1 - resolved mp target path (dir or raw file)
+# Outputs:
+#   "<runtime-dir>|<loopdev-or-empty>" on stdout.
+#   Error via die() if the target is neither a dir nor a file.
+#######################################
+stage_mp_dir() {
+  local path=$1 dev mnt
+  [[ -e $path ]] || die "mp target does not exist: $path"
+  if [[ -d $path ]]; then
+    echo "$path|"
+    return 0
+  fi
+  # Already mounted somewhere (e.g. PVE mounted the mp volume for a start)?
+  mnt=$(findmnt -rn -S "$path" -o TARGET --first-only 2>/dev/null)
+  if [[ -n $mnt ]]; then
+    echo "$mnt|"
+    return 0
+  fi
+  if ! blkid -o value -s TYPE "$path" 2>/dev/null | grep -q .; then
+    mkfs.ext4 -q -F "$path" || die "cannot format the fresh mp volume $path"
+  fi
+  dev=$(losetup --find --show "$path") || die "losetup failed for $path"
+  mnt=$(mktemp -d /var/tmp/pvect-mp-stage.XXXXXX) \
+    || { losetup -d "$dev"; die "cannot create a staging directory for $path"; }
+  mount "$dev" "$mnt" \
+    || { losetup -d "$dev"; rmdir "$mnt"; die "mount failed for the mp volume $path"; }
+  echo "$mnt|$dev"
+}
+
+#######################################
+# Release a staged mp target ("<dir>|<dev>"). No-op for passthrough entries
+# (empty dev) and for targets that were already mounted.
+# Arguments:
+#   $1 - staging descriptor returned by stage_mp_dir
+#######################################
+unstage_mp_dir() {
+  local stage=$1 dir=${stage%%|*} dev=${stage#*|}
+  mountpoint -q "$dir" && umount "$dir"
+  [[ -n $dev ]] && losetup -d "$dev"
+  [[ $dir == /var/tmp/pvect-mp-stage.* ]] && rmdir "$dir"
+  return 0
 }
 
 #######################################
@@ -671,7 +731,8 @@ build_bootc_shadow() {
 # The layers are the PVE mp VOLUMES (mp0=/etc, mp1=/var, mp2=/usr/lib/bootc)
 # resolved host-side via pct config; legacy (pre-migration) CTs still resolve
 # to the registered host trees, which is where their data lives until
-# `pvect-ostree migrate` moves it.
+# `pvect-ostree migrate` moves it. Raw file volumes are loop-staged for the
+# seed (stage_mp_dir) and released before this returns.
 # Globals:
 #   GUEST_MASK_UNITS, UID_BASE, STATEROOT
 # Arguments:
@@ -683,52 +744,61 @@ build_bootc_shadow() {
 #######################################
 build_writable_layers() {
   local vmid=$1
-  local etc var u deploy
-  etc=$(ct_etc "$vmid")
-  var=$(ct_var "$vmid")
+  local u deploy
+  local etc_stage var_stage etc_run var_run
+  # mp0/mp1 are PVE mp VOLUMES (raw files on a dir storage); stage them as
+  # dirs for the seed (loop-mounted when not already mounted).
+  etc_stage=$(stage_mp_dir "$(ct_etc "$vmid")")
+  etc_run=${etc_stage%%|*}
+  var_stage=$(stage_mp_dir "$(ct_var "$vmid")")
+  var_run=${var_stage%%|*}
   # The deployment tree (plain checkout inside the per-CT sysroot) carries the
   # seed /etc and the bootc shadow sources — readable host-side without the
   # composefs mount.
   # shellcheck disable=SC2153  # STATEROOT sourced from the registry entry.
   deploy=$(deploy_path "$STATEROOT" "$(ct_sysroot "$vmid")")
 
-  mkdir -p "$var"
-  if [[ ! -d "$etc/systemd" ]]; then
-    mkdir -p "$etc/systemd/system"
+  mkdir -p "$var_run"
+  if [[ ! -d "$etc_run/systemd" ]]; then
+    mkdir -p "$etc_run/systemd/system"
     local seed
     seed="$deploy/usr/etc"
     # Bootc images may carry the default /etc either under /usr/etc (composefs
     # layout) or straight at /etc — seed whichever the deployment actually has.
     [[ -d $seed ]] || seed="$deploy/etc"
-    cp -a "$seed/." "$etc/" 2>/dev/null \
-      || die "cannot seed /etc from $seed"
+    cp -a "$seed/." "$etc_run/" 2>/dev/null \
+      || { unstage_mp_dir "$var_stage"; unstage_mp_dir "$etc_stage"; die "cannot seed /etc from $seed"; }
     # /etc/os-release is a symlink into /usr/lib in Debian/bootc images; the
     # writable seed sits outside the composefs view, so materialise the real
     # file or PVE::LXC::Setup fails with "can't open /etc/os-release".
-    if [[ -L $etc/os-release ]]; then
-      rm -f "$etc/os-release"
-      cp -L "$seed/os-release" "$etc/os-release" 2>/dev/null \
-        || cp -L "$deploy/usr/lib/os-release" "$etc/os-release" 2>/dev/null \
-        || die "cannot materialise /etc/os-release from $seed"
+    if [[ -L $etc_run/os-release ]]; then
+      rm -f "$etc_run/os-release"
+      cp -L "$seed/os-release" "$etc_run/os-release" 2>/dev/null \
+        || cp -L "$deploy/usr/lib/os-release" "$etc_run/os-release" 2>/dev/null \
+        || { unstage_mp_dir "$var_stage"; unstage_mp_dir "$etc_stage"; die "cannot materialise /etc/os-release from $seed"; }
     fi
     for u in $GUEST_MASK_UNITS; do
-      ln -sf /dev/null "$etc/systemd/system/$u"
+      ln -sf /dev/null "$etc_run/systemd/system/$u"
     done
   fi
   # PVE never writes the resolver for an unmanaged guest; aardvark-dns (netavark
   # DNS) needs one at service start, so seed the host resolver once.
-  if [[ ! -s $etc/resolv.conf && -r /etc/resolv.conf ]]; then
-    cp /etc/resolv.conf "$etc/resolv.conf"
+  if [[ ! -s $etc_run/resolv.conf && -r /etc/resolv.conf ]]; then
+    cp /etc/resolv.conf "$etc_run/resolv.conf"
   fi
   # Some image /etc trees ship podman without policy.json; pulls then fail with
   # "no policy.json file found". Fall back to the accept-by-default policy.
-  mkdir -p "$etc/containers"
-  if [[ ! -e $etc/containers/policy.json ]]; then
+  mkdir -p "$etc_run/containers"
+  if [[ ! -e $etc_run/containers/policy.json ]]; then
     printf '%s\n' '{"default":[{"type":"insecureAcceptAnything"}]}' \
-      >"$etc/containers/policy.json"
+      >"$etc_run/containers/policy.json"
   fi
-  chown -R "$UID_BASE:$UID_BASE" "$etc" "$var"
+  chown -R "$UID_BASE:$UID_BASE" "$etc_run" "$var_run"
+  # mp2 (bootc shadow) stages itself; release the mp0/mp1 loops afterwards so
+  # a die() inside build_bootc_shadow leaves them inspectable for the audit.
   build_bootc_shadow "$vmid" "$deploy"
+  unstage_mp_dir "$var_stage"
+  unstage_mp_dir "$etc_stage"
 }
 
 #######################################
