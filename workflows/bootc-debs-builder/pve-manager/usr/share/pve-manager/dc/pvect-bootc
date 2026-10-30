@@ -19,11 +19,92 @@
 #   pvect-bootc refresh <vmid>
 set -uo pipefail
 
-PROG=$(basename "$0")
+# Source-safe: a caller (tests) may export PROG — and a readonly PROG must
+# not fault the re-assignment — so only set it when actually unset/empty.
+if [[ -z ${PROG:-} ]]; then PROG=$(basename "$0"); fi
 VOSTREE="pvect-ostree"
 
 ETC=$'/etc/pve'
-SYSROOT=/var/lib/pvect-ostree/sysroot
+COMPOSE_DIR=/var/lib/pvect-ostree/compose
+# PVE storage for the seed templates. Empty (default): the vztmpl-capable
+# storage that ALREADY holds templates wins (pveam listing), else the FIRST
+# active storage with 'content vztmpl' in /etc/pve/storage.cfg — never a
+# hard-coded storeid. An explicit value (env/edge cases) always wins.
+TEMPLATE_STORAGE=
+STORAGE_CFG=${PVECT_STORAGE_CFG:-/etc/pve/storage.cfg}
+
+#######################################
+# Print the storage ids whose /etc/pve/storage.cfg stanza declares
+# 'content <type>', in declaration order. No invented names.
+# Arguments:
+#   $1 - content type (vztmpl, ...)
+#######################################
+storage_ids_with_content() {
+  local want=$1
+  awk -v w="$want" '
+    /^[[:space:]]*(#|$)/ { next }
+    /^[^[:space:]]/ {
+      # Stanza line "type: <storeid>": the first colon delimits the plugin
+      # type, the storeid runs until the next whitespace.
+      sid = $0
+      sub(/^[^:]*:[[:space:]]*/, "", sid)
+      sub(/[[:space:]].*$/, "", sid)
+      if (sid == "") { next }
+      if (!(sid in seen)) { seen[sid] = 1; order[++n] = sid }
+      cur = sid
+      next
+    }
+    $1 == "content" {
+      # Both PVE spellings parse: "content rootdir,images" (comma-separated)
+      # and "content rootdir images" (whitespace) — normalise to a comma list.
+      line = $0
+      sub(/^[[:space:]]*content[[:space:]]+/, "", line)
+      gsub(/[[:space:],]+/, ",", line)
+      content[cur] = content[cur] "," line
+    }
+    END {
+      for (i = 1; i <= n; i++)
+        if (index("," content[order[i]] ",", "," w) > 0) print order[i]
+    }
+  ' "$STORAGE_CFG"
+}
+
+#######################################
+# Print the first declared storage with 'content <type>' that pvesm reports
+# active for that content type; exit 1 when none is usable.
+# Arguments:
+#   $1 - content type (vztmpl, ...)
+#######################################
+first_active_storage() {
+  local want=$1 sid active
+  active=$(pvesm status -content "$want" 2>/dev/null \
+    | awk '$3 == "active" {print $1}')
+  for sid in $(storage_ids_with_content "$want"); do
+    if grep -qxF "$sid" <<<"$active"; then
+      echo "$sid"
+      return 0
+    fi
+  done
+  return 1
+}
+
+#######################################
+# Fill in TEMPLATE_STORAGE when left empty: existing-templates-then-first
+# vztmpl-capable storage, resolved from the node's own storage configuration.
+#######################################
+resolve_default_storages() {
+  if [[ -n $TEMPLATE_STORAGE ]]; then
+    return 0
+  fi
+  local sid
+  for sid in $(storage_ids_with_content vztmpl); do
+    if pveam list "$sid" 2>/dev/null | grep -q .; then
+      TEMPLATE_STORAGE=$sid
+      return 0
+    fi
+  done
+  TEMPLATE_STORAGE=$(first_active_storage vztmpl) || TEMPLATE_STORAGE=
+}
 
 info() { echo "$PROG: $*" >&2; }
 warn() { command -v logger >/dev/null 2>&1 && logger -t "$PROG" "$*" 2>/dev/null; echo "$PROG: warning: $*" >&2; }
@@ -85,7 +166,7 @@ publish_stack() {
   need_root
   [[ -r $compose ]] || die "compose file not found: $compose"
   "$VOSTREE" publish "$compose" "$@" || die "seed template publish failed"
-  info "compose stack published (template ostree:vztmpl/<stack>.tar.gz)"
+  info "compose stack published (template $TEMPLATE_STORAGE:vztmpl/<stack>.tar.gz)"
 }
 
 #######################################
@@ -94,15 +175,17 @@ publish_stack() {
 #######################################
 list_templates() {
   need_root
+  [[ -n $TEMPLATE_STORAGE ]] \
+    || die "no storage with 'content vztmpl' found in $STORAGE_CFG (set TEMPLATE_STORAGE)"
   local f stack imgref compose ctime archive
   shopt -s nullglob
-  for f in "$SYSROOT"/vztmpl/*.payload.env; do
+  for f in "$COMPOSE_DIR"/*/*.payload.env; do
     stack=""; imgref=""; compose=""
     # shellcheck source=/dev/null
     . "$f"
     # shellcheck disable=SC2153
     ctime=$(stat -c '%Y' "$f")
-    archive="ostree:vztmpl/$STACK.tar.gz"
+    archive="$TEMPLATE_STORAGE:vztmpl/$STACK.tar.gz"
     printf '%s\t%s\t%s\t%s\t%s\n' "$archive" "$STACK" "$IMGREF" "$ctime" "$COMPOSE"
   done
 }
@@ -115,7 +198,7 @@ list_templates() {
 read_stack_compose() {
   local stack=$1 envf compose
   need_root
-  envf="$SYSROOT/vztmpl/$stack.payload.env"
+  envf="$COMPOSE_DIR/$stack/$stack.payload.env"
   [[ -r $envf ]] || die "no published stack '$stack'"
   compose=$(grep -m1 '^COMPOSE=' "$envf" | cut -d= -f2-)
   [[ -n $compose && -r $compose ]] || die "stack $stack has no recorded compose source"
@@ -133,9 +216,9 @@ require_guest() { guest_exists "$1" || die "guest $1 is not managed by pvect-boo
 # Allocates the rootdir volume on the plugin storage, extracts the seed,
 # adopts and mounts it; then opens the guest's cluster conf.
 # Globals:
-#   SYSROOT
+#   TEMPLATE_STORAGE
 # Arguments:
-#   $1 - vmid; $2 - archive (ostree:vztmpl/<stack>.tar.gz); $@ - options
+#   $1 - vmid; $2 - archive ($TEMPLATE_STORAGE:vztmpl/<stack>.tar.gz); $@ - options
 #######################################
 create_guest() {
   local vmid=$1 archive=$2
@@ -144,17 +227,20 @@ create_guest() {
 
   local storeid stack file
   storeid=${archive%%:*}
-  [[ -n $storeid && $archive == *':vztmpl/'* ]] || die "invalid archive '$archive' (expected ostree:vztmpl/<stack>.tar.gz)"
+  [[ -n $storeid && $archive == *':vztmpl/'* ]] || die "invalid archive '$archive' (expected $TEMPLATE_STORAGE:vztmpl/<stack>.tar.gz)"
   stack=${archive#*:vztmpl/}; stack=${stack%.tar.gz}
-  file="$SYSROOT/vztmpl/$stack.tar.gz"
-  [[ -r $file ]] || die "seed template $archive not found"
+  # Resolve the seed file location through the storage API — the vztmpl dir
+  # and backing path depend on the resolved storage's own configuration.
+  file=$(pvesm path "$storeid:vztmpl/$stack.tar.gz" 2>/dev/null)
+  [[ -n $file && -r $file ]] \
+    || die "seed template $archive not found (resolved storage: ${TEMPLATE_STORAGE:-none})"
 
   # allocate the rootdir volume like a normal dir-storage guest would
   local volname subvol
   volname="subvol-${vmid}-disk-0.subvol"
   subvol=$(pvesm path "$storeid:$volname" 2>/dev/null)
   if [[ ! -d ${subvol:-/nonexistent} ]]; then
-    pvesm alloc "$storeid" "$vmid" "$volname" 4294967296 >/dev/null \
+    pvesm alloc "$storeid" "$vmid" "$volname" 32212254720 >/dev/null \
       || die "volume allocation failed on $storeid"
     subvol=$(pvesm path "$storeid:$volname") || die "cannot resolve allocated volume"
   fi
@@ -255,6 +341,9 @@ main() {
   local cmd=${1:-}; [[ -n $cmd ]] || usage 1
   [[ $cmd == -h || $cmd == --help || $cmd == help ]] && usage 0
   shift
+  # Explicit env-set TEMPLATE_STORAGE is honoured; the empty one is resolved
+  # from the node's own storage configuration before dispatching.
+  resolve_default_storages
   case "$cmd" in
     publish)
       local compose=${1:-}; [[ -n $compose ]] || die "usage: $PROG publish <compose.yml> [--name N]"
@@ -312,4 +401,8 @@ main() {
   esac
 }
 
-main "$@"
+# Run only when executed directly: sourcing the file (tests) loads the
+# functions without dispatching.
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
+fi
