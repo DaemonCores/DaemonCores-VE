@@ -123,9 +123,7 @@ packages:
   # today). The build block orchestrates the STANDARD kernel helpers of
   # DaemonCores-CI scripts/kernel_helpers.sh (kernel_pve_prepare,
   # kernel_apply_patches on the native patches: data, kernel_merge_config,
-  # kernel_build_debs) — no logic is duplicated here; the retired
-  # lib/kernel-pve-build.sh stays only for the deprecated workflow lane
-  # until that lane lands.
+  # kernel_build_debs) — no logic is duplicated here.
   #
   # PRODUCTION lane (not artifact-only): the debs land in /debs and go
   # through the standard builder — content-hash cache, /debs/.meta, publish
@@ -273,7 +271,7 @@ packages:
         build-essential dpkg-dev devscripts curl git yq patch \
         bc bison flex libncurses-dev libssl-dev libelf-dev rsync kmod python3 \
         fakeroot ca-certificates \
-        debhelper libdw-dev gawk
+        debhelper libdw-dev gawk zstd xz-utils lz4
       [[ "${KERNEL_ARCH}" = "arm64" ]] && \
         apt-get install -y --no-install-recommends \
           crossbuild-essential-arm64 gcc-aarch64-linux-gnu
@@ -282,8 +280,7 @@ packages:
 
       # Standard kernel helpers (DaemonCores-CI scripts/kernel_helpers.sh,
       # sourced implicitly by deb_helpers.sh): packaging fetch, patches.yml,
-      # kconfig merge, make deb-pkg. The retired lib/lib driver of the
-      # deprecated workflow keeps its own copy until that lane is retired.
+      # kconfig merge, make deb-pkg.
       mkdir -p /build && kernel_pve_prepare /build
       # Native patches: data of this entry, exported as PATCHES_JSON by the
       # builder (hashed in the content hash); "-" selects it.
