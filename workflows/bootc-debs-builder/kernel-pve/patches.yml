@@ -4,7 +4,7 @@
 # at build time. The patch files themselves are never committed: each entry
 # names the URL of the file in the official XanMod upstream repository
 # (GitLab xanmod/linux-patches, directory linux-{series}.y-xanmod/<topic>),
-# and lib/kernel-pve-patches.sh downloads it. A patch that cannot be
+# and kernel_apply_patches (DaemonCores-CI) downloads it. A patch that cannot be
 # downloaded or does not apply fails the build; the last good deb is kept.
 #
 # Fields:
@@ -26,7 +26,7 @@
 # Generated from the live GitLab tree on 2026-10-30 (series 7.3), reviewed
 # 2026-10-29 for the series the PVE 9.2 packaging actually tracks:
 # proxmox-kernel-7.0 (7.0.14-26) → the ARCHIVED 7.0 series, eol/linux-7.0.y-
-# xanmod ({seriesdir} resolved by lib/kernel-pve-patches.sh). 21 patches:
+# xanmod ({seriesdir} resolved by kernel_patch_list in DaemonCores-CI). 21 patches:
 # 18 xanmod + 3 clearlinux; 0004-ata-before-graphics (clearlinux) does not
 # apply to the 7.0.x tree in either series (dry-run verified). The build
 # hard-fails on any patch that cannot be downloaded or applied. A new
