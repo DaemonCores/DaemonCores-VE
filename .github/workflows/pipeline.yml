@@ -42,10 +42,6 @@ on:
         description: 'Build ISO'
         type: boolean
         default: true
-      gpu_driver_images:
-        description: 'Also publish the -nvidia image twins (EULA-restricted; installer-gated)'
-        type: boolean
-        default: false
       run_image:
         description: 'Build container image'
         type: boolean
@@ -73,5 +69,4 @@ jobs:
       run_debs: ${{ inputs.run_debs }}
       run_image: ${{ inputs.run_image }}
       run_iso: ${{ inputs.run_iso }}
-      gpu_driver_images: ${{ inputs.gpu_driver_images }}
     secrets: inherit
