@@ -321,6 +321,12 @@ packages:
         [[ -f "${KERNEL_DATA_DIR}/kconfig/${KERNEL_ARCH_LEVEL}.cfg" ]] && \
           FRAGS+=("${KERNEL_DATA_DIR}/kconfig/${KERNEL_ARCH_LEVEL}.cfg")
         kernel_merge_config "${SRCDIR}" "${FRAGS[@]}"
+        # The pinned Ubuntu tree's objtool klp-checksum.c does not compile
+        # (it calls static helpers of check.c) and objtool builds it whenever
+        # libxxhash headers exist on the host. klp-build is only needed with
+        # CONFIG_KLP_BUILD, so skip it unless the merged config enables it.
+        grep -q '^CONFIG_KLP_BUILD=y' "${SRCDIR}/.config" \
+          || export KERNEL_MAKE_ARGS="ARCH_HAS_KLP=n"
         KCFLAGS=$(kernel_flavour_kcflags "${KERNEL_ARCH_LEVEL}")
         kernel_build_debs "${SRCDIR}" bindeb-pkg "${KCFLAGS}"
       else
