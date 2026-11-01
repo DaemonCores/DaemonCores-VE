@@ -237,7 +237,7 @@ packages:
       # downloads but no longer applies to the 7.0.x tree — drivers
       # initialize ata before graphics upstream now.
     env:
-      HELPERS_VER: 6
+      HELPERS_VER: 7
       # Bump when the build contract changes in a way `sources:` alone
       # cannot express (e.g. the lib's behaviour for the same tree).
       KERNEL_BUILD_VER: 3
