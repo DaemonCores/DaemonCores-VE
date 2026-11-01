@@ -205,6 +205,7 @@ packages:
         url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0014-XANMOD-mm-vmscan-Reduce-amount-of-swapping.patch
         topic: xanmod
         stage: common
+        fuzz: 2
       - name: 0015-cpufreq-governor-tunes
         url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0015-XANMOD-cpufreq-tunes-ondemand-and-conservative-gover.patch
         topic: xanmod

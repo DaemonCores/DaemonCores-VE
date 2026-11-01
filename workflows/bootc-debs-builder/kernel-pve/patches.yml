@@ -95,6 +95,10 @@ patches:
     url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0014-XANMOD-mm-vmscan-Reduce-amount-of-swapping.patch
     topic: xanmod
     stage: common
+    # The Ubuntu mirror tree's context around the line differs (fuzz 2); the
+    # hunk rewrites the single `int vm_swappiness = 60;` line, verified at
+    # mm/vmscan.c:201 of the pinned 7.0 tree.
+    fuzz: 2
   - name: 0015-cpufreq-governor-tunes
     url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0015-XANMOD-cpufreq-tunes-ondemand-and-conservative-gover.patch
     topic: xanmod
