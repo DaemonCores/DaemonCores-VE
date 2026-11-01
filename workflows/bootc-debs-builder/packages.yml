@@ -263,7 +263,7 @@ packages:
         || { echo "ERROR: no proxmox repo key available" >&2; exit 1; }
       apt-get update
       KERNEL_VERSION=$(apt-cache policy proxmox-kernel-7.0 \
-        | awk '/Candidate:/ {print $2; exit}')
+        | awk '/Candidate:/ && !s {print $2; s=1}')
       test -n "${KERNEL_VERSION}" \
         || { echo "ERROR: cannot resolve the PVE kernel version" >&2; exit 1; }
 
