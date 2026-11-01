@@ -284,6 +284,11 @@ packages:
       mkdir -p /build && kernel_pve_prepare /build
       # Native patches: data of this entry, exported as PATCHES_JSON by the
       # builder (hashed in the content hash); "-" selects it.
+      # Debian arch of the patch stage, derived from the kernel arch dir.
+      case "${KERNEL_ARCH}" in
+        x86_64) DEB_ARCH=amd64 ;;
+        *) DEB_ARCH="${KERNEL_ARCH}" ;;
+      esac
       kernel_apply_patches - \
         "${DEB_ARCH}" "${KERNEL_VERSION}" "${SRCDIR}"
 
