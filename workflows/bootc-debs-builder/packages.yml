@@ -248,6 +248,11 @@ packages:
     sources:
       - kernel-pve/kconfig
     build: |
+      # Repo-relative data dir (kconfig fragments), resolved before any cd.
+      KERNEL_DATA_DIR="$(pwd)/workflows/bootc-debs-builder/kernel-pve"
+      [[ -d "${KERNEL_DATA_DIR}/kconfig" ]] \
+        || { echo "ERROR: kernel-pve data dir not found: ${KERNEL_DATA_DIR}" >&2; exit 1; }
+      export KERNEL_DATA_DIR
       # Version resolved from the Proxmox repo itself (rolling anchor).
       echo "deb [arch=amd64] http://download.proxmox.com/debian/pve trixie pve-no-subscription" \
         > /etc/apt/sources.list.d/pve.list
