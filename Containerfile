@@ -21,8 +21,16 @@ LABEL ostree.bootable=1
 # NVIDIA proprietary driver/libs after the install-time EULA acceptance.
 LABEL org.daemoncores.nvidia-image="true"
 
-# SHA-256 checksums of the APT repository signing keys fetched below.
-ARG DAEMONCORES_VE_GPG_SHA256=4920000cfcd8f5a618822c8e57222a3c10768d2efb8c0250a71a19ba0c76ff55
+# APT repository trust — same mechanics as debian-bootc: the full pipeline
+# hashes the APT_GPG_KEY secret at every run (full-pipeline.yml apt_key job)
+# and bootc-build.yml passes both build-args (BOOTC_GPG_SHA256 / BOOTC_APT_URL
+# env, consumed by build-arch.sh apt_build_args). Nothing to hand-edit after a
+# key rotation; the committed defaults only serve plain local podman builds.
+# The sources stanza below carries the same URL (src/pvepreinstall).
+ARG BOOTC_APT_URL=https://daemoncores.github.io/DaemonCores-VE/
+ARG BOOTC_GPG_SHA256=4920000cfcd8f5a618822c8e57222a3c10768d2efb8c0250a71a19ba0c76ff55
+# The Proxmox archive key is an upstream artifact (not our secret-derived repo
+# key): its pin stays committed, refreshed with the release that fetches it.
 ARG PVE_GPG_SHA256=136673be77aba35dcce385b28737689ad64fd785a797e57897589aed08db6e45
 # Product display name, injected by the CI from the repo name (dashes -> spaces).
 # Overrides the base's value so bootc-finalize (re-run by the pve-kernel install)
@@ -36,10 +44,11 @@ SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 # Proxmox setup
 COPY ./src/pvepreinstall /
 RUN chmod +x /usr/sbin/policy-rc.d \
+    && url="${BOOTC_APT_URL%/}" \
     && wget \
         -O /usr/share/keyrings/daemoncores-ve-keyring.gpg \
-        https://daemoncores.github.io/DaemonCores-VE/gpg.key \
-    && printf '%s  /usr/share/keyrings/daemoncores-ve-keyring.gpg\n' "${DAEMONCORES_VE_GPG_SHA256}" \
+        "${url}/gpg.key" \
+    && printf '%s  /usr/share/keyrings/daemoncores-ve-keyring.gpg\n' "${BOOTC_GPG_SHA256}" \
         | sha256sum -c - \
     && wget \
         https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg \

@@ -12,12 +12,25 @@
 # repository.
 #
 # The FROM line feeds the image content hash (the base digest is part of the
-# identity), so a newer published base invalidates the cached image. The
-# BOOTC_GPG_SHA256 / BOOTC_APT_URL build-args the pipeline passes for the bootc
-# APT repository are accepted but unused here: the derived values are the
-# caller's own repository, and the VE product Containerfile manages that
-# repository itself.
+# identity), so a newer published base invalidates the cached image.
 FROM ghcr.io/daemoncores/debian-bootc:latest
+# Auto-derivation of the repository of THIS repo (template pattern,
+# Containerfile.base:33-52): the pipeline derives both values from the
+# APT_GPG_KEY secret on every run (full-pipeline.yml apt_key job, passed by
+# bootc-build.yml as env BOOTC_GPG_SHA256 / APT_URL -> build-arg
+# BOOTC_APT_URL). Empty args mean "repository not configured": plain local
+# builds of the base stay inert, and nothing is committed after a key
+# rotation. Only the keyring is provisioned here: the sources stanza is owned
+# by the product Containerfile (src/pvepreinstall ships daemoncores-ve.sources
+# with the matching Signed-By path), so the repository is never declared twice.
+ARG BOOTC_APT_URL=""
+ARG BOOTC_GPG_SHA256=""
+RUN if [ -n "${BOOTC_APT_URL}" ] && [ -n "${BOOTC_GPG_SHA256}" ]; then \
+        url="${BOOTC_APT_URL%/}"; \
+        wget -nv -O /usr/share/keyrings/daemoncores-ve-keyring.gpg "${url}/gpg.key" \
+        && printf '%s  /usr/share/keyrings/daemoncores-ve-keyring.gpg\n' "${BOOTC_GPG_SHA256}" \
+            | sha256sum -c -; \
+    fi
 STOPSIGNAL SIGRTMIN+3
 ENV DEBIAN_FRONTEND=noninteractive
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
