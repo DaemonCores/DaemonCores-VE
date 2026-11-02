@@ -107,6 +107,13 @@ tests:
     diag: |
       systemctl status pve-firewall --no-pager -l 2>&1 | tail -n 15
       journalctl -b -u pve-firewall --no-pager 2>&1 | tail -n 25
+  - name: pvefw-logger requires the /var/log mount
+    run: systemctl show -p RequiresMountsFor --value pvefw-logger | grep -qx /var/log
+    diag: |
+      systemctl cat pvefw-logger --no-pager 2>&1
+      systemctl show -p RequiresMountsFor -p After -p DefaultDependencies pvefw-logger --no-pager 2>&1
+      echo "--- drop-ins on disk ---"; ls -la /usr/lib/systemd/system/pvefw-logger.service.d/ 2>&1
+      echo "--- log file state ---"; ls -la /var/log/pve-firewall.log 2>&1; findmnt -T /var/log 2>&1
 
   # ── web UI (libtemplate-perl mtime fix => no HTTP 500) ─────────────────
   - name: web UI answers on 8006
