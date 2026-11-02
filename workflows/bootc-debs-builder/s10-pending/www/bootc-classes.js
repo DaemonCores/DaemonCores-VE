@@ -35,7 +35,7 @@ Ext.define('PVE.bootc.Templates', {
             autoLoad: true,
             proxy: {
                 type: 'proxmox',
-                url: `/nodes/${me.node}/bootc/templates`,
+                url: `/nodes/${me.node}/bootc-stacks/templates`,
                 reader: { type: 'json', rootProperty: 'data' },
             },
         });
@@ -207,7 +207,7 @@ Ext.define('PVE.bootc.Create', {
         me.archiveField.setValue(`ostree:vztmpl/${stack}.tar.gz`);
         Proxmox.Utils.API2Request({
             method: 'POST',
-            url: `/nodes/${me.node}/bootc/compose/${stack}`,
+            url: `/nodes/${me.node}/bootc-stacks/compose/${stack}`,
             params: { compose: me.yamlField.getValue() },
             failure: (response) => Ext.Msg.alert(gettext('Error'), response.htmlStatus),
             success: (response) => Ext.create('Proxmox.window.TaskProgress', {
@@ -282,7 +282,7 @@ Ext.define('PVE.bootc.Editor', {
         me.buttons = [{ text: gettext('Close'), handler: () => me.close() }];
 
         Proxmox.Utils.API2Request({
-            url: `/nodes/${me.node}/bootc/template/${me.stack}/compose`,
+            url: `/nodes/${me.node}/bootc-stacks/template/${me.stack}/compose`,
             failure: (response, opts) => Ext.Msg.alert(gettext('Error'), response.htmlStatus),
             success: (response, opts) => me.yamlField.setValue(response.result.data),
         });
@@ -296,7 +296,7 @@ Ext.define('PVE.bootc.Editor', {
         let me = this;
         Proxmox.Utils.API2Request({
             method: 'POST',
-            url: `/nodes/${me.node}/bootc/compose/${me.stack}`,
+            url: `/nodes/${me.node}/bootc-stacks/compose/${me.stack}`,
             params: { compose: me.yamlField.getValue() },
             failure: (response) => Ext.Msg.alert(gettext('Error'), response.htmlStatus),
             success: (response) => Ext.create('Proxmox.window.TaskProgress', {
