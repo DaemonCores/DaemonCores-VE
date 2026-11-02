@@ -107,6 +107,12 @@ tests:
     diag: |
       systemctl status pve-firewall --no-pager -l 2>&1 | tail -n 15
       journalctl -b -u pve-firewall --no-pager 2>&1 | tail -n 25
+  - name: pve-firewall start timeout raised past the arm64 TCG window
+    run: systemctl show -p TimeoutStartUSec --value pve-firewall | grep -qE '^(10min|600s)$'
+    diag: |
+      systemctl show -p TimeoutStartUSec -p ExecMainStartTimestamp pve-firewall --no-pager 2>&1
+      systemctl cat pve-firewall --no-pager 2>&1 | tail -n 20
+      echo "--- drop-ins on disk ---"; ls -la /usr/lib/systemd/system/pve-firewall.service.d/ 2>&1
   - name: pvefw-logger requires the /var/log mount
     run: systemctl show -p RequiresMountsFor --value pvefw-logger | grep -qx /var/log
     diag: |
