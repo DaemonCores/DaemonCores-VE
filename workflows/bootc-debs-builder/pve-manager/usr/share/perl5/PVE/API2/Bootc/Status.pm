@@ -161,7 +161,13 @@ __PACKAGE__->register_method({
         properties => {
             node => get_standard_option('pve-node'),
             vmid => get_standard_option('pve-vmid'),
-            timeout => get_standard_option('timeout-schema', { default => 30 }),
+            timeout => {
+                description => "Wait maximal timeout seconds.",
+                type => 'integer',
+                minimum => 0,
+                default => 30,
+                optional => 1,
+            },
         },
     },
     returns => { type => 'string' },
