@@ -13,7 +13,10 @@
 #                     so a failure can never be undiagnosable.
 
 boot_timeout: 900
-reboot_timeout: 300
+# Calibrated like debian-bootc (R-780): the image is already installed — no
+# dracut rebuild — so the post-reboot SSH wait is short; the harness calibrates
+# it per (arch, category) and caps it (BOOT_TIMEOUT_MAX, 600 s for slow arm64).
+reboot_timeout: 60
 
 tests:
   # ── base (inherited from debian-bootc) ─────────────────────────────────
