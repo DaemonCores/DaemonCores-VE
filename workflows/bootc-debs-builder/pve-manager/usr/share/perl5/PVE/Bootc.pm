@@ -12,12 +12,12 @@ use strict;
 use warnings;
 
 use PVE::Tools;
-use PVE::Cluster qw(cfs_read_file get_vmlist);
+use PVE::Cluster qw(cfs_read_file);
 
 # Read and parse a bootc guest conf (key: value lines, '#' comments).
 sub load_config {
     my ($vmid, $node) = @_;
-    my $vmlist = get_vmlist() // {};
+    my $vmlist = PVE::Cluster::get_vmlist() // {};
     my $d = $vmlist->{ids}->{$vmid};
     $node //= $d->{node} if defined($d);
     die "guest $vmid is not a bootc guest\n" if defined($d) && $d->{type} ne 'bootc';
@@ -67,7 +67,7 @@ sub guest_status {
 sub guests_list {
     my ($node) = @_;
 
-    my $vmlist = get_vmlist() // {};
+    my $vmlist = PVE::Cluster::get_vmlist() // {};
     my $ids = $vmlist->{ids} // {};
     return [grep { $_->{type} eq 'bootc' && (!defined($node) || $_->{node} eq $node) }
         values %$ids];
