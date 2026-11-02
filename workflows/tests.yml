@@ -34,7 +34,23 @@ tests:
     diag: |
       systemctl --failed --no-pager 2>&1
       echo "--- network state ---"; ip -br addr 2>&1; ip route 2>&1
+      echo "--- mount state of /var and /var/log ---"
+      findmnt -T /var 2>&1; findmnt -T /var/log 2>&1
+      echo "--- /proc/self/mountinfo lines under /var ---"
+      grep -E ' /var($|[ /])' /proc/self/mountinfo 2>&1
+      echo "--- write probes ---"
+      touch /var/log/.ci-wprobe 2>&1 && rm -f /var/log/.ci-wprobe || echo "WRITE TO /var/log FAILED"
+      mount | grep -E ' /var| /var/log' 2>&1
+      echo "--- var / var-log / flush mount units of this boot ---"
+      journalctl -b -u var.mount -u var-log.mount -u ostree-remount.service \
+        -u systemd-journal-flush.service --no-pager 2>&1 | head -n 40
+      echo "--- btrfs / read-only kernel messages of this boot ---"
+      journalctl -k -b --no-pager 2>&1 | grep -iE 'btrfs|read.only|EROFS' | head -n 15
+      echo "--- every failed unit ---"
+      systemctl --failed --no-legend --plain 2>&1
       for u in $(systemctl --failed --no-legend --plain | awk '{print $1}'); do
+        echo "--- unit $u ---"
+        systemctl cat "$u" --no-pager 2>&1 | head -n 30
         echo "--- journal of $u (first entries of this boot) ---"
         journalctl -b -u "$u" --no-pager 2>&1 | head -n 25
       done
