@@ -46,6 +46,60 @@ packages:
           VER_SUFFIX: +bootc1
         upstream: proxmox-kernel-helper
 
+  # libpve-common-perl publishes the unmodified upstream deb, resolved
+  # dynamically from the amd64 PVE index (no pinned version). The repacked
+  # class above carries dependency floors cut against that index
+  # (libpve-storage-perl depends on libpve-common-perl (>= 9.2.3)), while
+  # the Proxmox arm64 index can lag the amd64 one for the Architecture: all
+  # packages both publish (measured 2026-11-02: arm64 topped out at 9.2.2,
+  # amd64 at 9.2.5) — the arm64 image build then resolved the lagging copy
+  # and failed the floor (run 41427815947). The package is Architecture:
+  # all, so the amd64-index deb is exactly what the arm64 image needs;
+  # publishing it into the shared APT repo (whose index mirrors
+  # arch-independent debs into every arch) satisfies the floor for both
+  # image arches. On amd64 the registration below is a no-op and the
+  # candidate is the native index's own copy — one build, both arches.
+  # No repack: the deb keeps its upstream version string (no epoch, no
+  # revision) so it cannot diverge from the upstream package it mirrors.
+  - name: libpve-common-perl
+    upstream: libpve-common-perl
+    env:
+      # Index arch to resolve across, registered as a dpkg foreign
+      # architecture in the build (a no-op when it already is the native
+      # one). The PVE apt source itself is the preinstalled
+      # pve-no-subscription source — no URL belongs in this manifest.
+      UPSTREAM_ARCH: amd64
+    build: |
+      # Registering the discovery arch puts that arch's index into the arch
+      # list apt consults; plain-name resolution then picks the newest
+      # candidate across all registered indexes.
+      dpkg --add-architecture "${UPSTREAM_ARCH}"
+      apt-get update
+
+      # Plain name on purpose: a "${PACKAGE}:${UPSTREAM_ARCH}" request has
+      # no candidate for an Architecture: all entry — the all variant only
+      # resolves across the arch list under the plain name (measured
+      # 2026-11-02 on trixie).
+      cd /tmp
+      apt-get download "${PACKAGE}"
+
+      # The glob part must stay OUTSIDE the quotes: bash never expands a
+      # glob inside "...", and dpkg-deb would receive the literal asterisk.
+      set -- "/tmp/${PACKAGE}"_*.deb
+      [ -f "${1:-}" ] \
+        || { echo "ERROR: no upstream .deb for ${PACKAGE} left in /tmp after download" >&2; exit 1; }
+
+      # Publish an arch-independent deb only: an arch-specific copy
+      # resolved here would be unusable by the other arch's index.
+      if [ "$(dpkg-deb -f "${1}" Architecture)" != "all" ]; then
+        echo "ERROR: ${PACKAGE} upstream deb is not Architecture: all; refusing to publish it" >&2
+        exit 1
+      fi
+
+      # Verbatim bits, upstream filename and version: nothing to rebuild.
+      cp -v "${1}" /debs/
+      echo "published ${PACKAGE} $(dpkg-deb -f "${1}" Version) from the ${UPSTREAM_ARCH} index"
+
   - name: overlay-tree
     variant-env: PKG
     variant-source: "{variant}"
