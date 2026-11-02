@@ -3,6 +3,7 @@
 # A failing test blocks the push.
 #
 #   boot_timeout      seconds to wait for the VM to answer SSH
+#   reboot_timeout    seconds to wait for the VM to answer SSH again after a reboot
 #   tests[].name      label shown in the CI log
 #   tests[].run       command executed on the VM; passes on exit 0
 #   tests[].expect    optional: pass instead when this string is in the output
@@ -12,6 +13,7 @@
 #                     so a failure can never be undiagnosable.
 
 boot_timeout: 900
+reboot_timeout: 300
 
 tests:
   # ── base (inherited from debian-bootc) ─────────────────────────────────
