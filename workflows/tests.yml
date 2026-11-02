@@ -108,11 +108,38 @@ tests:
       systemctl status pve-firewall --no-pager -l 2>&1 | tail -n 15
       journalctl -b -u pve-firewall --no-pager 2>&1 | tail -n 25
   - name: pve-firewall start timeout raised past the arm64 TCG window
-    run: systemctl show -p TimeoutStartUSec --value pve-firewall | grep -qE '^(10min|600s)$'
+    run: |
+      t=$(systemctl show -p TimeoutStartUSec --value pve-firewall)
+      case "$t" in
+        *min) s=$(( ${t%min} * 60 ));;
+        *s) s="${t%s}";;
+        *) s=0;;
+      esac
+      [ "$s" -ge 600 ] || { echo "pve-firewall TimeoutStartUSec=$t (<600s)"; exit 1; }
     diag: |
       systemctl show -p TimeoutStartUSec -p ExecMainStartTimestamp pve-firewall --no-pager 2>&1
       systemctl cat pve-firewall --no-pager 2>&1 | tail -n 20
       echo "--- drop-ins on disk ---"; ls -la /usr/lib/systemd/system/pve-firewall.service.d/ 2>&1
+  - name: Proxmox daemons start past the arm64 TCG window
+    run: |
+      # TimeoutStartUSec renders 600*TCG_TIMEOUT_SCALE e.g. '50min' or '600s'.
+      for u in pveproxy pvestatd pve-firewall pve-ha-crm pve-ha-lrm \
+               pvescheduler spiceproxy; do
+        t=$(systemctl show -p TimeoutStartUSec --value "$u")
+        case "$t" in
+          *min) s=$(( ${t%min} * 60 ));;
+          *s) s="${t%s}";;
+          *) s=0;;
+        esac
+        [ "$s" -ge 600 ] || { echo "$u TimeoutStartUSec=$t (<600s)"; exit 1; }
+      done
+    diag: |
+      for u in pveproxy pvestatd pve-firewall pve-ha-crm pve-ha-lrm \
+               pvescheduler spiceproxy; do
+        echo "$u: $(systemctl show -p TimeoutStartUSec --value "$u")"
+      done
+      echo "--- drop-ins on disk ---"
+      ls -la /usr/lib/systemd/system/*.service.d/ 2>&1 | grep -E 'timeout|d/$' | head -n 30
   - name: pvefw-logger requires the /var/log mount
     run: systemctl show -p RequiresMountsFor --value pvefw-logger | grep -qx /var/log
     diag: |
