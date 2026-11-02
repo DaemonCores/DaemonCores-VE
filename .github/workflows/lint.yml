@@ -1,0 +1,26 @@
+name: Lint
+
+# Thin caller: the toolchain setup and the gate run in the shared reusable
+# workflow, which runs this repository's `make check` (same entry point as
+# local runs).
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    uses: DaemonCores/DaemonCores-CI/.github/workflows/lint.yml@main
+    with:
+      make-targets: check

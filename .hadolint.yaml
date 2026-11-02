@@ -1,0 +1,14 @@
+# hadolint config. See https://github.com/hadolint/hadolint#configure
+#
+# These are OS image Containerfiles built with Podman, not application images:
+# some standard Docker advice does not apply.
+failure-threshold: warning
+
+ignored:
+  # DL3008: no apt version pinning, the packages come from the Debian and
+  # product APT repositories of the build date.
+  - DL3008
+  # DL3027: `apt` is used on purpose in image layers.
+  - DL3027
+  # DL3009: apt lists are cleaned by the base image's DPkg::Post-Invoke hook.
+  - DL3009

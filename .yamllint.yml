@@ -1,0 +1,16 @@
+# yamllint config. See https://yamllint.readthedocs.io/en/stable/configuration.html
+extends: default
+
+rules:
+  # packages.yml embeds multi-line bash build scripts.
+  line-length:
+    max: 160
+    level: error
+  document-start: disable
+  comments-indentation: disable
+  braces:
+    min-spaces-inside: 0
+    max-spaces-inside: 1
+  # `on:` is a key in GitHub workflows, not a boolean.
+  truthy:
+    check-keys: false
