@@ -33,6 +33,11 @@ tests:
     run: test "$(systemctl --failed --no-legend | wc -l)" -eq 0
     diag: |
       systemctl --failed --no-pager 2>&1
+      echo "--- network state ---"; ip -br addr 2>&1; ip route 2>&1
+      for u in $(systemctl --failed --no-legend --plain | awk '{print $1}'); do
+        echo "--- journal of $u (first entries of this boot) ---"
+        journalctl -b -u "$u" --no-pager 2>&1 | head -n 25
+      done
 
   # ── pmxcfs / cluster ───────────────────────────────────────────────────
   - name: pmxcfs mounted at /etc/pve
@@ -40,7 +45,8 @@ tests:
     diag: |
       mount 2>&1 | grep -i pve || echo "/etc/pve not mounted"
       systemctl status pve-cluster --no-pager -l 2>&1 | tail -n 15
-      journalctl -b -u pve-cluster --no-pager 2>&1 | tail -n 25
+      echo "--- first pmxcfs messages of this boot (restart noise removed) ---"
+      journalctl -b -u pve-cluster --no-pager 2>&1 | grep -v -e 'repeated too quickly' -e 'Failed with result' -e 'Failed to start' | head -n 25
   - name: pve-cluster active
     run: systemctl is-active pve-cluster
     diag: |
