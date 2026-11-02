@@ -13,6 +13,7 @@
 #
 # The FROM line feeds the image content hash (the base digest is part of the
 # identity), so a newer published base invalidates the cached image.
+# hadolint ignore=DL3007
 FROM ghcr.io/daemoncores/debian-bootc:latest
 # Auto-derivation of the repository of THIS repo (template pattern,
 # Containerfile.base:33-52): the pipeline derives both values from the
@@ -25,6 +26,7 @@ FROM ghcr.io/daemoncores/debian-bootc:latest
 # with the matching Signed-By path), so the repository is never declared twice.
 ARG BOOTC_APT_URL=""
 ARG BOOTC_GPG_SHA256=""
+# hadolint ignore=DL4006
 RUN if [ -n "${BOOTC_APT_URL}" ] && [ -n "${BOOTC_GPG_SHA256}" ]; then \
         url="${BOOTC_APT_URL%/}"; \
         wget -nv -O /usr/share/keyrings/daemoncores-ve-keyring.gpg "${url}/gpg.key" \
