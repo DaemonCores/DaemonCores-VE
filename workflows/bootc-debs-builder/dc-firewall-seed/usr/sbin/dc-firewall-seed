@@ -13,7 +13,12 @@ set -euo pipefail
 readonly SRC=/usr/share/daemoncores-ve/firewall
 readonly FW_DIR=/etc/pve/firewall
 readonly NODE_DIR=/etc/pve/local
-readonly NODE_WAIT=30
+readonly NODE_WAIT=300
+
+# The unit is a plain oneshot: systemd would kill this wait at the 90s
+# default start timeout before NODE_WAIT could ever elapse (measured on
+# the arm64 image test: /etc/pve/local appeared ~2 min after boot, the
+# 30 s wait gave up, host.fw went unseeded). Give the wait room.
 
 #######################################
 # Print the management subnet: the connected network of the default-route

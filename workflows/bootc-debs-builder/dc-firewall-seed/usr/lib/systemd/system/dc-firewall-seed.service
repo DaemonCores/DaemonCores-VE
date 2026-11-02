@@ -10,6 +10,7 @@ ConditionPathExists=/usr/share/daemoncores-ve/firewall/cluster.fw.tpl
 
 [Service]
 Type=oneshot
+TimeoutStartSec=600
 RemainAfterExit=yes
 ExecStart=/usr/sbin/dc-firewall-seed
 
