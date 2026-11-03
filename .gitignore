@@ -7,6 +7,15 @@ tmp/
 .env
 .secrets
 
+# Patch-lane metadata: derived/held outside git. patches.lock.json is a build
+# input ONLY for the deb_source_build lane (pve-cluster-src, consumed by
+# patch_guard.py through deb_helpers.sh deb_source_build) — kept committed by
+# explicit exception; the repack/overlay lanes never read a lock (their dry-run
+# runs against the extracted upstream deb tree), so their residual locks are
+# git-removed and stay out.
+workflows/bootc-debs-builder/**/patches.lock.json
+!workflows/bootc-debs-builder/pve-cluster-src/patches.lock.json
+
 # Vector database artifacts (not part of the project)
 lancedb/
 .kronn/
