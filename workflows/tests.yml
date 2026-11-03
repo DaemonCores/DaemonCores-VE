@@ -344,18 +344,18 @@ tests:
     diag: |
       command -v pvect-ostree 2>&1 || echo absent; dpkg -l 2>&1 | grep -i pvect-ostree
 
-  # ── THP arbitration (owner, 2026-11-03 12:14 revised) ──────────────────
-  # The PVE lane is THP NEVER (hugepages belong to the GUEST via PVE
-  # memory: 2M/1G per VM/CT — host THP=always double-counts memory around
-  # guests that manage their own and breaks the balloon). The thin
-  # -thpalways twin ships /usr/share/dc-ve-thp-profile=always and its boot
-  # tmpfiles rule; this test asserts the live sysfs state against the
-  # profile marker, so BOTH images are proven by the same run:
-  #   default = [never], -thpalways = [always].
-  - name: THP state matches the image profile (default never / twin always)
+  # ── THP arbitration (owner, 2026-11-03 13:05 — supersedes 12:14/12:55) ──
+  # The DEFAULT image profile is THP ALWAYS (the kernel pin lives in the
+  # shared kconfig fragment; full-LXC prime). The thin -thpnever-<flavour>
+  # twins ship /usr/share/dc-ve-thp-profile=never, the bootc kargs.d karg
+  # (transparent_hugepage=never) and the boot tmpfiles `w!` rule; this test
+  # asserts the live sysfs state against the profile marker, so BOTH
+  # profiles are proven by the same run:
+  #   default = [always], -thpnever-<flavour> = [never].
+  - name: THP state matches the image profile (default always / twin never)
     run: |
       state="$(cat /sys/kernel/mm/transparent_hugepage/enabled)"
-      profile="$(cat /usr/share/dc-ve-thp-profile 2>/dev/null || printf never)"
+      profile="$(cat /usr/share/dc-ve-thp-profile 2>/dev/null || printf always)"
       echo "$state" | grep -qE "\[${profile}\]"
     diag: |
       cat /sys/kernel/mm/transparent_hugepage/enabled 2>&1
