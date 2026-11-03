@@ -1,0 +1,34 @@
+# Thin `-thpalways` twin of the main DaemonCores VE image.
+#
+# Owner order (2026-11-03 12:50): BOTH OCI tags are published, not an
+# install-only option. This file builds the twin: ONE thin layer on the SAME
+# image content — the same kernel and the same debs (NO second kernel build:
+# the kernel build counter stays at two, debian + pve). It only switches the
+# THP profile to ALWAYS at boot, for the full-LXC profile where every CT
+# allocation lands in hugepages (the default PVE image stays THP=never: the
+# hugepage decision belongs to the guest via PVE memory: hugepages 2M/1G per
+# VM/CT, per the arbitration of 2026-11-03 12:14 revised).
+#
+# The profile is applied by the image itself (bootc-finalize doctrine,
+# P-513a/470: install-time variable — the choice travels with the image, not
+# with a second kernel): a systemd-tmpfiles `w!` rule writes `always` into
+# /sys/kernel/mm/transparent_hugepage/enabled on every boot (before every
+# early allocation), so installs, reinstalls and bootc updates all apply it
+# without touching the boot entries. The marker file
+# /usr/share/dc-ve-thp-profile records the profile for the boot-time proof.
+ARG BASE_IMAGE=ghcr.io/daemoncores/daemoncores-ve:latest_${ARCH}
+FROM ${BASE_IMAGE}
+STOPSIGNAL SIGRTMIN+3
+
+LABEL org.opencontainers.image.title="DaemonCores VE (THP always)"
+LABEL org.opencontainers.image.description="DaemonCores VE — THP ALWAYS twin. Full-LXC profile: every allocation of every container is served in 2M/1G hugepages; the default PVE image keeps THP=never (the hugepage decision belongs to the guest via PVE memory: hugepages per VM/CT)."
+LABEL org.daemoncores.arches="amd64"
+# Thin-twin declaration: this file is NOT its own image — discover retargets
+# it to the `latest` primary (per-arch tag <primary>_<arch>-thpalways,
+# manifest list <primary>-thpalways), built after the parent passed its tests.
+LABEL org.daemoncores.twin="latest"
+
+RUN mkdir -p /usr/lib/tmpfiles.d /usr/share \
+    && printf 'w! /sys/kernel/mm/transparent_hugepage/enabled - - - - always\n' \
+        > /usr/lib/tmpfiles.d/dc-thp-always.conf \
+    && printf 'always\n' > /usr/share/dc-ve-thp-profile
