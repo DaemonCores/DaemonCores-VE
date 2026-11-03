@@ -117,6 +117,10 @@ packages:
         env:
           UPSTREAM_PKG: libpve-cluster-perl
         upstream: libpve-cluster-perl
+      libpve-notify-perl:
+        env:
+          UPSTREAM_PKG: libpve-notify-perl
+        upstream: libpve-notify-perl
 
   - name: overlay-tree
     variant-env: PKG
@@ -213,8 +217,10 @@ packages:
   # are upstream-fetched at build time and DRY-RUN all-or-nothing before any
   # touch of the tree (patch-guard pattern; no sha256 lock possible on
   # remote patches — the dry-run is the guard), a failure keeps the
-  # last-good deb. GPU config sets (kconfig/gpu/{amd,intel,nvidia}.cfg) are
-  # merged transversely: ONE kernel build per flavour, no vendor matrix.
+  # GPU config sets (kconfig/gpu/{amd,intel,nvidia}.cfg) are NOT carried
+  # in this repo (single-source rule: debian-bootc owns the fragments)
+  # and are merged transversely by hash reference (see the build block):
+  # ONE kernel build per flavour, no vendor matrix.
   - name: kernel-pve
     variant-env: KERNEL_ARCH_LEVEL
     # Native patch data (canonical patches schema — Gabriel decision, see
@@ -373,17 +379,34 @@ packages:
       [[ -z "${PVE_SEED_CONFIG}" ]] || cp "${PVE_SEED_CONFIG}" "${SRCDIR}/.config"
 
       # GPU config sets (transverse: ONE optimised build, every vendor) are
-      # merged BEFORE the flavour fragments so a flavour delta wins last.
-      FRAGS=()
+      # NOT carried in this repo — debian-bootc is the single source. Each
+      # fragment is fetched from debian-bootc at the pinned commit and
+      # verified by sha256 (hash-export pattern) BEFORE merging, ahead of
+      # the flavour fragments so a flavour delta wins last.
+      GPU_KCFG_REF=2250223
       for gs in ${KERNEL_GPU:-all}; do
         if [[ "${gs}" == "all" ]]; then
-          FRAGS+=("${KERNEL_DATA_DIR}/kconfig/gpu/"*.cfg)
+          gs_list="amd intel nvidia"
         else
-          f="${KERNEL_DATA_DIR}/kconfig/gpu/${gs}.cfg"
-          [[ -f "${f}" ]] \
-            || { echo "ERROR: unknown GPU set '${gs}'" >&2; exit 1; }
-          FRAGS+=("${f}")
+          gs_list="${gs}"
         fi
+        for f_name in ${gs_list}; do
+          case "${f_name}" in
+            amd)    f_hash=343c13170c56cb9a839a07f27dc1588e0ab718b79a2a7b63963cbe72db7d5dd6 ;;
+            intel)  f_hash=1cad03a594381dd7e6ea34b20a8342e0059cc0482d09e781ce0741661f8413c6 ;;
+            nvidia) f_hash=0c4c30b73a969522d06611883497feacb58c17ca5d9f5080b997f4d137251d9f ;;
+            *) { echo "ERROR: unknown GPU set '${f_name}'" >&2; exit 1; } ;;
+          esac
+          f_file="/tmp/kconfig-gpu-${f_name}.cfg"
+          f_url="https://raw.githubusercontent.com/DaemonCores/debian-bootc/${GPU_KCFG_REF}/workflows/bootc-debs-builder/kernel-pve/kconfig/gpu/${f_name}.cfg"
+          [[ -f "${f_file}" ]] || \
+            curl -fsSL "${f_url}" \
+              -o "${f_file}" \
+            || { echo "ERROR: cannot fetch GPU kconfig fragment '${f_name}'" >&2; exit 1; }
+          echo "${f_hash}  ${f_file}" | sha256sum --check --status >/dev/null \
+            || { echo "ERROR: GPU kconfig '${f_name}' sha256 mismatch (debian-bootc ${GPU_KCFG_REF})" >&2; exit 1; }
+          FRAGS+=("${f_file}")
+        done
       done
 
       if [[ "${KERNEL_ARCH}" = "x86_64" ]]; then
