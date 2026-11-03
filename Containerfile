@@ -17,9 +17,9 @@ LABEL org.opencontainers.image.source="https://github.com/DaemonCores/DaemonCore
 LABEL org.opencontainers.image.licenses="LGPL-2.1"
 LABEL containers.bootc=1
 LABEL ostree.bootable=1
-# The -nvidia twin (opt-in, gpu_driver_images input): same layers plus the
-# NVIDIA proprietary driver/libs after the install-time EULA acceptance.
-LABEL org.daemoncores.nvidia-image="true"
+# GPU model: the NVIDIA driver lane belongs to debian-bootc (owner order
+# 2026-11-03); VE consumes it through apt. No GPU image descriptor here —
+# the -nvidia twin label and its GPU_EXTRA_PKGS RUN were removed with it.
 
 # APT repository trust — same mechanics as debian-bootc: the full pipeline
 # hashes the APT_GPG_KEY secret at every run (full-pipeline.yml apt_key job)
@@ -123,26 +123,3 @@ RUN mkdir -p /etc/systemd/system/multi-user.target.wants \
 
 # bootc images are updated in-place via ostree; no runtime healthcheck applies.
 HEALTHCHECK NONE
-
-#####################################################################################
-# NVIDIA proprietary layer — opt-in `-nvidia` twin only
-#####################################################################################
-# The public image never carries the NVIDIA proprietary user-space: the EULA
-# requires an acceptance step, which happens at install time (bootc-installer
-# offers the NVIDIA variant after an explicit consent, see the wiki
-# GPU-Support page). The CI builds the `<tag>-nvidia` twin of every
-# Containerfile carrying `LABEL org.daemoncores.nvidia-image` ONLY when its
-# gpu_driver_images input is set: the same layers, one extra RUN. The twin is
-# otherwise identical — bootc upgrade follows the same suite.
-ARG GPU_EXTRA_PKGS=""
-RUN if [ -n "${GPU_EXTRA_PKGS}" ]; then \
-      kver=$(ls -1v /usr/lib/modules | tail -1) \
-      && apt update \
-      # Headers must match the kernel IN THE IMAGE: nvidia-kernel-dkms builds
-      # against /lib/modules/<kver>/build. Debian names, proxmox fallback
-      # (the pairing is verified on the first real twin build — PENDING).
-      && { apt install -y "linux-headers-${kver}" \
-           || apt install -y "proxmox-headers-${kver}"; } \
-      && apt install -y dkms ${GPU_EXTRA_PKGS} \
-      && rm -f /var/tmp/* /tmp/*; \
-    fi
