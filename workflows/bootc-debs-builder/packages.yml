@@ -195,9 +195,11 @@ packages:
   # transverse-variant strategy (Gabriel, 30/10). ONE class entry, one
   # variant per microarch level (KERNEL_ARCH_LEVEL: x64v1 / x64v2 / x64v3 /
   # x64v4, plus the arm64 flavours armv8.0 / armv8.2-lse / armv9-sve2);
-  # the arm64 variant is CODED but DISABLED unless KERNEL_ARM=yes
-  # (expand.jq keeps the kernel-arm variants only when the caller sets
-  # KERNEL_ARM=yes — there is no arm64 PVE lane today). The build block orchestrates the STANDARD kernel
+  # the arm64 flavours build WITHOUT a gate (owner KERNEL FINAL v2,
+  # 2026-11-03: the former coded-disabled KERNEL_ARM filter is retired —
+  # seven flavours expand unconditionally; the arm64 flavours
+  # cross-compile when the lane runs the arm64 arch). The build block
+  # orchestrates the STANDARD kernel
   # helpers of DaemonCores-CI scripts/kernel_helpers.sh (kernel_pve_prepare,
   # kernel_apply_patches on the shared manifest, kernel_merge_config,
   # kernel_build_debs) — no logic is duplicated here.
@@ -386,7 +388,7 @@ packages:
         KCFLAGS=$(kernel_flavour_kcflags "${KERNEL_ARCH_LEVEL}")
         kernel_build_debs "${SRCDIR}" bindeb-pkg "${KCFLAGS}"
       else
-        # arm64 (coded but disabled): ONE kernel per flavour, cross-compiled.
+        # arm64 flavours: ONE kernel per flavour, cross-compiled (no gate, KERNEL FINAL v2).
         [[ -z "${PVE_SEED_CONFIG}" ]] && make -C "${SRCDIR}" defconfig
         [[ -s "${LANE_KCFG}/arm64-common.cfg" ]] && \
           FRAGS+=("${LANE_KCFG}/arm64-common.cfg")
@@ -422,21 +424,18 @@ packages:
       armv8.0:
         when:
           arch: arm64
-          kernel-arm: true
         env:
           KERNEL_ARCH: arm64
         deb-glob: "linux-*armv8.0*"
       armv8.2-lse:
         when:
           arch: arm64
-          kernel-arm: true
         env:
           KERNEL_ARCH: arm64
         deb-glob: "linux-*armv8.2-lse*"
       armv9-sve2:
         when:
           arch: arm64
-          kernel-arm: true
         env:
           KERNEL_ARCH: arm64
         deb-glob: "linux-*armv9-sve2*"
