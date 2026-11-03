@@ -12,9 +12,15 @@
 # repository.
 #
 # The FROM line feeds the image content hash (the base digest is part of the
-# identity), so a newer published base invalidates the cached image.
+# identity), so a newer published base invalidates the cached image. The tag
+# is arch-suffixed on purpose: `latest` resolves to a single-amd64 manifest
+# (ghcr.io, measured 2026-11-03: latest == latest_amd64), so an arm64 base
+# build FROM :latest pulled amd64 content and died with "exec format error"
+# at the first RUN (run 41611788184). The builder passes ARCH per arch job;
+# the amd64 default keeps plain local builds working.
+ARG ARCH=amd64
 # hadolint ignore=DL3007
-FROM ghcr.io/daemoncores/debian-bootc:latest
+FROM ghcr.io/daemoncores/debian-bootc:latest_${ARCH}
 # Auto-derivation of the repository of THIS repo (template pattern,
 # Containerfile.base:33-52): the pipeline derives both values from the
 # APT_GPG_KEY secret on every run (full-pipeline.yml apt_key job, passed by
