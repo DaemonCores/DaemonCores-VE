@@ -198,8 +198,8 @@ packages:
   # only when the caller sets KERNEL_ARM=yes — there is no arm64 PVE lane
   # today). The build block orchestrates the STANDARD kernel helpers of
   # DaemonCores-CI scripts/kernel_helpers.sh (kernel_pve_prepare,
-  # kernel_apply_patches on the native patches: data, kernel_merge_config,
-  # kernel_build_debs) — no logic is duplicated here.
+  # kernel_apply_patches on the sha-pinned shared manifest,
+  # kernel_merge_config, kernel_build_debs) — no logic is duplicated here.
   #
   # PRODUCTION lane (not artifact-only): the debs land in /debs and go
   # through the standard builder — content-hash cache, /debs/.meta, publish
@@ -214,107 +214,21 @@ packages:
   #
   # Version resolution: KERNEL_VERSION is empty here; the build block reads
   # it from the Proxmox repo (rolling anchor, no pinning). Guard: patches
-  # are upstream-fetched at build time and DRY-RUN all-or-nothing before any
-  # touch of the tree (patch-guard pattern; no sha256 lock possible on
-  # remote patches — the dry-run is the guard), a failure keeps the
+  # are the sha-pinned shared manifest (reference mode) and are DRY-RUN
+  # all-or-nothing before any touch of the tree (patch-guard pattern);
   # GPU config sets (kconfig/gpu/{amd,intel,nvidia}.cfg) are NOT carried
   # in this repo (single-source rule: debian-bootc owns the fragments)
   # and are merged transversely by hash reference (see the build block):
   # ONE kernel build per flavour, no vendor matrix.
   - name: kernel-pve
     variant-env: KERNEL_ARCH_LEVEL
-    # Native patch data (canonical patches schema — Gabriel decision, see
-    # DaemonCores-CI scripts/kernel_helpers.sh): the key below IS the live
-    # definition, hashed via PATCHES_JSON in the content hash. The former
-    # kernel-pve/patches.yml mirror file is gone (owner order 2026-11-03).
-    patches:
-      - name: 0001-x86-cflags
-        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0001-XANMOD-x86-build-Add-more-CFLAGS-optimizations.patch
-        topic: xanmod
-        stage: common
-      - name: 0002-kbuild-llvm-plo
-        # PINNED to the active 7.3 file (native patches, series 7.0 review): the
-        # EOL 7.0 sibling does not apply to the 7.0.x tree; absolute URL so a
-        # series bump does not silently move it.
-        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/linux-7.3.y-xanmod/xanmod/0002-XANMOD-kbuild-Add-LLVM-polyhedral-loop-optimizer-fla.patch
-        topic: xanmod
-        stage: common
-      - name: 0004-kbuild-debpkg-dbg
-        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0004-XANMOD-kbuild-deb-pkg-Create-dbg-when-make-DEB_DEBUG.patch
-        topic: xanmod
-        stage: common
-      - name: 0005-kbuild-sign-external-cfg
-        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0005-kbuild-Re-add-.config-file-required-to-sign-external.patch
-        topic: xanmod
-        stage: common
-      - name: 0006-fair-unscaled-tunables
-        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0006-XANMOD-fair-Set-scheduler-tunable-latencies-to-unsca.patch
-        topic: xanmod
-        stage: common
-      - name: 0007-mq-deadline-write-prio
-        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0007-XANMOD-block-mq-deadline-Increase-write-priority-to-.patch
-        topic: xanmod
-        stage: common
-      - name: 0008-mq-deadline-front-merges
-        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0008-XANMOD-block-mq-deadline-Disable-front_merges-by-def.patch
-        topic: xanmod
-        stage: common
-      - name: 0009-block-rq-affinity
-        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0009-XANMOD-block-Set-rq_affinity-to-force-complete-I-O-r.patch
-        topic: xanmod
-        stage: common
-      - name: 0010-blk-wbt-latency
-        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0010-XANMOD-blk-wbt-Set-wbt_default_latency_nsec-to-2msec.patch
-        topic: xanmod
-        stage: common
-      - name: 0011-kconfig-500hz
-        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0011-XANMOD-kconfig-add-500Hz-timer-interrupt-kernel-conf.patch
-        topic: xanmod
-        stage: common
-      - name: 0012-vfs-cache-pressure
-        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0012-XANMOD-vfs-Decrease-rate-at-which-vfs-caches-are-rec.patch
-        topic: xanmod
-        stage: common
-      - name: 0013-mm-max-map-count
-        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0013-XANMOD-mm-Raise-max_map_count-default-value.patch
-        topic: xanmod
-        stage: common
-      - name: 0014-mm-vmscan-swappiness
-        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0014-XANMOD-mm-vmscan-Reduce-amount-of-swapping.patch
-        topic: xanmod
-        stage: common
-        fuzz: 2
-      - name: 0015-cpufreq-governor-tunes
-        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0015-XANMOD-cpufreq-tunes-ondemand-and-conservative-gover.patch
-        topic: xanmod
-        stage: common
-      - name: 0016-kconfig-symbolic-err
-        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0016-XANMOD-lib-kconfig.debug-disable-default-SYMBOLIC_ER.patch
-        topic: xanmod
-        stage: common
-      - name: 0017-setlocalversion-tag
-        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0017-XANMOD-scripts-setlocalversion-remove-tag-for-git-re.patch
-        topic: xanmod
-        stage: common
-      - name: 0018-setlocalversion-file
-        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0018-XANMOD-scripts-setlocalversion-Move-localversion-fil.patch
-        topic: xanmod
-        stage: common
-      - name: 0001-wait-lifo
-        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0001-sched-wait-Do-accept-in-LIFO-order-for-cache-efficie.patch
-        topic: clearlinux
-        stage: common
-      - name: 0002-firmware-stateless
-        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0002-firmware-Enable-stateless-firmware-loading.patch
-        topic: clearlinux
-        stage: common
-      - name: 0003-rwsem-spin
-        url: https://gitlab.com/xanmod/linux-patches/-/raw/master/{seriesdir}/{topic}/0003-locking-rwsem-spin-faster.patch
-        topic: clearlinux
-        stage: common
-      # 0004-ata-before-graphics REMOVED (native patches, series 7.0 review):
-      # downloads but no longer applies to the 7.0.x tree — drivers
-      # initialize ata before graphics upstream now.
+    # PATCH PARITY reference mode (owner order, 2026-11-03): the patch set is
+    # NOT defined here (no mirrors, no copies) — the canonical
+    # kernel-pve/patches.yml lives in debian-bootc and is fetched at build
+    # time by PINNED COMMIT + sha256 (the same pattern the GPU kconfig
+    # fragments already follow, bef03ff). One list, two consumers: the
+    # debian linux-image build applies the same file in-repo; the pinned
+    # shas in this entry guard upstream drift. Never a copy in this repo.
     env:
       HELPERS_VER: 7
       # Bump when the build contract changes in a way `sources:` alone
@@ -323,28 +237,59 @@ packages:
       KERNEL_SERIES: "7.3"
       KERNEL_ARCH: x86_64
       KERNEL_OUT: /debs
-    sources:
-      - kernel-pve/kconfig
     build: |
-      # Repo-relative data dir (kconfig fragments), resolved before any cd.
-      KERNEL_DATA_DIR="$(pwd)/workflows/bootc-debs-builder/kernel-pve"
-      [[ -d "${KERNEL_DATA_DIR}/kconfig" ]] \
-        || { echo "ERROR: kernel-pve data dir not found: ${KERNEL_DATA_DIR}" >&2; exit 1; }
-      export KERNEL_DATA_DIR
+      # Reference-mode data (owner order, 2026-11-03): the patch set AND the
+      # kconfig fragments live in debian-bootc. Both consumers pin the commit
+      # and verify sha256 at build time — a moved file there fails this build,
+      # it never silently applies a drifted copy.
+      DC_DATA_REF=f6bb734c3362d86b8830f9f5611420c5670c1ad9
+      DC_DATA_BASE="https://raw.githubusercontent.com/DaemonCores/debian-bootc/${DC_DATA_REF}/workflows/bootc-debs-builder/kernel-pve"
+
+      dc_data_fetch() {
+        local f_sha="$1" f_rel="$2" f_file="$3"
+        [[ -s "${f_file}" ]] || \
+          curl -fsSL "${DC_DATA_BASE}/${f_rel}" -o "${f_file}" \
+          || { echo "ERROR: cannot fetch debian-bootc data '${f_rel}' (${DC_DATA_REF:0:7})" >&2; exit 1; }
+        [[ "$(sha256sum "${f_file}" | cut -d" " -f1)" == "${f_sha}" ]] \
+          || { echo "ERROR: debian-bootc data '${f_rel}' sha256 mismatch (pin ${DC_DATA_REF:0:7})" >&2; exit 1; }
+      }
+
+      # Canonical patch set (PATCH PARITY): the exact patches.yml file the
+      # debian linux-image build applies in-repo, consumed here by pinned
+      # commit + sha256. File mode of the standard helper (kernel_helpers.sh).
+      PATCHES_FILE=/tmp/kernel-pve-patches.yml
+      dc_data_fetch b3887f792221c20d85174e4e380f1bc3997c0f1ac48963ff1df562980697c032 \
+        patches.yml "${PATCHES_FILE}"
+
+      # Lane-local THP arbitration (owner, 2026-11-03 12:14 revised): THP
+      # NEVER on the hypervisor — the hugepage decision belongs to the GUEST
+      # (PVE memory: hugepages 2M/1G per VM/CT); host THP=always
+      # double-counts memory around guests that manage their own and breaks
+      # the balloon; the compute profile is tuned PER-GUEST, never on the
+      # host. Merged LAST so it overrides the shared fragment ALWAYS pin.
+      THP_NEVER=/tmp/pve-thp-never.cfg
+      printf '# Lane-local THP arbitration (owner 2026-11-03 12:14 revised): never on the hypervisor\n' \
+            'CONFIG_TRANSPARENT_HUGEPAGE=y\n' \
+            'CONFIG_TRANSPARENT_HUGEPAGE_ALWAYS=n\n' \
+            'CONFIG_TRANSPARENT_HUGEPAGE_MADVISE=n\n' > "${THP_NEVER}"
+
       # Version resolved from the Proxmox repo itself (rolling anchor).
       echo "deb [arch=amd64] http://download.proxmox.com/debian/pve trixie pve-no-subscription" \
         > /etc/apt/sources.list.d/pve.list
       echo "deb-src [arch=amd64] http://download.proxmox.com/debian/pve trixie pve-no-subscription" \
         >> /etc/apt/sources.list.d/pve.list
-      # The GitHub runners' https path to download.proxmox.com trips a CDN
-      # SNI mismatch; the deb classes already consume this mirror over http
-      # and apt verifies the metadata against the release key (fetched over
-      # http or copied from the sha-pinned keyring baked into the buildenv).
-      curl -fsSL http://download.proxmox.com/debian/proxmox-release-trixie.gpg \
-        -o /etc/apt/trusted.gpg.d/proxmox-release-trixie.gpg \
-        || cp /usr/share/keyrings/proxmox-archive-keyring.gpg \
-              /etc/apt/trusted.gpg.d/proxmox-release-trixie.gpg \
-        || { echo "ERROR: no proxmox repo key available" >&2; exit 1; }
+      # Repo key (keyring fix, owner order 2026-11-03): the trixie archive
+      # keyring baked into this repo's buildenv (sha-pinned in env.yml and
+      # verified HERE at use time) — no CDN key fetch on the hot path.
+      KRING_SHA=136673be77aba35dcce385b28737689ad64fd785a797e57897589aed08db6e45
+      [[ -s /usr/share/keyrings/proxmox-archive-keyring.gpg ]] || \
+        curl -fsSL https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg \
+          -o /usr/share/keyrings/proxmox-archive-keyring.gpg \
+        || { echo "ERROR: cannot obtain the proxmox archive keyring" >&2; exit 1; }
+      [[ "$(sha256sum /usr/share/keyrings/proxmox-archive-keyring.gpg | cut -d" " -f1)" == "${KRING_SHA}" ]] \
+        || { echo "ERROR: proxmox archive keyring sha256 mismatch (expected ${KRING_SHA})" >&2; exit 1; }
+      cp /usr/share/keyrings/proxmox-archive-keyring.gpg \
+        /etc/apt/trusted.gpg.d/proxmox-release-trixie.gpg
       apt-get update
       KERNEL_VERSION=$(apt-cache policy proxmox-kernel-7.0 \
         | awk '/Candidate:/ && !s {print $2; s=1}')
@@ -366,24 +311,36 @@ packages:
       # sourced implicitly by deb_helpers.sh): packaging fetch, kconfig merge,
       # kconfig merge, make deb-pkg.
       mkdir -p /build && kernel_pve_prepare /build
-      # Native patches: data of this entry, exported as PATCHES_JSON by the
-      # builder (hashed in the content hash); "-" selects it.
+      # Patch mode: the fetched shared manifest (file mode of the standard
+      # helper — this entry defines NO native patch data anymore).
       # Debian arch of the patch stage, derived from the kernel arch dir.
       case "${KERNEL_ARCH}" in
         x86_64) DEB_ARCH=amd64 ;;
         *) DEB_ARCH="${KERNEL_ARCH}" ;;
       esac
-      kernel_apply_patches - \
+      kernel_apply_patches "${PATCHES_FILE}" \
         "${DEB_ARCH}" "${KERNEL_VERSION}" "${SRCDIR}"
 
       [[ -z "${PVE_SEED_CONFIG}" ]] || cp "${PVE_SEED_CONFIG}" "${SRCDIR}/.config"
 
-      # GPU config sets (transverse: ONE optimised build, every vendor) are
-      # NOT carried in this repo — debian-bootc is the single source. Each
-      # fragment is fetched from debian-bootc at the pinned commit and
-      # verified by sha256 (hash-export pattern) BEFORE merging, ahead of
-      # the flavour fragments so a flavour delta wins last.
-      GPU_KCFG_REF=2250223
+      # Shared kconfig fragments (reference mode): sha-pinned fetches, same
+      # commit pin as the patch set.
+      KCFGDIR=/tmp/pve-kconfig
+      mkdir -p "${KCFGDIR}"
+      dc_data_fetch 0171eb6a2a5b01339392dc749b0612b0108089160d877ccb40b8a8770507ef96 \
+        kconfig/x86-common.cfg "${KCFGDIR}/x86-common.cfg"
+      dc_data_fetch b04d2a945a9e917f3b0b16504f5fbb9f0159a4b955b18bd18140a091ce4c792d \
+        kconfig/x64v1.cfg "${KCFGDIR}/x64v1.cfg"
+      dc_data_fetch 088f8121e5f2b1e09318959ae34357893f5a3c2ae27b735aad802d53f5d3fb7f \
+        kconfig/x64v2.cfg "${KCFGDIR}/x64v2.cfg"
+      dc_data_fetch a291ab6e111dbdd202e79a9f000473d67cd797e7856c9a703c74039b02780924 \
+        kconfig/x64v3.cfg "${KCFGDIR}/x64v3.cfg"
+
+      # GPU config sets (transverse: ONE optimised build, every vendor): NOT
+      # carried in this repo — debian-bootc is the single source (same pinned
+      # commit as every other fragment). Merged ahead of the flavour
+      # fragments so a flavour delta wins last.
+      GPU_KCFG_REF="${DC_DATA_REF}"
       for gs in ${KERNEL_GPU:-all}; do
         if [[ "${gs}" == "all" ]]; then
           gs_list="amd intel nvidia"
@@ -397,24 +354,26 @@ packages:
             nvidia) f_hash=0c4c30b73a969522d06611883497feacb58c17ca5d9f5080b997f4d137251d9f ;;
             *) { echo "ERROR: unknown GPU set '${f_name}'" >&2; exit 1; } ;;
           esac
-          f_file="/tmp/kconfig-gpu-${f_name}.cfg"
-          f_url="https://raw.githubusercontent.com/DaemonCores/debian-bootc/${GPU_KCFG_REF}/workflows/bootc-debs-builder/kernel-pve/kconfig/gpu/${f_name}.cfg"
-          [[ -f "${f_file}" ]] || \
+          f_file="${KCFGDIR}/gpu-${f_name}.cfg"
+          f_url="${DC_DATA_BASE}/kconfig/gpu/${f_name}.cfg"
+          [[ -s "${f_file}" ]] || \
             curl -fsSL "${f_url}" \
               -o "${f_file}" \
             || { echo "ERROR: cannot fetch GPU kconfig fragment '${f_name}'" >&2; exit 1; }
           echo "${f_hash}  ${f_file}" | sha256sum --check --status >/dev/null \
-            || { echo "ERROR: GPU kconfig '${f_name}' sha256 mismatch (debian-bootc ${GPU_KCFG_REF})" >&2; exit 1; }
+            || { echo "ERROR: GPU kconfig '${f_name}' sha256 mismatch (debian-bootc ${GPU_KCFG_REF:0:7})" >&2; exit 1; }
           FRAGS+=("${f_file}")
         done
       done
 
       if [[ "${KERNEL_ARCH}" = "x86_64" ]]; then
-        # ONE flavour per variant (KERNEL_ARCH_LEVEL); the flavour fragment
-        # is merged last. KCFLAGS carries the microarch (-march=x86-64-vN).
-        FRAGS+=("${KERNEL_DATA_DIR}/kconfig/x86-common.cfg")
-        [[ -f "${KERNEL_DATA_DIR}/kconfig/${KERNEL_ARCH_LEVEL}.cfg" ]] && \
-          FRAGS+=("${KERNEL_DATA_DIR}/kconfig/${KERNEL_ARCH_LEVEL}.cfg")
+        # ONE flavour per variant (KERNEL_ARCH_LEVEL). KCFLAGS carries the
+        # microarch (-march=x86-64-vN). The lane THP arbitration is merged
+        # last so NEVER always wins over the shared fragment's ALWAYS pin.
+        FRAGS+=("${KCFGDIR}/x86-common.cfg")
+        [[ -s "${KCFGDIR}/${KERNEL_ARCH_LEVEL}.cfg" ]] && \
+          FRAGS+=("${KCFGDIR}/${KERNEL_ARCH_LEVEL}.cfg")
+        FRAGS+=("${THP_NEVER}")
         kernel_merge_config "${SRCDIR}" "${FRAGS[@]}"
         # The pinned Ubuntu tree's objtool klp-checksum.c does not compile
         # (it calls static helpers of check.c) and objtool builds it whenever
@@ -427,8 +386,8 @@ packages:
       else
         # arm64 (coded but disabled): ONE generic kernel, cross-compiled.
         [[ -z "${PVE_SEED_CONFIG}" ]] && make -C "${SRCDIR}" defconfig
-        [[ -f "${KERNEL_DATA_DIR}/kconfig/arm64-common.cfg" ]] && \
-          FRAGS+=("${KERNEL_DATA_DIR}/kconfig/arm64-common.cfg")
+        [[ -s "${KCFGDIR}/arm64-common.cfg" ]] && \
+          FRAGS+=("${KCFGDIR}/arm64-common.cfg")
         kernel_merge_config "${SRCDIR}" "${FRAGS[@]}"
         kernel_build_debs "${SRCDIR}" bindeb-pkg
       fi
