@@ -224,7 +224,7 @@ packages:
     variant-env: KERNEL_ARCH_LEVEL
     # PATCH PARITY reference mode (owner order, 2026-11-03): the patch set is
     # NOT defined here (no mirrors, no copies) — the canonical
-    # kernel-pve/patches.yml lives in debian-bootc and is fetched at build
+    # kernel/patches-shared.yml lives in debian-bootc and is fetched at build
     # time by PINNED COMMIT + sha256 (the same pattern the GPU kconfig
     # fragments already follow, bef03ff). One list, two consumers: the
     # debian linux-image build applies the same file in-repo; the pinned
@@ -242,8 +242,8 @@ packages:
       # kconfig fragments live in debian-bootc. Both consumers pin the commit
       # and verify sha256 at build time — a moved file there fails this build,
       # it never silently applies a drifted copy.
-      DC_DATA_REF=f92c505c8e40e4a77e9d77ccc8ff0da129495fb7
-      DC_DATA_BASE="https://raw.githubusercontent.com/DaemonCores/debian-bootc/${DC_DATA_REF}/workflows/bootc-debs-builder/kernel-pve"
+      DC_DATA_REF=7733e6f51a4c61171d171ae6eb6755e4b50c14f8
+      DC_DATA_BASE="https://raw.githubusercontent.com/DaemonCores/debian-bootc/${DC_DATA_REF}/workflows/bootc-debs-builder/kernel"
 
       dc_data_fetch() {
         local f_sha="$1" f_rel="$2" f_file="$3"
@@ -257,9 +257,9 @@ packages:
       # Canonical patch set (PATCH PARITY): the exact patches.yml file the
       # debian linux-image build applies in-repo, consumed here by pinned
       # commit + sha256. File mode of the standard helper (kernel_helpers.sh).
-      PATCHES_FILE=/tmp/kernel-pve-patches.yml
-      dc_data_fetch b3887f792221c20d85174e4e380f1bc3997c0f1ac48963ff1df562980697c032 \
-        patches.yml "${PATCHES_FILE}"
+      PATCHES_FILE=/tmp/kernel-shared-patches.yml
+      dc_data_fetch 9139bbe2009c939d08a396304ddb0b50113d1ec327a4b995a3f17ae0de327518 \
+        patches-shared.yml "${PATCHES_FILE}"
 
       # Lane-local THP arbitration (owner, 2026-11-03 12:14 revised): THP
       # NEVER on the hypervisor — the hugepage decision belongs to the GUEST
@@ -328,13 +328,13 @@ packages:
       KCFGDIR=/tmp/pve-kconfig
       mkdir -p "${KCFGDIR}"
       dc_data_fetch 0171eb6a2a5b01339392dc749b0612b0108089160d877ccb40b8a8770507ef96 \
-        kconfig/x86-common.cfg "${KCFGDIR}/x86-common.cfg"
+        kconfig-shared/x86-common.cfg "${KCFGDIR}/x86-common.cfg"
       dc_data_fetch b04d2a945a9e917f3b0b16504f5fbb9f0159a4b955b18bd18140a091ce4c792d \
-        kconfig/x64v1.cfg "${KCFGDIR}/x64v1.cfg"
+        kconfig-shared/x64v1.cfg "${KCFGDIR}/x64v1.cfg"
       dc_data_fetch 088f8121e5f2b1e09318959ae34357893f5a3c2ae27b735aad802d53f5d3fb7f \
-        kconfig/x64v2.cfg "${KCFGDIR}/x64v2.cfg"
+        kconfig-shared/x64v2.cfg "${KCFGDIR}/x64v2.cfg"
       dc_data_fetch a291ab6e111dbdd202e79a9f000473d67cd797e7856c9a703c74039b02780924 \
-        kconfig/x64v3.cfg "${KCFGDIR}/x64v3.cfg"
+        kconfig-shared/x64v3.cfg "${KCFGDIR}/x64v3.cfg"
 
       # GPU config sets (transverse: ONE optimised build, every vendor): NOT
       # carried in this repo — debian-bootc is the single source (same pinned
@@ -349,13 +349,13 @@ packages:
         fi
         for f_name in ${gs_list}; do
           case "${f_name}" in
-            amd)    f_hash=343c13170c56cb9a839a07f27dc1588e0ab718b79a2a7b63963cbe72db7d5dd6 ;;
-            intel)  f_hash=1cad03a594381dd7e6ea34b20a8342e0059cc0482d09e781ce0741661f8413c6 ;;
-            nvidia) f_hash=0c4c30b73a969522d06611883497feacb58c17ca5d9f5080b997f4d137251d9f ;;
+            amd)    f_hash=4aa81a275680ed57d631c87c67fd8cbdb096a103c0dc0bb64cd7d5e2c4dd9336 ;;
+            intel)  f_hash=d4c0eecbea561f3408276b2e89c3a432d10d92d605573924e34957bde05be84b ;;
+            nvidia) f_hash=f075dc684170cc270c4534d41927a24dcb7085b8d13ea7b5f2672a3965212cad ;;
             *) { echo "ERROR: unknown GPU set '${f_name}'" >&2; exit 1; } ;;
           esac
           f_file="${KCFGDIR}/gpu-${f_name}.cfg"
-          f_url="${DC_DATA_BASE}/kconfig/gpu/${f_name}.cfg"
+          f_url="${DC_DATA_BASE}/kconfig-shared/gpu/${f_name}.cfg"
           [[ -s "${f_file}" ]] || \
             curl -fsSL "${f_url}" \
               -o "${f_file}" \
