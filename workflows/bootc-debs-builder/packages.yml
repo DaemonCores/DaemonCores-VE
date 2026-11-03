@@ -51,7 +51,8 @@ packages:
   # (no pinned version). The repacked class carries dependency floors cut
   # against that index (libpve-storage-perl depends on libpve-common-perl
   # (>= 9.2.3), pve-manager since 9.2.25 on libpve-cluster-api-perl
-  # (>= 9.1.8)), while the Proxmox arm64 index lags the amd64 one for the
+  # (>= 9.1.8), which itself exact-depends libpve-cluster-perl (= 9.1.8)),
+  # while the Proxmox arm64 index lags the amd64 one for the
   # arch-independent packages both publish (measured 2026-11-02:
   # libpve-common-perl arm64 topped out at 9.2.2, amd64 at 9.2.5; measured
   # 2026-11-03: libpve-cluster-api-perl arm64 at 9.1.6, amd64 at 9.1.8 —
@@ -112,6 +113,10 @@ packages:
         env:
           UPSTREAM_PKG: libpve-cluster-api-perl
         upstream: libpve-cluster-api-perl
+      libpve-cluster-perl:
+        env:
+          UPSTREAM_PKG: libpve-cluster-perl
+        upstream: libpve-cluster-perl
 
   - name: overlay-tree
     variant-env: PKG
