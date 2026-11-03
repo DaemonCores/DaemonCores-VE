@@ -193,10 +193,11 @@ packages:
   # ===========================================================================
   # kernel-pve: the PVE packaging + the SHARED XanMod patch set, the
   # transverse-variant strategy (Gabriel, 30/10). ONE class entry, one
-  # variant per microarch level (KERNEL_ARCH_LEVEL: x64v1 / x64v2 / x64v3);
-  # the arm64 variant is CODED but PERMANENTLY DISABLED (`kernel-arm` flag,
-  # expand.jq keeps it only when the caller sets KERNEL_ARM=yes — there is no
-  # arm64 PVE lane today). The build block orchestrates the STANDARD kernel
+  # variant per microarch level (KERNEL_ARCH_LEVEL: x64v1 / x64v2 / x64v3 /
+  # x64v4, plus the arm64 flavours armv8.0 / armv8.2-lse / armv9-sve2);
+  # the arm64 variant is CODED but DISABLED unless KERNEL_ARM=yes
+  # (expand.jq keeps the kernel-arm variants only when the caller sets
+  # KERNEL_ARM=yes — there is no arm64 PVE lane today). The build block orchestrates the STANDARD kernel
   # helpers of DaemonCores-CI scripts/kernel_helpers.sh (kernel_pve_prepare,
   # kernel_apply_patches on the shared manifest, kernel_merge_config,
   # kernel_build_debs) — no logic is duplicated here.
@@ -239,9 +240,12 @@ packages:
       HELPERS_VER: 7
       # Bump when the build contract changes in a way `sources:` alone
       # cannot express (e.g. the lib's behaviour for the same tree).
-      # 4: data source moved to the engine export + rolling repo anchor +
-      # real-kernel series detection (owner arbitration 2026-11-03 12:55).
-      KERNEL_BUILD_VER: 4
+      # 5: THP arbitration revoked lane-side (owner 2026-11-03 13:05): the
+      # shared fragment's ALWAYS pin now wins on this lane too (full-LXC
+      # prime), the THP=never profile moves to the image-lane twins
+      # (karg + tmpfiles, Containerfile.thpnever-*); x64v4 + the arm64
+      # flavour variants are declared.
+      KERNEL_BUILD_VER: 5
       KERNEL_ARCH: x86_64
       KERNEL_OUT: /debs
     build: |
@@ -327,11 +331,15 @@ packages:
 
       # Shared kconfig fragments + GPU sets (single source: the engine export,
       # same checkout that carries the patch manifest) and the lane-local
-      # sur-rides of kernel-pve/kconfig/ (restored owner arbitration
-      # 2026-11-03 12:55: the PVE lane's own decisions — THP never — merged
-      # LAST so a sur-ride wins over the shared fragment's debian-lane pin).
+      # sur-rides of kernel-pve/kconfig/ (owner arbitration 2026-11-03
+      # 12:55, THP lane-side pin REVOKED by the 13:05 arbitration: the
+      # shared fragment's ALWAYS pin wins on this lane too — the full-LXC
+      # AI profile is the default here; THP=never travels with the
+      # image-lane twins, karg transparent_hugepage=never). An EMPTY lane
+      # tree is legitimate: a glob with no match just adds nothing.
       LANE_KCFG="${GITHUB_WORKSPACE:-$(pwd)}/workflows/bootc-debs-builder/kernel-pve/kconfig"
       FRAGS=()
+      shopt -s nullglob
       if [[ "${KERNEL_ARCH}" = "x86_64" ]]; then
         FRAGS+=("${KCFG_SHARED}/x86-common.cfg")
         [[ -s "${KCFG_SHARED}/${KERNEL_ARCH_LEVEL}.cfg" ]] && \
@@ -347,15 +355,22 @@ packages:
             FRAGS+=("${f_file}")
           done
         done
+        # Lane-local sur-rides (optional; the THP=never pin MOVED to the
+        # image twins per the 13:05 arbitration) — an empty tree adds nothing.
         for lane in "${LANE_KCFG}"/*.cfg; do
-          [[ -s "${lane}" ]] || { echo "ERROR: empty kernel-pve/kconfig sur-ride glob (${LANE_KCFG})" >&2; exit 1; }
           FRAGS+=("${lane}")
         done
       else
-        # arm64 lane: no x86 GPU/flavour fragments, no THP sur-ride; the
-        # engine export carries no arm64 fragment of its own.
+        # arm64 lane: no x86 GPU sets; the arm64 flavour + common fragments
+        # come from the same engine export as the x86 ones.
+        [[ -s "${KCFG_SHARED}/${KERNEL_ARCH_LEVEL}.cfg" ]] && \
+          FRAGS+=("${KCFG_SHARED}/${KERNEL_ARCH_LEVEL}.cfg")
         [[ -s "${LANE_KCFG}/arm64-common.cfg" ]] && FRAGS+=("${LANE_KCFG}/arm64-common.cfg")
+        for lane in "${LANE_KCFG}"/*.cfg; do
+          FRAGS+=("${lane}")
+        done
       fi
+      shopt -u nullglob
 
       if [[ "${KERNEL_ARCH}" = "x86_64" ]]; then
         # ONE flavour per variant (KERNEL_ARCH_LEVEL). KCFLAGS carries the
@@ -371,12 +386,13 @@ packages:
         KCFLAGS=$(kernel_flavour_kcflags "${KERNEL_ARCH_LEVEL}")
         kernel_build_debs "${SRCDIR}" bindeb-pkg "${KCFLAGS}"
       else
-        # arm64 (coded but disabled): ONE generic kernel, cross-compiled.
+        # arm64 (coded but disabled): ONE kernel per flavour, cross-compiled.
         [[ -z "${PVE_SEED_CONFIG}" ]] && make -C "${SRCDIR}" defconfig
         [[ -s "${LANE_KCFG}/arm64-common.cfg" ]] && \
           FRAGS+=("${LANE_KCFG}/arm64-common.cfg")
         kernel_merge_config "${SRCDIR}" "${FRAGS[@]}"
-        kernel_build_debs "${SRCDIR}" bindeb-pkg
+        KCFLAGS=$(kernel_flavour_kcflags "${KERNEL_ARCH_LEVEL}")
+        kernel_build_debs "${SRCDIR}" bindeb-pkg "${KCFLAGS}"
       fi
 
       # make deb-pkg/bindeb-pkg writes the debs one directory above the tree.
@@ -399,13 +415,31 @@ packages:
         when:
           arch: amd64
         deb-glob: "linux-*x64v3*"
-      arm64:
+      x64v4:
+        when:
+          arch: amd64
+        deb-glob: "linux-*x64v4*"
+      armv8.0:
         when:
           arch: arm64
           kernel-arm: true
         env:
           KERNEL_ARCH: arm64
-        deb-glob: "linux-*arm64*"
+        deb-glob: "linux-*armv8.0*"
+      armv8.2-lse:
+        when:
+          arch: arm64
+          kernel-arm: true
+        env:
+          KERNEL_ARCH: arm64
+        deb-glob: "linux-*armv8.2-lse*"
+      armv9-sve2:
+        when:
+          arch: arm64
+          kernel-arm: true
+        env:
+          KERNEL_ARCH: arm64
+        deb-glob: "linux-*armv9-sve2*"
   - name: source-build
     variant-env: PKG
     variant-source: "{variant}-src"
