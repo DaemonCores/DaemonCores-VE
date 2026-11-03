@@ -242,7 +242,7 @@ packages:
       # kconfig fragments live in debian-bootc. Both consumers pin the commit
       # and verify sha256 at build time — a moved file there fails this build,
       # it never silently applies a drifted copy.
-      DC_DATA_REF=f6bb734c3362d86b8830f9f5611420c5670c1ad9
+      DC_DATA_REF=f92c505c8e40e4a77e9d77ccc8ff0da129495fb7
       DC_DATA_BASE="https://raw.githubusercontent.com/DaemonCores/debian-bootc/${DC_DATA_REF}/workflows/bootc-debs-builder/kernel-pve"
 
       dc_data_fetch() {
