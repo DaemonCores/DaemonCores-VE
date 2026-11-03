@@ -343,3 +343,21 @@ tests:
     run: command -v pvect-ostree
     diag: |
       command -v pvect-ostree 2>&1 || echo absent; dpkg -l 2>&1 | grep -i pvect-ostree
+
+  # ── THP arbitration (owner, 2026-11-03 12:14 revised) ──────────────────
+  # The PVE lane is THP NEVER (hugepages belong to the GUEST via PVE
+  # memory: 2M/1G per VM/CT — host THP=always double-counts memory around
+  # guests that manage their own and breaks the balloon). The thin
+  # -thpalways twin ships /usr/share/dc-ve-thp-profile=always and its boot
+  # tmpfiles rule; this test asserts the live sysfs state against the
+  # profile marker, so BOTH images are proven by the same run:
+  #   default = [never], -thpalways = [always].
+  - name: THP state matches the image profile (default never / twin always)
+    run: |
+      state="$(cat /sys/kernel/mm/transparent_hugepage/enabled)"
+      profile="$(cat /usr/share/dc-ve-thp-profile 2>/dev/null || printf never)"
+      echo "$state" | grep -qE "\[${profile}\]"
+    diag: |
+      cat /sys/kernel/mm/transparent_hugepage/enabled 2>&1
+      cat /usr/share/dc-ve-thp-profile 2>&1
+      cat /proc/cmdline
