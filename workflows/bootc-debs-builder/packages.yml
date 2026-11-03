@@ -191,15 +191,15 @@ packages:
           PKG_VER: 1.0.0
 
   # ===========================================================================
-  # kernel-pve: the PVE packaging + XanMod patch set, the transverse-variant
-  # strategy (Gabriel, 30/10). ONE class entry, one variant per microarch
-  # level (KERNEL_ARCH_LEVEL: x64v1 / x64v2 / x64v3); the arm64 variant is
-  # CODED but PERMANENTLY DISABLED (`kernel-arm` flag, expand.jq keeps it
-  # only when the caller sets KERNEL_ARM=yes — there is no arm64 PVE lane
-  # today). The build block orchestrates the STANDARD kernel helpers of
-  # DaemonCores-CI scripts/kernel_helpers.sh (kernel_pve_prepare,
-  # kernel_apply_patches on the sha-pinned shared manifest,
-  # kernel_merge_config, kernel_build_debs) — no logic is duplicated here.
+  # kernel-pve: the PVE packaging + the SHARED XanMod patch set, the
+  # transverse-variant strategy (Gabriel, 30/10). ONE class entry, one
+  # variant per microarch level (KERNEL_ARCH_LEVEL: x64v1 / x64v2 / x64v3);
+  # the arm64 variant is CODED but PERMANENTLY DISABLED (`kernel-arm` flag,
+  # expand.jq keeps it only when the caller sets KERNEL_ARM=yes — there is no
+  # arm64 PVE lane today). The build block orchestrates the STANDARD kernel
+  # helpers of DaemonCores-CI scripts/kernel_helpers.sh (kernel_pve_prepare,
+  # kernel_apply_patches on the shared manifest, kernel_merge_config,
+  # kernel_build_debs) — no logic is duplicated here.
   #
   # PRODUCTION lane (not artifact-only): the debs land in /debs and go
   # through the standard builder — content-hash cache, /debs/.meta, publish
@@ -210,70 +210,58 @@ packages:
   # carries the kernel.org version. The bootc images take the deb from that
   # APT repo at image build (OCI image reference), the flavour being
   # selected per image; on the host the flavour is fixed at install and
-  # never switched on a bootc system (immutability). Waves: no deps — wave 0.
+  # never switched on a bootc system (immutability). Waves: no deps —
+  # wave 0.
   #
-  # Version resolution: KERNEL_VERSION is empty here; the build block reads
-  # it from the Proxmox repo (rolling anchor, no pinning). Guard: patches
-  # are the sha-pinned shared manifest (reference mode) and are DRY-RUN
-  # all-or-nothing before any touch of the tree (patch-guard pattern);
-  # GPU config sets (kconfig/gpu/{amd,intel,nvidia}.cfg) are NOT carried
-  # in this repo (single-source rule: debian-bootc owns the fragments)
-  # and are merged transversely by hash reference (see the build block):
-  # ONE kernel build per flavour, no vendor matrix.
+  # Version resolution: KERNEL_VERSION is resolved from the Proxmox repo
+  # itself (ROLLING anchor, owner arbitration 2026-11-03 12:55: newest
+  # proxmox-kernel-<ver>-pve of the repo, NO pin); '7.0.14'-style numbers are
+  # the PACKAGE versions. The patch series is resolved by the REAL kernel
+  # version detected at build (the packaged tree's Makefile, echoed in the
+  # build log) — the packaging number and the kernel series are two distinct
+  # things. Guard: patches are the shared manifest (file mode) and are
+  # DRY-RUN all-or-nothing before any touch of the tree (patch-guard
+  # pattern); the lane-local kconfig sur-rides live in
+  # kernel-pve/kconfig/ and the shared set + GPU fragments come from the
+  # engine (CI_KERNEL_SHARED) — SINGLE kernel build per flavour, no vendor
+  # matrix.
   - name: kernel-pve
     variant-env: KERNEL_ARCH_LEVEL
-    # PATCH PARITY reference mode (owner order, 2026-11-03): the patch set is
-    # NOT defined here (no mirrors, no copies) — the canonical
-    # kernel/patches-shared.yml lives in debian-bootc and is fetched at build
-    # time by PINNED COMMIT + sha256 (the same pattern the GPU kconfig
-    # fragments already follow, bef03ff). One list, two consumers: the
-    # debian linux-image build applies the same file in-repo; the pinned
-    # shas in this entry guard upstream drift. Never a copy in this repo.
+    # PATCH PARITY file mode (owner arbitration 2026-11-03 12:55): the patch
+    # set is NOT defined here (no mirrors, no copies, no remote distfetch) —
+    # the canonical patches-shared.yml lives in the build engine
+    # (DaemonCores-CI build-deb/kernel-shared) and arrives in this very build
+    # as CI_KERNEL_SHARED. One list, two consumers: the debian linux-image
+    # build applies the same export; the series is resolved by the REAL
+    # kernel version detected on the packaged tree. Never a copy in this
+    # repo.
     env:
       HELPERS_VER: 7
       # Bump when the build contract changes in a way `sources:` alone
       # cannot express (e.g. the lib's behaviour for the same tree).
-      KERNEL_BUILD_VER: 3
-      KERNEL_SERIES: "7.3"
+      # 4: data source moved to the engine export + rolling repo anchor +
+      # real-kernel series detection (owner arbitration 2026-11-03 12:55).
+      KERNEL_BUILD_VER: 4
       KERNEL_ARCH: x86_64
       KERNEL_OUT: /debs
     build: |
-      # Reference-mode data (owner order, 2026-11-03): the patch set AND the
-      # kconfig fragments live in debian-bootc. Both consumers pin the commit
-      # and verify sha256 at build time — a moved file there fails this build,
-      # it never silently applies a drifted copy.
-      DC_DATA_REF=7733e6f51a4c61171d171ae6eb6755e4b50c14f8
-      DC_DATA_BASE="https://raw.githubusercontent.com/DaemonCores/debian-bootc/${DC_DATA_REF}/workflows/bootc-debs-builder/kernel"
+      # Shared data (owner arbitration 2026-11-03 12:55): the patch set AND
+      # the kconfig fragments (incl. the GPU sets) come from the ENGINE
+      # checkout — build-deb.sh exports build-deb/kernel-shared as
+      # CI_KERNEL_SHARED next to CI_SCRIPTS. No raw.githubusercontent dist
+      # fetch of a sibling production repo, no commit pin, no per-file sha
+      # list: the export's content feeds the build content hash (the engine
+      # hashes the shared directory), so a set change rebuilds this exact way.
+      [[ -n "${CI_KERNEL_SHARED:-}" && -f "${CI_KERNEL_SHARED}/patches-shared.yml" ]] \
+        || { echo "ERROR: CI_KERNEL_SHARED (engine kernel-shared export) missing" >&2; exit 1; }
+      PATCHES_FILE="${CI_KERNEL_SHARED}/patches-shared.yml"
+      KCFG_SHARED="${CI_KERNEL_SHARED}/kconfig-shared"
 
-      dc_data_fetch() {
-        local f_sha="$1" f_rel="$2" f_file="$3"
-        [[ -s "${f_file}" ]] || \
-          curl -fsSL "${DC_DATA_BASE}/${f_rel}" -o "${f_file}" \
-          || { echo "ERROR: cannot fetch debian-bootc data '${f_rel}' (${DC_DATA_REF:0:7})" >&2; exit 1; }
-        [[ "$(sha256sum "${f_file}" | cut -d" " -f1)" == "${f_sha}" ]] \
-          || { echo "ERROR: debian-bootc data '${f_rel}' sha256 mismatch (pin ${DC_DATA_REF:0:7})" >&2; exit 1; }
-      }
-
-      # Canonical patch set (PATCH PARITY): the exact patches.yml file the
-      # debian linux-image build applies in-repo, consumed here by pinned
-      # commit + sha256. File mode of the standard helper (kernel_helpers.sh).
-      PATCHES_FILE=/tmp/kernel-shared-patches.yml
-      dc_data_fetch 9139bbe2009c939d08a396304ddb0b50113d1ec327a4b995a3f17ae0de327518 \
-        patches-shared.yml "${PATCHES_FILE}"
-
-      # Lane-local THP arbitration (owner, 2026-11-03 12:14 revised): THP
-      # NEVER on the hypervisor — the hugepage decision belongs to the GUEST
-      # (PVE memory: hugepages 2M/1G per VM/CT); host THP=always
-      # double-counts memory around guests that manage their own and breaks
-      # the balloon; the compute profile is tuned PER-GUEST, never on the
-      # host. Merged LAST so it overrides the shared fragment ALWAYS pin.
-      THP_NEVER=/tmp/pve-thp-never.cfg
-      printf '# Lane-local THP arbitration (owner 2026-11-03 12:14 revised): never on the hypervisor\n' \
-            'CONFIG_TRANSPARENT_HUGEPAGE=y\n' \
-            'CONFIG_TRANSPARENT_HUGEPAGE_ALWAYS=n\n' \
-            'CONFIG_TRANSPARENT_HUGEPAGE_MADVISE=n\n' > "${THP_NEVER}"
-
-      # Version resolved from the Proxmox repo itself (rolling anchor).
+      # Version resolved from the Proxmox repo itself (ROLLING anchor, no
+      # pin): the newest proxmox-kernel-<kernel>-pve package of the repo.
+      # No package-name pin and no version pin here; the number of the PVE
+      # packaging is NOT the kernel series — the series is re-detected on the
+      # real tree below.
       echo "deb [arch=amd64] http://download.proxmox.com/debian/pve trixie pve-no-subscription" \
         > /etc/apt/sources.list.d/pve.list
       echo "deb-src [arch=amd64] http://download.proxmox.com/debian/pve trixie pve-no-subscription" \
@@ -291,10 +279,12 @@ packages:
       cp /usr/share/keyrings/proxmox-archive-keyring.gpg \
         /etc/apt/trusted.gpg.d/proxmox-release-trixie.gpg
       apt-get update
-      KERNEL_VERSION=$(apt-cache policy proxmox-kernel-7.0 \
-        | awk '/Candidate:/ && !s {print $2; s=1}')
+      KERNEL_VERSION=$(apt-cache search --names-only \
+        '^proxmox-kernel-[0-9][0-9.]*-[0-9]+-pve$' \
+        | cut -d' - ' -f1 | sed 's/^proxmox-kernel-//' | sort -V | tail -1)
       test -n "${KERNEL_VERSION}" \
-        || { echo "ERROR: cannot resolve the PVE kernel version" >&2; exit 1; }
+        || { echo "ERROR: cannot resolve the PVE kernel version from the repo (rolling anchor)" >&2; exit 1; }
+      echo "kernel-pve: rolling PVE kernel package version resolved from the repo: ${KERNEL_VERSION}"
 
       apt-get install -y --no-install-recommends \
         build-essential dpkg-dev devscripts curl git yq patch \
@@ -309,71 +299,68 @@ packages:
 
       # Standard kernel helpers (DaemonCores-CI scripts/kernel_helpers.sh,
       # sourced implicitly by deb_helpers.sh): packaging fetch, kconfig merge,
-      # kconfig merge, make deb-pkg.
+      # make deb-pkg.
       mkdir -p /build && kernel_pve_prepare /build
-      # Patch mode: the fetched shared manifest (file mode of the standard
-      # helper — this entry defines NO native patch data anymore).
+
+      # REAL kernel series detection (owner arbitration 2026-11-03 12:55):
+      # the PVE packaging version resolved above is NOT the kernel series —
+      # read the packaged tree's Makefile (that is what the XanMod/CachyOS
+      # upstream series dirs serve) and resolve the patch series from it,
+      # echoed in the build log.
+      REAL_KVER=$(awk '/^VERSION *=/{v=$3} /^PATCHLEVEL *=/{p=$3} \
+        /^SUBLEVEL *=/{s=$3} END{print v"."p"."s}' "${SRCDIR}/Makefile")
+      [[ "${REAL_KVER}" == *.*.* ]] \
+        || { echo "ERROR: cannot read the real kernel version from ${SRCDIR}/Makefile" >&2; exit 1; }
+      echo "kernel-pve: REAL kernel series detected on the packaged tree: ${REAL_KVER}"
+
+      # Patch mode: the SHARED manifest of the engine export (file mode of
+      # the standard helper — this entry defines NO native patch data).
       # Debian arch of the patch stage, derived from the kernel arch dir.
       case "${KERNEL_ARCH}" in
         x86_64) DEB_ARCH=amd64 ;;
         *) DEB_ARCH="${KERNEL_ARCH}" ;;
       esac
       kernel_apply_patches "${PATCHES_FILE}" \
-        "${DEB_ARCH}" "${KERNEL_VERSION}" "${SRCDIR}"
+        "${DEB_ARCH}" "${REAL_KVER}" "${SRCDIR}"
 
       [[ -z "${PVE_SEED_CONFIG}" ]] || cp "${PVE_SEED_CONFIG}" "${SRCDIR}/.config"
 
-      # Shared kconfig fragments (reference mode): sha-pinned fetches, same
-      # commit pin as the patch set.
-      KCFGDIR=/tmp/pve-kconfig
-      mkdir -p "${KCFGDIR}"
-      dc_data_fetch 0171eb6a2a5b01339392dc749b0612b0108089160d877ccb40b8a8770507ef96 \
-        kconfig-shared/x86-common.cfg "${KCFGDIR}/x86-common.cfg"
-      dc_data_fetch b04d2a945a9e917f3b0b16504f5fbb9f0159a4b955b18bd18140a091ce4c792d \
-        kconfig-shared/x64v1.cfg "${KCFGDIR}/x64v1.cfg"
-      dc_data_fetch 088f8121e5f2b1e09318959ae34357893f5a3c2ae27b735aad802d53f5d3fb7f \
-        kconfig-shared/x64v2.cfg "${KCFGDIR}/x64v2.cfg"
-      dc_data_fetch a291ab6e111dbdd202e79a9f000473d67cd797e7856c9a703c74039b02780924 \
-        kconfig-shared/x64v3.cfg "${KCFGDIR}/x64v3.cfg"
-
-      # GPU config sets (transverse: ONE optimised build, every vendor): NOT
-      # carried in this repo — debian-bootc is the single source (same pinned
-      # commit as every other fragment). Merged ahead of the flavour
-      # fragments so a flavour delta wins last.
-      GPU_KCFG_REF="${DC_DATA_REF}"
-      for gs in ${KERNEL_GPU:-all}; do
-        if [[ "${gs}" == "all" ]]; then
-          gs_list="amd intel nvidia"
-        else
-          gs_list="${gs}"
-        fi
-        for f_name in ${gs_list}; do
-          case "${f_name}" in
-            amd)    f_hash=4aa81a275680ed57d631c87c67fd8cbdb096a103c0dc0bb64cd7d5e2c4dd9336 ;;
-            intel)  f_hash=d4c0eecbea561f3408276b2e89c3a432d10d92d605573924e34957bde05be84b ;;
-            nvidia) f_hash=f075dc684170cc270c4534d41927a24dcb7085b8d13ea7b5f2672a3965212cad ;;
-            *) { echo "ERROR: unknown GPU set '${f_name}'" >&2; exit 1; } ;;
-          esac
-          f_file="${KCFGDIR}/gpu-${f_name}.cfg"
-          f_url="${DC_DATA_BASE}/kconfig-shared/gpu/${f_name}.cfg"
-          [[ -s "${f_file}" ]] || \
-            curl -fsSL "${f_url}" \
-              -o "${f_file}" \
-            || { echo "ERROR: cannot fetch GPU kconfig fragment '${f_name}'" >&2; exit 1; }
-          echo "${f_hash}  ${f_file}" | sha256sum --check --status >/dev/null \
-            || { echo "ERROR: GPU kconfig '${f_name}' sha256 mismatch (debian-bootc ${GPU_KCFG_REF:0:7})" >&2; exit 1; }
-          FRAGS+=("${f_file}")
+      # Shared kconfig fragments + GPU sets (single source: the engine export,
+      # same checkout that carries the patch manifest) and the lane-local
+      # sur-rides of kernel-pve/kconfig/ (restored owner arbitration
+      # 2026-11-03 12:55: the PVE lane's own decisions — THP never — merged
+      # LAST so a sur-ride wins over the shared fragment's debian-lane pin).
+      LANE_KCFG="${GITHUB_WORKSPACE:-$(pwd)}/workflows/bootc-debs-builder/kernel-pve/kconfig"
+      FRAGS=()
+      if [[ "${KERNEL_ARCH}" = "x86_64" ]]; then
+        FRAGS+=("${KCFG_SHARED}/x86-common.cfg")
+        [[ -s "${KCFG_SHARED}/${KERNEL_ARCH_LEVEL}.cfg" ]] && \
+          FRAGS+=("${KCFG_SHARED}/${KERNEL_ARCH_LEVEL}.cfg")
+        # GPU config sets (transverse: ONE optimised build, every vendor),
+        # merged ahead of the flavour deltas and ahead of the lane sur-rides.
+        for gs in ${KERNEL_GPU:-all}; do
+          if [[ "${gs}" == "all" ]]; then gs_list="amd intel nvidia"; else gs_list="${gs}"; fi
+          for f_name in ${gs_list}; do
+            f_file="${KCFG_SHARED}/gpu/${f_name}.cfg"
+            [[ -s "${f_file}" ]] \
+              || { echo "ERROR: GPU kconfig fragment '${f_name}' missing from the engine export" >&2; exit 1; }
+            FRAGS+=("${f_file}")
+          done
         done
-      done
+        for lane in "${LANE_KCFG}"/*.cfg; do
+          [[ -s "${lane}" ]] || { echo "ERROR: empty kernel-pve/kconfig sur-ride glob (${LANE_KCFG})" >&2; exit 1; }
+          FRAGS+=("${lane}")
+        done
+      else
+        # arm64 lane: no x86 GPU/flavour fragments, no THP sur-ride; the
+        # engine export carries no arm64 fragment of its own.
+        [[ -s "${LANE_KCFG}/arm64-common.cfg" ]] && FRAGS+=("${LANE_KCFG}/arm64-common.cfg")
+      fi
 
       if [[ "${KERNEL_ARCH}" = "x86_64" ]]; then
         # ONE flavour per variant (KERNEL_ARCH_LEVEL). KCFLAGS carries the
-        # microarch (-march=x86-64-vN). The lane THP arbitration is merged
-        # last so NEVER always wins over the shared fragment's ALWAYS pin.
-        FRAGS+=("${KCFGDIR}/x86-common.cfg")
-        [[ -s "${KCFGDIR}/${KERNEL_ARCH_LEVEL}.cfg" ]] && \
-          FRAGS+=("${KCFGDIR}/${KERNEL_ARCH_LEVEL}.cfg")
-        FRAGS+=("${THP_NEVER}")
+        # microarch (-march=x86-64-vN). The lane sur-rides are merged last so
+        # NEVER always wins over the shared fragment's ALWAYS pin.
         kernel_merge_config "${SRCDIR}" "${FRAGS[@]}"
         # The pinned Ubuntu tree's objtool klp-checksum.c does not compile
         # (it calls static helpers of check.c) and objtool builds it whenever
@@ -386,8 +373,8 @@ packages:
       else
         # arm64 (coded but disabled): ONE generic kernel, cross-compiled.
         [[ -z "${PVE_SEED_CONFIG}" ]] && make -C "${SRCDIR}" defconfig
-        [[ -s "${KCFGDIR}/arm64-common.cfg" ]] && \
-          FRAGS+=("${KCFGDIR}/arm64-common.cfg")
+        [[ -s "${LANE_KCFG}/arm64-common.cfg" ]] && \
+          FRAGS+=("${LANE_KCFG}/arm64-common.cfg")
         kernel_merge_config "${SRCDIR}" "${FRAGS[@]}"
         kernel_build_debs "${SRCDIR}" bindeb-pkg
       fi
