@@ -287,7 +287,7 @@ packages:
       apt-get update
       KERNEL_VERSION=$(apt-cache search --names-only \
         '^proxmox-kernel-[0-9][0-9.]*-[0-9]+-pve$' \
-        | cut -d' - ' -f1 | sed 's/^proxmox-kernel-//' | sort -V | tail -1)
+        | awk '{print $1}' | sed 's/^proxmox-kernel-//' | sort -V | tail -1)
       test -n "${KERNEL_VERSION}" \
         || { echo "ERROR: cannot resolve the PVE kernel version from the repo (rolling anchor)" >&2; exit 1; }
       echo "kernel-pve: rolling PVE kernel package version resolved from the repo: ${KERNEL_VERSION}"
