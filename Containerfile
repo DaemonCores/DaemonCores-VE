@@ -2,17 +2,18 @@
 # Base image
 #####################################################################################
 # The shared CI (bootc-build.yml) builds Containerfile.base once per job as
-# localhost/debian-bootc-base and passes it as BASE_IMAGE; the base's FROM
-# (the published debian-bootc image) feeds the image content hash. See
-# docs/ci-catchup-plan.md ("image build contract").
-ARG BASE_IMAGE=localhost/debian-bootc-base
+# localhost/daemoncores-ve-base and passes it as BASE_IMAGE; the base's FROM
+# (the published proxmox-ve-bootc vanilla image) feeds the image content
+# hash. The fork layer only: every vanilla package, fix and kernel lane
+# lives in proxmox-ve-bootc.
+ARG BASE_IMAGE=localhost/daemoncores-ve-base
 FROM ${BASE_IMAGE}
 STOPSIGNAL SIGRTMIN+3
 
 # Environement Setup
 LABEL org.opencontainers.image.title="DaemonCores VE"
-LABEL org.opencontainers.image.description="DaemonCores VE — Debian 13 Trixie"
-LABEL org.opencontainers.image.base.name="ghcr.io/daemoncores/debian-bootc:latest"
+LABEL org.opencontainers.image.description="DaemonCores VE — the DaemonCores fork of Proxmox VE (vanilla proxmox-ve-bootc base + fork layer)"
+LABEL org.opencontainers.image.base.name="ghcr.io/daemoncores/proxmox-ve-bootc:latest"
 LABEL org.opencontainers.image.source="https://github.com/DaemonCores/DaemonCores-VE"
 LABEL org.opencontainers.image.licenses="LGPL-2.1"
 LABEL containers.bootc=1
@@ -41,7 +42,12 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Default shell: fail build on error. Honored with `--format docker` in CI.
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
-# Proxmox setup
+# Proxmox setup — the fork layer. The vanilla base image already carries the
+# Proxmox installation, the PVE sources/keyring, the host config
+# (hostname/hosts/motd, the drop-ins), openresolv + dnsmasq and the vanilla
+# APT repo; this layer only adds the fork APT repo and installs the fork
+# packages. pve-manager upgrades to the fork +dcve2 build (strictly newer
+# than the vanilla +bootc1 base).
 COPY ./src/pvepreinstall /
 RUN chmod +x /usr/sbin/policy-rc.d \
     && url="${BOOTC_APT_URL%/}" \
@@ -50,11 +56,6 @@ RUN chmod +x /usr/sbin/policy-rc.d \
         "${url}/gpg.key" \
     && printf '%s  /usr/share/keyrings/daemoncores-ve-keyring.gpg\n' "${BOOTC_GPG_SHA256}" \
         | sha256sum -c - \
-    && wget \
-        https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg \
-        -O /usr/share/keyrings/proxmox-archive-keyring.gpg \
-    && printf '%s  /usr/share/keyrings/proxmox-archive-keyring.gpg\n' "${PVE_GPG_SHA256}" \
-        | sha256sum -c - \
     && echo "postfix postfix/main_mailer_type string Local only" | debconf-set-selections \
     && echo "postfix postfix/mailname string proxmox.local" | debconf-set-selections \
     && echo "grub-pc grub-pc/install_devices_empty boolean true" | debconf-set-selections \
@@ -62,46 +63,28 @@ RUN chmod +x /usr/sbin/policy-rc.d \
     && { [ -z "${PRODUCT_NAME}" ] \
         || printf '%s' "${PRODUCT_NAME}" > /usr/lib/bootc/product-name; } \
     && apt update \
-    && apt full-upgrade -y \
     && apt update \
     && apt install -y \
-        proxmox-default-kernel \
-        proxmox-ve \
-        postfix \
-        open-iscsi \
-        chrony \
-        ksmtuned \
+        pve-manager \
         dc-zramctl \
-        dnsmasq \
         fanctl \
         powerctl \
         dc-firewall-seed \
         dc-config-zfs \
-        proxmox-firewall \
         pvect-ostree \
         compose2bootc \
         dc-gpu-lxc \
-    && apt remove -y \
-        linux-image-amd64 \
-        os-prober \
-        $(dpkg -l 'linux-image-[0-9]*' | awk '/^ii/{print $2}' | grep -v proxmox) \
-    2>/dev/null || true \
-    # Remove standard Debian kernels to keep only proxmox-default-kernel
-    # which includes ZFS and KVM modules, then prune stale module trees so
-    # only the active Proxmox kernel's modules remain on disk.
-    && KVER=$(ls -1v /usr/lib/modules | tail -1) \
-    && find /usr/lib/modules -mindepth 1 -maxdepth 1 ! -name "${KVER}" -exec rm -rf {} +
+        ifupdown2
 
 # Post install patch
-# COPY ships /etc/hostname (a baked default so pmxcfs can create the node dir
-# and pve-ssl.pem on the very first boot, before the first-boot wizard renames
-# the host), a matching bootstrap /etc/hosts entry, and the Proxmox drop-in
-# configs. The WAN interface + default bridges are (re)generated on boot by
-# ifupdown2-autoconf; /etc/hosts is refined to the real IP by domain-set.
+# COPY ships the fork overlay: the ddns bridge/domain/dhcp-range dnsmasq
+# layout, the /etc/issue.tpl rebrand template (rendered at boot by the
+# fork's ifupdown2 domain-set), and the fork systemd drop-ins. The
+# hostname/hosts(.tpl)/motd and the generic resolver chain arrive from the
+# vanilla base layers.
 COPY ./src/pvepostinstall /
-# NOTE: the WAN-interface autoconf and /etc/hosts FQDN pinning that used to live
-# in the standalone proxmox-firstboot.service / pve-domain-set.service now run as
-# networking.service drop-ins shipped by the ifupdown2 repack
+# NOTE: the WAN-interface autoconf and /etc/hosts FQDN pinning live in the
+# networking.service drop-ins shipped by the fork's ifupdown2 repack
 # (ExecStartPre=/usr/sbin/ifupdown2-autoconf, ExecStartPost=/usr/sbin/domain-set),
 # so no target.wants symlinks are needed for them here.
 RUN mkdir -p /etc/systemd/system/multi-user.target.wants \

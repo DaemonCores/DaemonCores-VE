@@ -15,7 +15,7 @@
 
 ---
 
-DaemonCores-VE builds Proxmox VE as a transactional bootc/OSTree operating-system image on top of [`debian-bootc`](https://github.com/DaemonCores/debian-bootc).
+DaemonCores-VE is the **DaemonCores fork of Proxmox VE**: it builds FROM the published vanilla [`proxmox-ve-bootc`](https://github.com/DaemonCores/proxmox-ve-bootc) image (`ghcr.io/daemoncores/proxmox-ve-bootc`) and adds ONLY the fork layer — the ddns bridge layout, the first-boot network autoconf, the host tooling below, and the thin `-thpalways` image twins (ruling R-804: ONE compiled kernel, the vanilla images boot `never`, the fork derives the `always` profile by flipping the karg alone). The generic PVE pages live in the vanilla wiki; this wiki keeps the fork pages.
 
 The project replaces an in-place host build with a versioned OCI image: packages and host policy are assembled in CI, the result is installed and boot-tested under QEMU, and successful images are published for atomic deployment and rollback.
 

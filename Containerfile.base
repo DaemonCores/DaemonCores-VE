@@ -1,35 +1,36 @@
 #####################################################################################
-# Shared base for the DaemonCores VE images
+# Shared base for the DaemonCores VE fork images
 #####################################################################################
 # The shared image pipeline (DaemonCores-CI/.github/workflows/bootc-build.yml)
-# builds this manifest once per build job as localhost/debian-bootc-base and
+# builds this manifest once per build job as localhost/daemoncores-ve-base and
 # passes it to every product Containerfile as BASE_IMAGE. It is never pushed.
 #
-# Unlike debian-bootc's Containerfile.base (which assembles a Debian root from
-# scratch), VE derives from the PUBLISHED debian-bootc base image: the bootc
-# toolchain, kernel, ostree migration and initramfs come from it, and the
-# product Containerfile only layers the Proxmox packages from the VE APT
-# repository.
+# The fork derives from the PUBLISHED vanilla proxmox-ve-bootc image (the
+# standard Proxmox packaging, the kernel lane and every fix live there): the
+# bootc toolchain, kernel, ostree migration, initramfs and the vanilla
+# package set come from it, and the product Containerfile only layers the
+# fork debs from the DaemonCores-VE APT repository.
 #
 # The FROM line feeds the image content hash (the base digest is part of the
-# identity), so a newer published base invalidates the cached image. The tag
-# is arch-suffixed on purpose: `latest` resolves to a single-amd64 manifest
-# (ghcr.io, measured 2026-11-03: latest == latest_amd64), so an arm64 base
-# build FROM :latest pulled amd64 content and died with "exec format error"
-# at the first RUN (run 41611788184). The builder passes ARCH per arch job;
-# the amd64 default keeps plain local builds working.
+# identity), so a newer published vanilla image invalidates the cached fork
+# image. The tag is arch-suffixed on purpose: `latest` resolves to a
+# single-amd64 manifest (ghcr.io, measured 2026-11-03: latest == latest_amd64),
+# so an arm64 base build FROM :latest pulled amd64 content and died with
+# "exec format error" at the first RUN (run 41611788184). The builder passes
+# ARCH per arch job; the amd64 default keeps plain local builds working.
 ARG ARCH=amd64
 # hadolint ignore=DL3007
-FROM ghcr.io/daemoncores/debian-bootc:latest_${ARCH}
-# Auto-derivation of the repository of THIS repo (template pattern,
-# Containerfile.base:33-52): the pipeline derives both values from the
-# APT_GPG_KEY secret on every run (full-pipeline.yml apt_key job, passed by
-# bootc-build.yml as env BOOTC_GPG_SHA256 / APT_URL -> build-arg
-# BOOTC_APT_URL). Empty args mean "repository not configured": plain local
-# builds of the base stay inert, and nothing is committed after a key
-# rotation. Only the keyring is provisioned here: the sources stanza is owned
-# by the product Containerfile (src/pvepreinstall ships daemoncores-ve.sources
-# with the matching Signed-By path), so the repository is never declared twice.
+FROM ghcr.io/daemoncores/proxmox-ve-bootc:latest_${ARCH}
+# Fork APT repository trust: the pipeline derives both values from the
+# APT_GPG_KEY secret of THIS repository on every run (full-pipeline.yml
+# apt_key job, passed by bootc-build.yml as env BOOTC_GPG_SHA256 / APT_URL ->
+# build-arg BOOTC_APT_URL). Empty args mean "repository not configured":
+# plain local builds of the base stay inert, and nothing is committed after
+# a key rotation. Only the fork keyring is provisioned here: the vanilla APT
+# trust already rides in the base image (proxmox-ve-bootc sources +
+# keyring), and the fork sources stanza is owned by the product Containerfile
+# (src/pvepreinstall ships daemoncores-ve.sources with the matching Signed-By
+# path), so the repository is never declared twice.
 ARG BOOTC_APT_URL=""
 ARG BOOTC_GPG_SHA256=""
 # hadolint ignore=DL4006

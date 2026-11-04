@@ -220,12 +220,17 @@ tests:
       grep -n -A2 defaultMachines /usr/share/pve-manager/js/pvemanagerlib.js 2>&1 | head -n 10
 
   # ── repacked package versions (+bootc) ─────────────────────────────────
-  - name: pve-manager repacked
+  # ── repacked package versions on the fork image ─────────────────────────
+  # pve-manager: the fork +dcve2 build (the vanilla +bootc1 fix repack comes
+  # from the proxmox-ve-bootc base). The other repacks (qemu-server,
+  # libtemplate-perl, chrony, openipmi, proxmox-kernel-helper) build in the
+  # vanilla repository only — their +bootc1 suffix is inherited, not rebuilt.
+  - name: pve-manager is the fork +dcve2 build
     run: dpkg-query -W -f='${Version}' pve-manager
-    expect: +bootc
+    expect: +dcve
     diag: |
       dpkg-query -W -f='${Version}\n' pve-manager 2>&1; apt-cache policy pve-manager 2>&1 | head -n 6
-  - name: qemu-server repacked
+  - name: qemu-server repacked (vanilla fix set)
     run: dpkg-query -W -f='${Version}' qemu-server
     expect: +bootc
     diag: |
@@ -344,18 +349,17 @@ tests:
     diag: |
       command -v pvect-ostree 2>&1 || echo absent; dpkg -l 2>&1 | grep -i pvect-ostree
 
-  # ── THP arbitration (owner, 2026-11-03 13:05 — supersedes 12:14/12:55) ──
-  # The DEFAULT image profile is THP ALWAYS (the kernel pin lives in the
-  # shared kconfig fragment; full-LXC prime). The thin -thpnever-<flavour>
-  # twins ship /usr/share/dc-ve-thp-profile=never, the bootc kargs.d karg
-  # (transparent_hugepage=never) and the boot tmpfiles `w!` rule; this test
-  # asserts the live sysfs state against the profile marker, so BOTH
-  # profiles are proven by the same run:
-  #   default = [always], -thpnever-<flavour> = [never].
-  - name: THP state matches the image profile (default always / twin never)
+  # ── THP profiles at the fork (ruling R-804, owner 03/11 02:5x) ──────────
+  # ONE compiled kernel, the image karg decides. The vanilla images boot
+  # NEVER (karg transparent_hugepage=never in their kargs.d) — the fork full
+  # image inherits it, the thin -thpalways-<flavour> twins (same kernel and
+  # debs, the karg file alone removed) restore the compiled ALWAYS default,
+  # and the /usr/share/dc-ve-thp-profile marker lets the boot test assert
+  # the live sysfs state (marker absent = never, marker `always` = always).
+  - name: THP state matches the image profile (full never / thpalways always)
     run: |
       state="$(cat /sys/kernel/mm/transparent_hugepage/enabled)"
-      profile="$(cat /usr/share/dc-ve-thp-profile 2>/dev/null || printf always)"
+      profile="$(cat /usr/share/dc-ve-thp-profile 2>/dev/null || printf never)"
       echo "$state" | grep -qE "\[${profile}\]"
     diag: |
       cat /sys/kernel/mm/transparent_hugepage/enabled 2>&1
