@@ -99,17 +99,6 @@ packages:
           PKG: dc-gpu-lxc
           PKG_VER: 1.0.0
 
-  - name: source-build
-    variant-env: PKG
-    variant-source: "{variant}-src"
-    env:
-      HELPERS_VER: 6
-    build: |
-      deb_source_build "${PKG}" "${UP_COMMIT}" "${SRC_VER}" "${PKG}-src" pve-cluster libpve-cluster-api-perl
-    deb-glob: "{variant}_*"
-    variants:
-      pve-cluster:
-        env:
-          PKG: pve-cluster
-          UP_COMMIT: 66c87e0e7587a247f879f6f59e3bb5f3dd008e1f
-          SRC_VER: 9.1.7.1+dcve1
+  # The pve-cluster fix build (source-build class) moved to the vanilla
+  # proxmox-ve-bootc repository — every fix belongs there; this fork consumes
+  # it through the base image. No deb is built twice.

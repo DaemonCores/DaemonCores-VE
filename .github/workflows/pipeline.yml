@@ -13,7 +13,7 @@ name: Full Pipeline
 #
 # concurrency cancels an in-progress run when a newer push arrives (triggers and
 # concurrency must live in the caller — GitHub evaluates them here, not in the
-# reusable workflow). `update_base` (rebuild the debian-bootc base) is a
+# reusable workflow). `update_base` (rebuild the upstream base: proxmox-ve-bootc) is a
 # manual-dispatch-only knob; a push never triggers it.
 
 on:
@@ -27,7 +27,7 @@ on:
   workflow_dispatch:
     inputs:
       update_base:
-        description: 'Rebuild debian-bootc base image first (triggers its pipeline and waits)'
+        description: 'Rebuild the upstream base image first (proxmox-ve-bootc; the trigger chain runs debian-bootc upstream of it)'
         type: boolean
         default: false
       rebuild_env:
@@ -64,6 +64,7 @@ jobs:
     uses: DaemonCores/DaemonCores-CI/.github/workflows/full-pipeline.yml@main
     with:
       enable_base: true
+      base_repo: DaemonCores/proxmox-ve-bootc
       update_base: ${{ inputs.update_base }}
       rebuild_env: ${{ inputs.rebuild_env }}
       run_debs: ${{ inputs.run_debs }}

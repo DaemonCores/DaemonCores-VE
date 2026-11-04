@@ -1,16 +1,21 @@
-# Thin `-thpalways` twin of the vanilla never image (ruling R-804).
+# Thin `-thpalways` twin of the fork main image (ruling R-804).
 #
-# The vanilla proxmox-ve-bootc images boot THP=never (the karg
-# transparent_hugepage=never rides in their kargs.d on the ONE compiled
-# kernel). This fork twin derives the ALWAYS profile from that exact image:
-# same kernel and debs, NO second kernel build, the karg file alone is
-# removed so the compiled ALWAYS default applies (the x86-64-v3 microarch flavour).
-ARG BASE_IMAGE=ghcr.io/daemoncores/proxmox-ve-bootc:latest_x64v3
+# The vanilla proxmox-ve-bootc images boot THP=never: the karg
+# transparent_hugepage=never sits in their kargs.d, on the ONE compiled
+# kernel (the shared fragment's ALWAYS pin). The fork full image inherits
+# it, so its profile is [never]. This twin derives the ALWAYS profile from
+# that exact image — same kernel and debs, NO second kernel build, ONE thin
+# layer: the vanilla karg file is removed so the compiled ALWAYS default
+# applies (the x86-64-v3 microarch flavour). The boot test reads the /usr/share/dc-ve-thp-profile marker
+# (full image never / twin always).
+ARG BASE_IMAGE=ghcr.io/daemoncores/daemoncores-ve:latest_${ARCH}
 FROM ${BASE_IMAGE}
 STOPSIGNAL SIGRTMIN+3
 
-LABEL org.opencontainers.image.title="Proxmox VE bootc (THP always, x64v3)"
-LABEL org.opencontainers.image.description="Thin ALWAYS twin of the proxmox-ve-bootc never image — same kernel and debs, the THP karg alone is flipped. Ships by the DaemonCores-VE fork (ruling R-804: both profiles available, no kernel rebuild)."
+LABEL org.opencontainers.image.title="DaemonCores VE (THP always, x64v3)"
+LABEL org.opencontainers.image.description="Thin ALWAYS twin of the fork image — same kernel and debs, the THP karg alone is flipped (ruling R-804: both profiles available, no kernel rebuild)."
+LABEL org.daemoncores.arches="amd64"
+LABEL org.daemoncores.twin="latest"
 LABEL org.daemoncores.flavour="x64v3"
 
 RUN rm -f /usr/lib/bootc/kargs.d/20-thp-never.toml     && mkdir -p /usr/share     && printf 'always\n' > /usr/share/dc-ve-thp-profile
