@@ -1,0 +1,51 @@
+#!/bin/bash
+# dc-gpu-nvidia-tune — host runtime knobs of the NVIDIA driver (IA guests).
+#
+# Applies, idempotently and only to the GPUs that support each knob, the settings
+# the IA profiles expect when LXC guests run CUDA on this host:
+#   persistence mode on  : nvidia-smi -pm 1
+#   power limit: factory max (nvidia-smi -pl, per GPU — a GPU that reports
+#                no max stays untouched)
+#   MPS control daemon   : nvidia-cuda-mps-control -d (guest CUDA clients
+#                share a context; an already-running daemon is left as-is)
+#
+# Never compiles, never installs anything: this is a host-side knob applier,
+# written by the dc-gpu-lxc deb and started by dc-gpu-nvidia-mps.service.
+# Root required.
+
+set -euo pipefail
+
+[[ $(id -u) -eq 0 ]] || { echo "dc-gpu-nvidia-tune: root required" >&2; exit 1; }
+command -v nvidia-smi >/dev/null 2>&1 \
+  || { echo "dc-gpu-nvidia-tune: nvidia-smi missing (no NVIDIA host lane?)" >&2; exit 3; }
+
+# Persistence mode first (the power-limit and MPS calls keep their settings
+# across driver reloads only with it on).
+if nvidia-smi -pm 1 >/dev/null 2>&1; then
+  echo "dc-gpu-nvidia-tune: persistence mode on"
+fi
+
+# Power limit: factory maximum, per GPU (the driver's power.max_limit; a GPU
+# reporting N/A — often a secondary adapter — keeps its default).
+nvidia-smi --query-gpu=index,power.max_limit \
+  --format=csv,noheader,nounits 2>/dev/null \
+  | while IFS= read -r line; do
+      gpu="${line%%,*}"
+      maxw="$(echo "${line#*,}" | cut -d. -f1)"
+      [[ "${maxw}" =~ ^[0-9]+$ ]] || continue
+      if nvidia-smi -i "${gpu}" -pl "${maxw}" >/dev/null 2>&1; then
+        echo "dc-gpu-nvidia-tune: GPU${gpu} power limit ${maxw}W (factory max)"
+      fi
+    done
+
+# The MPS control daemon: exactly one (a second start exits nonzero — the
+# socket directory /tmp/nvidia-mps already carried it).
+mkdir -p /tmp/nvidia-mps
+if ! pgrep -x nvidia-cuda-mps-server >/dev/null 2>&1 \
+   && ! pgrep -x nvidia-cuda-mps-control >/dev/null 2>&1; then
+  if nvidia-cuda-mps-control -d >/dev/null 2>&1; then
+    echo "dc-gpu-nvidia-tune: MPS control daemon started"
+  else
+    echo "WARN: dc-gpu-nvidia-tune: MPS daemon did not start (no GPU? knob skipped)" >&2
+  fi
+fi

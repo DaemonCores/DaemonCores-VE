@@ -97,7 +97,7 @@ packages:
       dc-gpu-lxc:
         env:
           PKG: dc-gpu-lxc
-          PKG_VER: 1.0.0
+          PKG_VER: 1.1.0
 
   # The pve-cluster fix build (source-build class) moved to the vanilla
   # proxmox-ve-bootc repository — every fix belongs there; this fork consumes

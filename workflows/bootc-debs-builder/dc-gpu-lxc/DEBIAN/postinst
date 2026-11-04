@@ -1,0 +1,8 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+  configure)
+    deb-systemd-helper enable dc-gpu-nvidia-mps.service
+    ;;
+esac

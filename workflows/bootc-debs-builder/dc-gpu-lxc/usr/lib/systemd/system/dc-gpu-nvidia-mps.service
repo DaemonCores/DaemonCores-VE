@@ -1,0 +1,14 @@
+[Unit]
+Description=dc-gpu-nvidia-tune — NVIDIA IA-guest runtime knobs (persistence, power limit, MPS)
+Documentation=https://github.com/DaemonCores/DaemonCores-VE
+# Only when an NVIDIA user-space lives on this host.
+ConditionPathExists=/usr/bin/nvidia-smi
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/dc-gpu-nvidia-tune
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
