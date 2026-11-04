@@ -40,6 +40,18 @@ nvidia-smi --query-gpu=index,power.max_limit \
 
 # The MPS control daemon: exactly one (a second start exits nonzero — the
 # socket directory /tmp/nvidia-mps already carried it).
+
+# PCIe ASPM policy (owner 04/11 sweep — cross-brand knob, gains measured on
+# Radeon dense decode ~+10% and applies to every GPU): force "performance"
+# so PCIe links never drop to L1 between dispatches. Idempotent write;
+# skips silently when the sysfs node is absent.
+if [[ -w /sys/module/pcie_aspm/parameters/policy ]]; then
+  CUR="$(cat /sys/module/pcie_aspm/parameters/policy 2>/dev/null || true)"
+  [[ "${CUR}" == "[performance]" ]] || echo performance \
+    > /sys/module/pcie_aspm/parameters/policy
+  echo "dc-gpu-nvidia-tune: pcie_aspm.policy=performance (${CUR:-unknown})"
+fi
+
 mkdir -p /tmp/nvidia-mps
 if ! pgrep -x nvidia-cuda-mps-server >/dev/null 2>&1 \
    && ! pgrep -x nvidia-cuda-mps-control >/dev/null 2>&1; then
