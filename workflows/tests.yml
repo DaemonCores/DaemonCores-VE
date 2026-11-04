@@ -88,6 +88,17 @@ tests:
       ls -la /var/lib/pve-cluster/ 2>&1
       journalctl -b -u pve-cluster --no-pager 2>&1 | tail -n 20
 
+  # ── domain-set templates shipped (first-boot crash guard) ──────────────
+  # domain-set renders /etc/hosts and /etc/issue from /etc/*.tpl under
+  # `set -euo pipefail`: a template missing from the ifupdown2 overlay crashes
+  # the boot before pmxcfs can resolve its node name.
+  - name: domain-set templates shipped (hosts, issue)
+    run: test -s /etc/hosts.tpl && test -s /etc/issue.tpl
+    diag: |
+      ls -la /etc/hosts.tpl /etc/issue.tpl /etc/hosts /etc/issue 2>&1
+      journalctl -b -u networking --no-pager 2>&1 | tail -n 25
+      journalctl -b --no-pager -g domain-set 2>&1 | tail -n 15
+
   # ── proxmox services ───────────────────────────────────────────────────
   - name: pveproxy active
     run: systemctl is-active pveproxy
