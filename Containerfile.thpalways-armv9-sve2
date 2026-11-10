@@ -18,4 +18,4 @@ LABEL org.daemoncores.arches="arm64"
 LABEL org.daemoncores.twin="latest"
 LABEL org.daemoncores.flavour="armv9-sve2"
 
-RUN rm -f /usr/lib/bootc/kargs.d/20-thp-never.toml     && mkdir -p /usr/share     && printf 'always\n' > /usr/share/dc-ve-thp-profile
+RUN rm -f /usr/lib/bootc/kargs.d/20-thp-never.toml     && printf 'kargs = [\n  "transparent_hugepage=always",\n]\n' > /usr/lib/bootc/kargs.d/20-thp-always.toml     && mkdir -p /usr/share     && printf 'always\n' > /usr/share/dc-ve-thp-profile
