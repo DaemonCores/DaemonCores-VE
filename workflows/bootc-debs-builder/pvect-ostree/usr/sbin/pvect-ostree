@@ -1375,10 +1375,13 @@ cmd_remount_all() {
   for f in "$REG_DIR"/*.env; do
     vmid=$(basename "$f" .env)
     if [[ -f "/etc/pve/lxc/$vmid.conf" ]]; then
-      if cmd_mount "$vmid"; then
+      # SUBSHELL: one broken stateroot (a CT whose deployment was pruned)
+      # must never abort the whole remount pass — it did, and every other
+      # container lost its rootfs view (2026-11-13: CT100 blocked 121-130).
+      if ( cmd_mount "$vmid" ); then
         info "remounted CT $vmid"
       else
-        warn "failed to remount CT $vmid"
+        warn "failed to remount CT $vmid (isolated)"
         rc=1
       fi
     fi
