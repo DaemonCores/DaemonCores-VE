@@ -289,6 +289,15 @@
 +            boxLabel: gettext('Start the guest when the node boots'),
 +        });
 +
++        me.netField = Ext.create('Ext.form.field.Text', {
++            fieldLabel: gettext('Network (net0)'),
++            name: 'net0',
++            value: me.net0,
++            emptyText: gettext(
++                'name=eth0,bridge=vmbr0,ip=10.0.0.5/24,gw=10.0.0.1 (pct syntax; empty = DHCP on vmbr0)',
++            ),
++        });
++
 +        me.items = [
 +            me.stackField,
 +            me.yamlField,
@@ -314,6 +323,7 @@
 +                defaults: { flex: 1, margin: '0 5 0 0' },
 +                items: [me.vmidField, me.nameField, me.onbootField],
 +            },
++            me.netField,
 +            me.archiveField,
 +        ];
 +
@@ -360,6 +370,9 @@
 +            params.name = me.nameField.getValue();
 +        }
 +        params.onboot = me.onbootField.getValue() ? 1 : 0;
++        if (me.netField.getValue()) {
++            params.net0 = me.netField.getValue();
++        }
 +        Proxmox.Utils.API2Request({
 +            method: 'POST',
 +            url: `/nodes/${me.node}/bootc`,

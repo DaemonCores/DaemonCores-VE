@@ -578,6 +578,18 @@ RUN rm -f /usr/lib/bootc/storage \
     && mkdir -p /usr/lib/bootc/storage /usr/lib/bootc/bound-images.d{(' \\\n' + bound_ln) if bound else ''}
 
 {RULE}
+# Container rootfs hygiene: the base OS image carries a kernel module tree,
+# the /initrd.img + /vmlinuz symlinks and the locale archive. Outside a booted
+# host those symlinks dangle (/usr/lib/modules/*/kernel/... targets that were
+# pruned from the image), and `ostree commit` walks the tree with fstatat —
+# it dies on the first dangling link ("fstatat(pretimeout_noop.ko.xz): No such
+# file or directory"). A container never loads modules and never boots a
+# kernel, so the tree goes before the lint stage.
+{RULE}
+RUN rm -rf /usr/lib/modules /lib/modules /usr/lib/locale \\
+    /initrd.img /initrd.img.old /vmlinuz /vmlinuz.old
+
+{RULE}
 # Lint (mirrors the CI smoke test)
 {RULE}
 RUN bootc container lint
@@ -997,6 +1009,8 @@ YML
   }
   check "${ctx}/Containerfile" "FROM ${DEFAULT_BASE}" "base image FROM"
   check "${ctx}/Containerfile" "bootc container lint" "bootc lint stage"
+  check "${ctx}/Containerfile" "rm -rf /usr/lib/modules" \
+    "container rootfs hygiene (dangling kernel/symlink tree pruned)"
   check "${ctx}/systemd/whoami.container" \
     "additionalimagestore=/usr/lib/bootc/storage" "additional image store"
   check "${ctx}/Containerfile" "bound-images.d" "bound images symlinks"

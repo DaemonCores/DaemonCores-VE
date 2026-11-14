@@ -108,6 +108,20 @@ __PACKAGE__->register_method({
                 description => "Container will be started during node boot.",
                 type => 'boolean', optional => 1, default => 0,
             },
+            # Network stanzas in pct syntax; the wrapper writes them into the
+            # guest conf as net0/net1/net2. Omitted = one DHCP veth on vmbr0.
+            net0 => {
+                description => "Network interface 0 (pct syntax: name=eth0,bridge=vmbr0,ip=10.0.0.5/24,gw=10.0.0.1).",
+                type => 'string', optional => 1, maxLength => 512,
+            },
+            net1 => {
+                description => "Network interface 1 (pct syntax).",
+                type => 'string', optional => 1, maxLength => 512,
+            },
+            net2 => {
+                description => "Network interface 2 (pct syntax).",
+                type => 'string', optional => 1, maxLength => 512,
+            },
         },
     },
     returns => { type => 'string' },
@@ -132,6 +146,10 @@ __PACKAGE__->register_method({
             if defined($param->{description});
         push @$cmd, '--onboot', $param->{onboot} ? 1 : 0
             if defined($param->{onboot});
+        for my $slot (0 .. 2) {
+            my $key = "net$slot";
+            push @$cmd, "--$key", $param->{$key} if defined($param->{$key});
+        }
 
         return $rpcenv->fork_worker(
             'bootccreate', $vmid, $authuser,

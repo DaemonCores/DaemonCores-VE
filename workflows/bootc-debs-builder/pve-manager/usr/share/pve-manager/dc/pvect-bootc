@@ -8,6 +8,7 @@
 #   cluster fs, status line carried round-trip).
 #
 #   pvect-bootc create  <vmid> <archive> [--name N] [--description D] [--onboot 0|1]
+#                       [--net0 'name=eth0,bridge=vmbr0,ip=CIDR,gw=G'] [--net1 ...] [--net2 ...]
 #   pvect-bootc publish  <compose.yml> [--name N]   # build + smoke + publish
 #   pvect-bootc templates                            # seed templates (TSV)
 #   pvect-bootc compose-read <stack>                 # recorded compose source
@@ -26,12 +27,26 @@ VOSTREE="pvect-ostree"
 
 ETC=$'/etc/pve'
 COMPOSE_DIR=/var/lib/pvect-ostree/compose
+# Unprivileged id-map of the guest runtime: the same pair pvect-ostree deploys
+# with (its CONF wins, the PVE default is the fallback).
+UID_BASE=$(awk -F= '$1 == "UID_BASE" {print $2; exit}' /etc/pvect-ostree/pvect-ostree.conf 2>/dev/null)
+UID_BASE=${UID_BASE:-100000}
+UID_RANGE=$(awk -F= '$1 == "UID_RANGE" {print $2; exit}' /etc/pvect-ostree/pvect-ostree.conf 2>/dev/null)
+UID_RANGE=${UID_RANGE:-65536}
 # PVE storage for the seed templates. Empty (default): the vztmpl-capable
 # storage that ALREADY holds templates wins (pveam listing), else the FIRST
 # active storage with 'content vztmpl' in /etc/pve/storage.cfg — never a
-# hard-coded storeid. An explicit value (env/edge cases) always wins.
-TEMPLATE_STORAGE=
+# hard-coded storeid. An explicit value (env/CONF) always wins, so the
+# variables are only defaulted, never reset.
+TEMPLATE_STORAGE=${TEMPLATE_STORAGE:-}
 STORAGE_CFG=${PVECT_STORAGE_CFG:-/etc/pve/storage.cfg}
+# PVE storage holding the guest rootfs volume (directory tree). Resolved like
+# pvect-ostree does — explicit env/CONF wins, else the first active storage
+# with 'content rootdir' — never the template's storeid by assumption.
+ROOTFS_STORAGE=${ROOTFS_STORAGE:-}
+if [[ -z $ROOTFS_STORAGE && -r /etc/pvect-ostree/pvect-ostree.conf ]]; then
+  ROOTFS_STORAGE=$(awk -F= '$1 == "ROOTFS_STORAGE" {print $2; exit}' /etc/pvect-ostree/pvect-ostree.conf 2>/dev/null)
+fi
 
 #######################################
 # Print the storage ids whose /etc/pve/storage.cfg stanza declares
@@ -104,6 +119,9 @@ resolve_default_storages() {
     fi
   done
   TEMPLATE_STORAGE=$(first_active_storage vztmpl) || TEMPLATE_STORAGE=
+  if [[ -z $ROOTFS_STORAGE ]]; then
+    ROOTFS_STORAGE=$(first_active_storage rootdir) || ROOTFS_STORAGE=
+  fi
 }
 
 info() { echo "$PROG: $*" >&2; }
@@ -205,6 +223,29 @@ read_stack_compose() {
   cat "$compose"
 }
 
+#######################################
+# Print the volume id a storeid accepts for a fresh subvol: dir-like storages
+# namespace their volumes under <vmid>/, btrfs-style ones do not. Resolved by
+# asking pvesm, never by assuming a layout.
+# Arguments:
+#   $1 - storeid; $2 - vmid; $3 - bare volume name
+# Outputs:
+#   The working volid on stdout; exit 1 when neither form resolves.
+#######################################
+resolve_volid() {
+  local store=$1 vmid=$2 name=$3 cand path
+  for cand in "$vmid/$name" "$name"; do
+    path=$(pvesm path "$store:$cand" 2>/dev/null) || continue
+    # pvesm path prints the would-be location even for a volume that does not
+    # exist yet: only an existing tree counts as resolved (otherwise no
+    # allocation would ever happen).
+    [[ -n $path && -e $path ]] || continue
+    echo "$store:$cand"
+    return 0
+  done
+  return 1
+}
+
 guest_exists() {
   [[ -f $(conf_path "$1") ]]
 }
@@ -224,6 +265,9 @@ create_guest() {
   local vmid=$1 archive=$2
   need_root
   guest_exists "$vmid" && die "guest $vmid already exists"
+  # pct semantics: one veth on the default bridge with DHCP unless the caller
+  # says otherwise (the value is written into the conf, editable afterwards).
+  [[ -n $NET0 || -n $NET1 || -n $NET2 ]] || NET0="name=eth0,bridge=vmbr0,ip=dhcp"
 
   local storeid stack file
   storeid=${archive%%:*}
@@ -235,15 +279,25 @@ create_guest() {
   [[ -n $file && -r $file ]] \
     || die "seed template $archive not found (resolved storage: ${TEMPLATE_STORAGE:-none})"
 
-  # allocate the rootdir volume like a normal dir-storage guest would
-  local volname subvol
+  # allocate the rootdir volume on the resolved rootfs storage (a directory
+  # tree; the composefs view is mounted onto it at start)
+  local volname volid subvol volstore
+  volstore=${ROOTFS_STORAGE:-$storeid}
+  [[ -n $volstore ]] || die "no storage with 'content rootdir' found (set ROOTFS_STORAGE)"
   volname="subvol-${vmid}-disk-0.subvol"
-  subvol=$(pvesm path "$storeid:$volname" 2>/dev/null)
-  if [[ ! -d ${subvol:-/nonexistent} ]]; then
-    pvesm alloc "$storeid" "$vmid" "$volname" 32212254720 >/dev/null \
-      || die "volume allocation failed on $storeid"
-    subvol=$(pvesm path "$storeid:$volname") || die "cannot resolve allocated volume"
-  fi
+  volid=$(resolve_volid "$volstore" "$vmid" "$volname") || {
+    # pin the subvol format — btrfs/dir storages default to raw, which pvesm
+    # then refuses for a 'subvol-*' name; storages without subvol quotas
+    # refuse a sized subvolume, so an unsized one (size 0) is the fallback.
+    if ! pvesm alloc "$volstore" "$vmid" "$volname" 32212254720 --format subvol >/dev/null 2>&1; then
+      pvesm alloc "$volstore" "$vmid" "$volname" 0 --format subvol >/dev/null \
+        || die "volume allocation failed on $volstore"
+      warn "rootfs volume allocated unsized on $volstore (no size quota)"
+    fi
+    volid=$(resolve_volid "$volstore" "$vmid" "$volname") \
+      || die "cannot resolve the allocated volume on $volstore"
+  }
+  subvol=$(pvesm path "$volid") || die "cannot resolve the allocated volume"
 
   # seed content (the payload is hidden/wiped at first activation by the
   # existing machinery)
@@ -254,77 +308,319 @@ create_guest() {
   local compose=""
   [[ -r $payload ]] && compose=$(grep -m1 '^COMPOSE=' "$payload" | cut -d= -f2-)
 
-  # register with the ostree machinery (stateroot ct<vmid>)
-  "$VOSTREE" adopt "$vmid" || die "pvect-ostree adopt failed"
+  # register with the ostree machinery (deployment into the volume's sysroot,
+  # writable layers under <volume>/pvect-ostree/layers, composefs view mounted)
+  "$VOSTREE" guest-adopt "$vmid" "$subvol" || die "pvect-ostree guest-adopt failed"
 
-  # open the guest conf on the cluster fs
-  local f
+  # open the guest conf on the cluster fs (the directory PVE::Bootc lists;
+  # pmxcfs has no guest-type scanner for it, so the API reads the directory)
+  local f confdir confdir_owner
+  confdir=$(dirname "$(conf_path "$vmid")")
+  mkdir -p "$confdir" || die "cannot create $confdir"
+  confdir_owner=$(stat -c '%u:%g' "$confdir")
   f=$(conf_path "$vmid")
   {
-    printf 'name: %s\n' "${NAME:-bootc-st$vmid}"
+    printf 'name: %s\n' "${NAME:-bootc-$vmid}"
     [[ -n $DESC ]] && printf 'description: %s\n' "$DESC"
     printf 'onboot: %s\n' "${ONBOOT:-0}"
     printf 'archive: %s\n' "$archive"
-    printf 'volname: %s\n' "$storeid:$volname"
+    printf 'stack: %s\n' "$stack"
+    printf 'volname: %s\n' "$volstore:$volname"
     printf 'compose: %s\n' "$compose"
     printf 'status: stopped\n'
+    # network stanzas, pct key names; hwaddr is pinned once here so the guest
+    # keeps its MAC across restarts
+    local idx key
+    for idx in 0 1 2; do
+      eval "key=\${NET$idx:-}"
+      [[ -n $key ]] || continue
+      [[ $key == *hwaddr=* ]] || key="$key,hwaddr=$(gen_hwaddr)"
+      printf 'net%s: %s\n' "$idx" "$key"
+    done
   } >"$f"
+  # pmxcfs creates files owned by the node's config owner; keep it explicit.
+  chown "$confdir_owner" "$f" 2>/dev/null || true
   [[ -f $f ]] || die "conf creation failed"
-  info "bootc guest $vmid created (template $stack); start with pvect-bootc start $vmid"
+  info "bootc guest $vmid created (stack $stack, template $stack.tar.gz)"
+}
+
+#######################################
+# Bootc guest runtime: the guest is a real LXC container (systemd as PID1),
+# started from a config generated here — no /etc/pve/lxc conf, so it stays a
+# `bootc` guest for PVE. The composefs view and the writable layers come from
+# pvect-ostree (guest-adopt/guest-mount), which is the validated deployment
+# machinery; this file owns the runtime around it.
+#######################################
+
+# Per-guest runtime state (generated LXC config + logs). Never host state that
+# matters: the config is regenerated on every start from the guest conf.
+GUEST_STATE=/var/lib/pvect-ostree/guests
+
+guest_dir() { echo "$GUEST_STATE/$1"; }
+lxc_name() { echo "bootc-$1"; }
+
+guest_rootfs() {
+  local vol
+  vol=$(conf_get "$1" volname)
+  vol=${vol%%,*}
+  [[ -n $vol ]] || die "guest $1 has no volume (volname key missing)"
+  pvesm path "$vol" 2>/dev/null
+}
+
+lxc_running() {
+  lxc-info -n "$(lxc_name "$1")" -sH 2>/dev/null | grep -q RUNNING
+}
+
+#######################################
+# Parse one pct-style network string (name=eth0,bridge=vmbr0,ip=...,gw=...)
+# into NET_* globals. Keys are the pct ones; unknown keys are ignored so a
+# value copied from a pct conf parses.
+# Arguments:
+#   $1 - the network string
+#######################################
+net_parse() {
+  NET_NAME=""; NET_BRIDGE=""; NET_IP=""; NET_GW=""; NET_HWADDR=""; NET_MTU=""
+  local kv
+  local IFS=','
+  for kv in $1; do
+    case ${kv%%=*} in
+      name) NET_NAME=${kv#*=} ;;
+      bridge) NET_BRIDGE=${kv#*=} ;;
+      ip) NET_IP=${kv#*=} ;;
+      gw) NET_GW=${kv#*=} ;;
+      gw6) NET_GW6=${kv#*=} ;;
+      hwaddr) NET_HWADDR=${kv#*=} ;;
+      mtu) NET_MTU=${kv#*=} ;;
+    esac
+  done
+  NET_NAME=${NET_NAME:-eth0}
+}
+
+#######################################
+# Print a stable PVE-style MAC address for a guest interface (BC:24:11 prefix,
+# randomised once and then kept in the guest conf).
+#######################################
+gen_hwaddr() {
+  printf 'BC:24:11:%02X:%02X:%02X' $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256))
+}
+
+#######################################
+# Prepare the LXC view of a bootc guest, host-side. LXC performs its mount
+# entries from inside the container's user namespace, and the composefs view is
+# owned by pvect-ostree's own namespace (idmap=): every bind/tmpfs entry then
+# fails with EACCES. Mounting them here, in the initial namespace, before
+# lxc-start leaves a rootfs LXC only has to use.
+# Arguments:
+#   $1 - vmid; $2 - view path; $3 - layer directory
+#######################################
+prepare_view() {
+  local vmid=$1 view=$2 layers=$3 dir
+  # volatile dirs of the read-only image
+  for dir in run tmp; do
+    if ! mountpoint -q "$view/$dir"; then
+      mount -t tmpfs -o rw,nosuid,nodev tmpfs "$view/$dir" \
+        || die "cannot mount tmpfs on $view/$dir for guest $vmid"
+    fi
+  done
+  # writable layers
+  for dir in etc var; do
+    if ! mountpoint -q "$view/$dir"; then
+      mount --bind "$layers/$dir" "$view/$dir" \
+        || die "cannot bind $layers/$dir into the view of guest $vmid"
+    fi
+  done
+  if [[ -d $layers/bootc && ! -d $view/usr/lib/bootc ]]; then
+    mkdir -p "$view/usr/lib/bootc" 2>/dev/null || true
+  fi
+  if [[ -d $layers/bootc ]] && ! mountpoint -q "$view/usr/lib/bootc"; then
+    mount --bind "$layers/bootc" "$view/usr/lib/bootc" 2>/dev/null \
+      || warn "bootc shadow not bindable for guest $vmid (nested image store absent)"
+  fi
+  # host-only apparmor parameter: mask it so apparmor.service skips itself
+  if [[ -e $view/sys/module/apparmor/parameters/enabled ]]; then
+    mount --bind /dev/null "$view/sys/module/apparmor/parameters/enabled" 2>/dev/null || true
+  fi
+  for dir in /dev/fuse /dev/net/tun; do
+    [[ -e $view$dir ]] || continue
+    mountpoint -q "$view$dir" || mount --bind "$dir" "$view$dir" 2>/dev/null || true
+  done
+  # stack data lives on the host at /var/lib/compose2bootc/<stack>: bind the
+  # stack's own directory in when it exists (quadlet volumes point there).
+  local stack
+  stack=$(conf_get "$vmid" stack)
+  if [[ -n $stack && -d /var/lib/compose2bootc/$stack ]]; then
+    mkdir -p "$view/var/lib/compose2bootc/$stack" 2>/dev/null || true
+    mountpoint -q "$view/var/lib/compose2bootc/$stack" \
+      || mount --bind "/var/lib/compose2bootc/$stack" "$view/var/lib/compose2bootc/$stack" \
+        || warn "stack data not bindable for guest $vmid"
+  fi
+}
+
+#######################################
+# Generate the LXC config of a bootc guest from its conf (rootfs view, the
+# writable layers as binds, and the net0/net1/net2 stanzas).
+# Arguments:
+#   $1 - vmid
+#######################################
+gen_lxc_conf() {
+  local vmid=$1 root base layers conf net idx
+  root=$(guest_rootfs "$vmid")
+  [[ -d $root ]] || die "guest $vmid rootfs volume is not resolved (volname in the conf)"
+  # pvect-ostree keeps the guest state (image, digest store, writable layers)
+  # in a sibling directory of the volume: the volume root is covered by the
+  # composefs mount.
+  base="$(dirname "$root")/bootc-$vmid"
+  layers="$base/layers"
+  # LXC cannot open the idmapped composefs mount directly (the mount belongs to
+  # pvect-ostree's user namespace); a plain bind mount of the view is opened by
+  # the initial namespace and works.
+  local view
+  view="$(guest_dir "$vmid")/rootfs"
+  mkdir -p "$(guest_dir "$vmid")" "$view"
+  if ! mountpoint -q "$view"; then
+    mount --bind "$root" "$view" || die "cannot bind-mount the composefs view for $vmid"
+  fi
+  prepare_view "$vmid" "$view" "$layers"
+  conf="$(guest_dir "$vmid")/lxc.conf"
+  {
+    echo "# generated by $PROG start $vmid -- regenerated on every start"
+    echo "lxc.include = /usr/share/lxc/config/common.conf"
+    echo "lxc.include = /usr/share/lxc/config/userns.conf"
+    echo "lxc.arch = amd64"
+    echo "lxc.uts.name = $(lxc_name "$vmid")"
+    echo "lxc.apparmor.profile = unconfined"
+    echo "lxc.mount.auto = proc:mixed sys:ro"
+    echo "lxc.idmap = u 0 $UID_BASE $UID_RANGE"
+    echo "lxc.idmap = g 0 $UID_BASE $UID_RANGE"
+    echo "lxc.tty.max = 2"
+    echo "lxc.rootfs.path = dir:$view"
+    # No lxc.mount.entry: every bind/tmpfs is set up host-side by prepare_view
+    # (LXC cannot mount onto the idmapped composefs view from its own userns).
+    for idx in 0 1 2; do
+      net=$(conf_get "$vmid" "net$idx")
+      [[ -n $net ]] || continue
+      net_parse "$net"
+      echo "lxc.net.$idx.type = veth"
+      echo "lxc.net.$idx.name = $NET_NAME"
+      [[ -n $NET_BRIDGE ]] && echo "lxc.net.$idx.link = $NET_BRIDGE"
+      echo "lxc.net.$idx.flags = up"
+      [[ -n $NET_HWADDR ]] && echo "lxc.net.$idx.hwaddr = $NET_HWADDR"
+      [[ -n $NET_MTU ]] && echo "lxc.net.$idx.mtu = $NET_MTU"
+      # static addressing is applied by LXC itself inside the container's
+      # network namespace (the pct ip=/gw= semantics); ip=dhcp leaves the
+      # interface up and lets the guest's own client obtain a lease.
+      if [[ -n $NET_IP && $NET_IP != dhcp ]]; then
+        echo "lxc.net.$idx.ipv4.address = $NET_IP"
+        [[ -n $NET_GW ]] && echo "lxc.net.$idx.ipv4.gateway = $NET_GW"
+      fi
+      [[ -n ${NET_GW6:-} ]] && echo "lxc.net.$idx.ipv6.gateway = $NET_GW6"
+    done
+  } >"$conf"
+  echo "$conf"
 }
 
 start_guest() {
-  local vmid=$1
+  local vmid=$1 root conf
   require_guest "$vmid"
-  is_mounted "$vmid" && die "guest $vmid already mounted"
-  "$VOSTREE" mount "$vmid" || die "rootfs mount failed for $vmid"
+  lxc_running "$vmid" && die "guest $vmid is already running"
+  command -v lxc-start >/dev/null 2>&1 || die "lxc-start not found (lxc-pve missing)"
+  root=$(guest_rootfs "$vmid")
+  [[ -n $root ]] || die "cannot resolve the rootfs volume of guest $vmid"
+
+  # composefs view + writable layers (pvect-ostree owns the deployment)
+  "$VOSTREE" guest-mount "$vmid" "$root" || die "rootfs mount failed for $vmid"
+
+  conf=$(gen_lxc_conf "$vmid") || die "LXC config generation failed for $vmid"
+  lxc-start -n "$(lxc_name "$vmid")" -f "$conf" \
+    --logfile "$(guest_dir "$vmid")/lxc.log" --logpriority INFO \
+    || die "lxc-start failed for $vmid (see $(guest_dir "$vmid")/lxc.log)"
+  if ! lxc-wait -n "$(lxc_name "$vmid")" -s RUNNING -t 60; then
+    warn "guest $vmid did not reach RUNNING within 60s"
+  fi
+  # systemd must be the real init, not a bare shell in a mounted view
+  local init
+  init=$(lxc-info -n "$(lxc_name "$vmid")" -p 2>/dev/null | awk '{print $NF}')
   conf_set "$vmid" status running
-  info "bootc guest $vmid started (composefs view mounted)"
+  info "bootc guest $vmid started (lxc $(lxc_name "$vmid"), init pid ${init:-?})"
 }
 
 stop_common() {
-  local vmid=$1
+  local vmid=$1 hard=${2:-1} root
   require_guest "$vmid"
-  if is_mounted "$vmid"; then
-    "$VOSTREE" umount "$vmid" || die "rootfs unmount failed for $vmid"
+  if lxc_running "$vmid"; then
+    if [[ $hard -eq 1 ]]; then
+      lxc-stop -n "$(lxc_name "$vmid")" -k --timeout 10 2>/dev/null \
+        || warn "lxc-stop -k failed for guest $vmid"
+    else
+      lxc-stop -n "$(lxc_name "$vmid")" --timeout 10 2>/dev/null \
+        || warn "lxc-stop failed for guest $vmid"
+    fi
+    lxc-wait -n "$(lxc_name "$vmid")" -s STOPPED -t 30 2>/dev/null || true
+  fi
+  root=$(guest_rootfs "$vmid" 2>/dev/null) || root=""
+  if [[ -n $root && -d $root ]]; then
+    if mountpoint -q "$root"; then
+      "$VOSTREE" guest-umount "$vmid" "$root" || warn "rootfs unmount failed for $vmid"
+    fi
   fi
   conf_set "$vmid" status stopped
 }
 
 shutdown_guest() {
-  local vmid=$1 timeout=${2:-30}
-  # v1: the seed payload serves out of the mounted view; a graceful stop is
-  # the same unmount (no in-guest init to signal yet - documented in the plan).
+  local vmid=$1 timeout=${SHUTDOWN_TIMEOUT:-30} start
+  require_guest "$vmid"
   start=$(date +%s)
-  stop_common "$vmid"
+  if lxc_running "$vmid"; then
+    # graceful: ask the guest's own systemd to power off, then wait
+    lxc-attach -n "$(lxc_name "$vmid")" -- systemctl poweroff 2>/dev/null \
+      || warn "could not signal systemd in guest $vmid; falling back to lxc-stop"
+    if ! lxc-wait -n "$(lxc_name "$vmid")" -s STOPPED -t "$timeout"; then
+      warn "guest $vmid still running after ${timeout}s; hard stop"
+    fi
+  fi
+  stop_common "$vmid" 1
   info "bootc guest $vmid shut down ($(($(date +%s) - start))s)"
 }
 
-stop_guest() { stop_common "$1"; info "bootc guest $1 stopped"; }
+stop_guest() { stop_common "$1" 1; info "bootc guest $1 stopped"; }
 
 destroy_guest() {
-  local vmid=$1
+  local vmid=$1 root volname
   require_guest "$vmid"
-  stop_common "$vmid" || true
-  local volname
+  stop_common "$vmid" 1 || true
+  root=$(guest_rootfs "$vmid" 2>/dev/null) || root=""
+  if [[ -n $root && -d $root ]]; then
+    "$VOSTREE" guest-destroy "$vmid" "$root" 2>/dev/null || true
+  fi
   volname=$(conf_get "$vmid" volname)
   if [[ -n $volname ]]; then
     pvesm free "$volname" 2>/dev/null \
       || warn "volume $volname not freed (delete it by hand if wanted)"
   fi
+  rm -rf "$(guest_dir "$vmid")"
   rm -f "$(conf_path "$vmid")"
-  "$VOSTREE" destroy "$vmid" 2>/dev/null || true
-  info "bootc guest $vmid destroyed (deployment retained for rollback)"
+  info "bootc guest $vmid destroyed (volume $volname freed)"
 }
 
 status_guest() {
-  local vmid=$1
+  local vmid=$1 status running init
   require_guest "$vmid"
-  local status running
   status=$(conf_get "$vmid" status); status=${status:-stopped}
-  is_mounted "$vmid" && running=running || running=stopped
+  if lxc_running "$vmid"; then
+    running=running
+    init=$(lxc-info -n "$(lxc_name "$vmid")" -p 2>/dev/null | awk '{print $NF}')
+  else
+    running=stopped
+  fi
   echo "status: $status"
-  echo "live-mount: $running"
+  echo "live-lxc: $running"
+  [[ -n ${init:-} ]] && echo "init-pid: $init"
+  local idx net
+  for idx in 0 1 2; do
+    net=$(conf_get "$vmid" "net$idx")
+    [[ -n $net ]] && echo "net$idx: $net"
+  done
+  return 0
 }
 
 refresh_guest() {
@@ -334,9 +630,9 @@ refresh_guest() {
   info "bootc guest $vmid refreshed (previous deployment kept for rollback)"
 }
 
-usage() { sed -n '9,18p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '10,20p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
-NAME=""; DESC=""; ONBOOT=""
+NAME=""; DESC=""; ONBOOT=""; NET0=""; NET1=""; NET2=""
 main() {
   local cmd=${1:-}; [[ -n $cmd ]] || usage 1
   [[ $cmd == -h || $cmd == --help || $cmd == help ]] && usage 0
@@ -371,12 +667,15 @@ main() {
       shift
       case "$cmd" in
     create)
-      shift; local archive=$1; shift || true
+      local archive=$1; shift || true
       while [[ $# -gt 0 ]]; do
         case "$1" in
           --name) NAME=$2; shift 2 ;;
           --description) DESC=$2; shift 2 ;;
           --onboot) ONBOOT=$2; shift 2 ;;
+          --net0) NET0=$2; shift 2 ;;
+          --net1) NET1=$2; shift 2 ;;
+          --net2) NET2=$2; shift 2 ;;
           *) die "unknown option: $1" ;;
         esac
       done

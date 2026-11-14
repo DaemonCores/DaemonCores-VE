@@ -22,6 +22,14 @@
 #   pvect-ostree refresh  <vmid>
 #   pvect-ostree adopt    <vmid>
 #
+#   Bootc guests (the `bootc` PVE guest type, no /etc/pve/lxc conf): the same
+#   deployment machinery driven by an explicit rootfs directory instead of a
+#   pct config. Writable layers live under <rootfs>/pvect-ostree/layers.
+#   pvect-ostree guest-adopt   <vmid> <rootfs-dir> [<image-ref>]
+#   pvect-ostree guest-mount   <vmid> <rootfs-dir>
+#   pvect-ostree guest-umount  <vmid> <rootfs-dir>
+#   pvect-ostree guest-destroy <vmid> <rootfs-dir>
+#
 # What it does:
 #   A bootc image is an OCI image carrying a whole OS. This tool deploys such
 #   an image as an ostree/composefs deployment, then presents that deployment
@@ -102,6 +110,11 @@ USERNS=/run/pvect-ostree/userns
 ALLOC_TEMPLATE_MATCH=alpine-.*amd64
 GUEST_MASK_UNITS=""
 COMPOSE_DIR=/var/lib/pvect-ostree/compose # recorded compose sources per stack
+# Stack-side home of the compose sources (the directory compose2bootc builds
+# in). `publish` drops <stack>.payload.env beside the source here as well, so a
+# stack and its build metadata are visible without knowing pvect-ostree's own
+# bookkeeping directory.
+STACKS_DIR=/var/lib/compose2bootc
 # Writable per-CT layer volumes (/etc, /var, /usr/lib/bootc) allocated on the
 # PVE storage API when a CT is created or migrated — never host binds.
 MP_ETC_SIZE=1   # GB (writable /etc volume)
@@ -534,6 +547,12 @@ EOF
 #######################################
 subvol_path() {
   local vmid=$1 base vol
+  # Bootc guests have no pct config: the caller passes the allocated rootfs
+  # directory explicitly (pvect-bootc resolves it from the guest conf).
+  if [[ -n ${PVECT_ROOTFS_DIR:-} ]]; then
+    echo "$PVECT_ROOTFS_DIR"
+    return 0
+  fi
   # The CT config records exactly which volume PVE allocated for the rootfs
   # (`pct create --rootfs <storeid>:0` may point anywhere).
   vol=$(pct config "$vmid" 2>/dev/null | awk '/^rootfs: /{print $2; exit}')
@@ -565,41 +584,64 @@ subvol_path() {
   echo "${dir:-/var/lib/vz}/images/$vmid/subvol-$vmid-disk-0.subvol"
 }
 
+# Host paths of the writable layers. In CT mode they are PVE mp volumes
+# resolved through pct; for a bootc guest (no pct config) the caller supplies
+# PVECT_LAYER_DIR and the layers are plain directories inside the rootfs
+# volume, beside the sysroot.
 #######################################
 # Print the writable per-CT /etc layer host path.
 #
 # Volume-backed CTs: the host path of the mp0 volume; legacy (pre-migration)
-# CTs: the registered host tree. Read-only helper; never a mount target.
+# CTs: the registered host tree. Bootc guests: the explicit layer directory.
+# Read-only helper; never a mount target.
 # Globals:
-#   STATE_DIR
+#   STATE_DIR, PVECT_LAYER_DIR
 # Arguments:
 #   $1 - vmid
 # Outputs:
 #   Layer host path on stdout.
 #######################################
-ct_etc() { mp_vol_path "$1" mp0 || echo "$STATE_DIR/$1/etc"; }
+ct_etc() {
+  if [[ -n ${PVECT_LAYER_DIR:-} ]]; then
+    echo "$PVECT_LAYER_DIR/etc"
+    return 0
+  fi
+  mp_vol_path "$1" mp0 || echo "$STATE_DIR/$1/etc"
+}
 
 #######################################
 # Print the writable per-CT /var layer host path (same resolution as ct_etc).
 # Globals:
-#   STATE_DIR
+#   STATE_DIR, PVECT_LAYER_DIR
 # Arguments:
 #   $1 - vmid
 # Outputs:
 #   Layer host path on stdout.
 #######################################
-ct_var() { mp_vol_path "$1" mp1 || echo "$STATE_DIR/$1/var"; }
+ct_var() {
+  if [[ -n ${PVECT_LAYER_DIR:-} ]]; then
+    echo "$PVECT_LAYER_DIR/var"
+    return 0
+  fi
+  mp_vol_path "$1" mp1 || echo "$STATE_DIR/$1/var"
+}
 
 #######################################
 # Print the writable per-CT /usr/lib/bootc shadow host path.
 # Globals:
-#   STATE_DIR
+#   STATE_DIR, PVECT_LAYER_DIR
 # Arguments:
 #   $1 - vmid
 # Outputs:
 #   Bootc shadow path on stdout.
 #######################################
-ct_bootc() { mp_vol_path "$1" mp2 || echo "$STATE_DIR/$1/bootc"; }
+ct_bootc() {
+  if [[ -n ${PVECT_LAYER_DIR:-} ]]; then
+    echo "$PVECT_LAYER_DIR/bootc"
+    return 0
+  fi
+  mp_vol_path "$1" mp2 || echo "$STATE_DIR/$1/bootc"
+}
 
 #######################################
 # Print the host path of a PVE mp volume allocated for a CT ('' if the mp is
@@ -716,7 +758,9 @@ stage_mp_dir() {
 #   $1 - staging descriptor returned by stage_mp_dir
 #######################################
 unstage_mp_dir() {
-  local stage=$1 dir=${stage%%|*} dev=${stage#*|}
+  local stage=${1:-} dir dev
+  dir=${stage%%|*}
+  dev=${stage#*|}
   mountpoint -q "$dir" && umount "$dir"
   [[ -n $dev ]] && losetup -d "$dev"
   [[ $dir == /var/tmp/pvect-mp-stage.* ]] && rmdir "$dir"
@@ -746,6 +790,12 @@ build_writable_layers() {
   local vmid=$1
   local u deploy
   local etc_stage var_stage etc_run var_run
+  # Bootc guests keep their writable layers as plain directories inside the
+  # rootfs volume; create them before staging (PVE mp volumes already exist).
+  if [[ -n ${PVECT_LAYER_DIR:-} ]]; then
+    mkdir -p "$PVECT_LAYER_DIR/etc" "$PVECT_LAYER_DIR/var" "$PVECT_LAYER_DIR/bootc" \
+      || die "cannot create the writable layer directories under $PVECT_LAYER_DIR"
+  fi
   # mp0/mp1 are PVE mp VOLUMES (raw files on a dir storage); stage them as
   # dirs for the seed (loop-mounted when not already mounted).
   etc_stage=$(stage_mp_dir "$(ct_etc "$vmid")")
@@ -754,9 +804,14 @@ build_writable_layers() {
   var_run=${var_stage%%|*}
   # The deployment tree (plain checkout inside the per-CT sysroot) carries the
   # seed /etc and the bootc shadow sources — readable host-side without the
-  # composefs mount.
+  # composefs mount. A bootc guest has no deployment: the caller passes the
+  # mounted composefs VIEW as PVECT_SEED_ROOT instead.
   # shellcheck disable=SC2153  # STATEROOT sourced from the registry entry.
-  deploy=$(deploy_path "$STATEROOT" "$(ct_sysroot "$vmid")")
+  if [[ -n ${PVECT_SEED_ROOT:-} ]]; then
+    deploy=$PVECT_SEED_ROOT
+  else
+    deploy=$(deploy_path "$STATEROOT" "$(ct_sysroot "$vmid")")
+  fi
 
   mkdir -p "$var_run"
   if [[ ! -d "$etc_run/systemd" ]]; then
@@ -946,7 +1001,12 @@ export_image_rootfs() {
     podman pull "$imgref" >/dev/null \
       || die "image $imgref not found locally and pull failed"
   fi
-  podman create --entrypoint /bin/true --name "$probe" "$imgref" >/dev/null \
+  # The host's podman build may carry no seccomp profile support (static
+  # /usr/share/containers/seccomp.json absent or seccomp disabled): `create`
+  # then dies on the default profile, so the throwaway export container runs
+  # unconfined — it only holds the image tree we are about to export.
+  podman create --entrypoint /bin/true --security-opt seccomp=unconfined \
+    --name "$probe" "$imgref" >/dev/null \
     || die "cannot create the export container for $imgref"
   mkdir -p "$dst"
   if ! podman export "$probe" | tar -x -C "$dst"; then
@@ -1085,7 +1145,10 @@ cmd_deploy() {
   reshape_tree "$tree"
 
   info "committing tree to the ostree repo (branch ostree/$stateroot)"
-  commit=$(ostree commit --repo="$sysroot/ostree/repo" \
+  # --disable-fsync: the sysroot repo lives on the PVE storage (ZFS-backed on
+  # this host) and is rebuildable by design — fsync-per-object turns a 2.4 GB
+  # image deploy into a multi-minute IO stall on a busy pool.
+  commit=$(ostree commit --repo="$sysroot/ostree/repo" --disable-fsync \
     --branch "ostree/$stateroot" --tree=dir="$tree" \
     --subject "bootc image deploy") \
     || die "ostree commit failed"
@@ -1612,6 +1675,12 @@ EOF
     || { rm -f "$stage"; die "template upload to $TEMPLATE_STORAGE:vztmpl failed"; }
   rm -f "$stage"
   cp "$tmp/pvect-ostree/payload.env" "$COMPOSE_DIR/$STACK/$STACK.payload.env"
+  # The same payload lands beside the compose source the stack is built from,
+  # so /var/lib/compose2bootc/<stack>/ carries the build metadata of its own
+  # stack (image ref, template, compose path) — the location the WebUI and the
+  # bootc wrapper read, independent of pvect-ostree's bookkeeping directory.
+  mkdir -p "$STACKS_DIR/$STACK"
+  cp "$tmp/pvect-ostree/payload.env" "$STACKS_DIR/$STACK/$STACK.payload.env"
   # Keep the relocation report beside the compose source when compose2bootc
   # wrote one.
   cp "/var/lib/compose2bootc/$STACK/context/RELOCATIONS.txt" \
@@ -1713,6 +1782,156 @@ cmd_adopt() {
   normalise_conf "$vmid"
   mount_rootfs "$vmid"
   info "CT $vmid adopted; start it from the Web UI or: pct start $vmid"
+}
+
+#######################################
+# Mount the composefs view of a bootc guest. Guests boot the exported image
+# tree directly (tree mode): <rootfs>/pvect-ostree/tree carries the rootfs and
+# its own .ostree.cfs + digest store, so no per-guest ostree repository and no
+# 63k-object commit stands between an image and a bootable guest.
+# Globals:
+#   USERNS, PVECT_LAYER_DIR
+# Arguments:
+#   $1 - vmid; $2 - rootfs directory
+#######################################
+mount_guest_tree() {
+  local vmid=$1 root=$2 base
+  base=$(guest_base "$root" "$vmid")
+  [[ -f $base/image.cfs ]] || die "no composefs image for guest $vmid ($base/image.cfs missing)"
+  [[ -d $base/cfs-store ]] \
+    || die "no digest store for guest $vmid ($base/cfs-store missing)"
+  pin_userns
+  if mountpoint -q "$root"; then
+    return 0
+  fi
+  # The volume may hold leftover content from a failed deploy; clear it so the
+  # composefs view is what the guest sees.
+  find "$root" -mindepth 1 -print0 | xargs -0 -r rm -rf -- 2>/dev/null || true
+  mount -t composefs "$base/image.cfs" \
+    -o "basedir=$base/cfs-store,idmap=$USERNS" "$root" \
+    || die "mount.composefs failed for guest $vmid"
+  # Seed the writable layers from the view itself (there is no deployment
+  # tree for a guest): /etc and the bootc shadow come out of the image.
+  PVECT_SEED_ROOT=$root build_writable_layers "$vmid"
+}
+
+#######################################
+# Build the guest's composefs image from an image reference: export the rootfs
+# into a scratch tree, generate image + digest store OUTSIDE that tree (with
+# --digest-store inside the source, mkcomposefs moves source files into the
+# store and then fails to read them back: "cannot fill store: No such file
+# or directory"), install both under <rootfs>/pvect-ostree.
+# Globals:
+#   PROG, UID_BASE
+# Arguments:
+#   $1 - vmid; $2 - rootfs directory; $3 - image reference
+#######################################
+guest_export_tree() {
+  local vmid=$1 root=$2 imgref=$3
+  local base work
+  base=$(guest_base "$root" "$vmid")
+  work=$(mktemp -d "$base/.export.XXXXXX") || die "cannot create the export workspace"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$work'" RETURN
+  info "exporting rootfs of $imgref (podman, flatten)"
+  export_image_rootfs "$imgref" "$work/rootfs"
+  reshape_tree "$work/rootfs"
+  info "generating the composefs image (mkcomposefs)"
+  mkdir -p "$work/store" || die "cannot create the composefs digest store"
+  mkcomposefs --digest-store="$work/store" \
+    "$work/rootfs" "$work/image.cfs" \
+    || die "mkcomposefs failed for $imgref"
+  rm -rf "$base/cfs-store"
+  mv "$work/store" "$base/cfs-store" || die "cannot install the digest store"
+  mv "$work/image.cfs" "$base/image.cfs" || die "cannot install the composefs image"
+  chown -R "$UID_BASE:$UID_BASE" "$base/cfs-store" 2>/dev/null || true
+}
+
+#######################################
+# State directory of a bootc guest: the guest volume ROOT is covered by the
+# composefs mount, so image, digest store and writable layers live in a
+# sibling directory of the volume (same storage, outside the mount):
+#   <storage>/images/<vmid>/bootc-<vmid>/
+# Arguments:
+#   $1 - rootfs directory; $2 - vmid
+# Outputs:
+#   State directory path on stdout.
+#######################################
+guest_base() {
+  echo "$(dirname "$1")/bootc-$2"
+}
+
+#######################################
+# Bootc-guest mode: the same composefs/writable-layer machinery driven by an
+# explicit rootfs directory instead of a pct config. Writable layers live
+# under <guest-base>/layers (etc, var, bootc), the image under
+# <guest-base>/image.cfs with its digest store.
+# Globals:
+#   PROG
+# Arguments:
+#   $1 - vmid; $2 - rootfs directory; $3 - image reference (default: payload)
+#######################################
+guest_env() {
+  local root=$1 vmid=$2
+  [[ -d $root ]] || die "guest rootfs directory missing: $root"
+  export PVECT_ROOTFS_DIR=$root
+  export PVECT_LAYER_DIR="$(guest_base "$root" "$vmid")/layers"
+}
+
+cmd_guest_adopt() {
+  local vmid=${1:?usage: $PROG guest-adopt <vmid> <rootfs-dir> [<imgref>]}
+  local root=${2:?usage: $PROG guest-adopt <vmid> <rootfs-dir> [<imgref>]}
+  local imgref=${3:-} compose=""
+  need_root
+  need_tools
+  need_podman
+  guest_env "$root" "$vmid"
+  if [[ -z $imgref ]]; then
+    local payload="$root/pvect-ostree/payload.env"
+    [[ -r $payload ]] || die "no seed payload for guest $vmid at $payload"
+    # shellcheck source=/dev/null
+    . "$payload"
+    imgref=${IMGREF:-$imgref}
+    compose=${COMPOSE:-}
+  fi
+  [[ -n $imgref ]] || die "no image reference for guest $vmid"
+  info "adopting bootc guest $vmid (image $imgref, rootfs $root)"
+  guest_export_tree "$vmid" "$root" "$imgref"
+  reg_write "$vmid" "" "$imgref" "${compose:-}"
+  mount_guest_tree "$vmid" "$root"
+  info "bootc guest $vmid adopted; start it with pvect-bootc start $vmid"
+}
+
+cmd_guest_mount() {
+  local vmid=${1:?usage: $PROG guest-mount <vmid> <rootfs-dir>}
+  local root=${2:?usage: $PROG guest-mount <vmid> <rootfs-dir>}
+  need_root
+  need_tools
+  guest_env "$root" "$vmid"
+  mount_guest_tree "$vmid" "$root"
+  info "rootfs mounted for bootc guest $vmid"
+}
+
+cmd_guest_umount() {
+  local vmid=${1:?usage: $PROG guest-umount <vmid> <rootfs-dir>}
+  local root=${2:?usage: $PROG guest-umount <vmid> <rootfs-dir>}
+  need_root
+  guest_env "$root" "$vmid"
+  umount_rootfs "$vmid"
+  info "rootfs unmounted for bootc guest $vmid"
+}
+
+cmd_guest_destroy() {
+  local vmid=${1:?usage: $PROG guest-destroy <vmid> <rootfs-dir>}
+  local root=${2:?usage: $PROG guest-destroy <vmid> <rootfs-dir>}
+  need_root
+  guest_env "$root" "$vmid"
+  umount_rootfs "$vmid"
+  rm -f "$(reg_file "$vmid")"
+  local base
+  base=$(guest_base "$root" "$vmid")
+  [[ -n $base ]] && rm -rf "${base:?}"
+  info "bootc guest $vmid deployment purged"
 }
 
 #######################################
@@ -1875,6 +2094,10 @@ main() {
     templates) cmd_templates "$@" ;;
     refresh) cmd_refresh "$@" ;;
     adopt) cmd_adopt "$@" ;;
+    guest-adopt) cmd_guest_adopt "$@" ;;
+    guest-mount) cmd_guest_mount "$@" ;;
+    guest-umount) cmd_guest_umount "$@" ;;
+    guest-destroy) cmd_guest_destroy "$@" ;;
     subvol-path) cmd_subvol_path "$@" ;;
     -h | --help | help) usage 0 ;;
     *) die "unknown command '$cmd' (try: $PROG --help)" ;;
