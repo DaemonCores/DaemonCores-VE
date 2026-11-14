@@ -1830,6 +1830,7 @@ guest_export_tree() {
   local vmid=$1 root=$2 imgref=$3
   local base work
   base=$(guest_base "$root" "$vmid")
+  mkdir -p "$base" || die "cannot create the guest state directory $base"
   work=$(mktemp -d "$base/.export.XXXXXX") || die "cannot create the export workspace"
   # shellcheck disable=SC2064
   trap "rm -rf '$work'" RETURN

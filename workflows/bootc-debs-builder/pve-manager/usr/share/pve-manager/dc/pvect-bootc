@@ -325,7 +325,7 @@ create_guest() {
     printf 'onboot: %s\n' "${ONBOOT:-0}"
     printf 'archive: %s\n' "$archive"
     printf 'stack: %s\n' "$stack"
-    printf 'volname: %s\n' "$volstore:$volname"
+    printf 'volname: %s\n' "$volid"
     printf 'compose: %s\n' "$compose"
     printf 'status: stopped\n'
     # network stanzas, pct key names; hwaddr is pinned once here so the guest
@@ -360,11 +360,18 @@ guest_dir() { echo "$GUEST_STATE/$1"; }
 lxc_name() { echo "bootc-$1"; }
 
 guest_rootfs() {
-  local vol
+  local vol path vmid=$1
   vol=$(conf_get "$1" volname)
   vol=${vol%%,*}
   [[ -n $vol ]] || die "guest $1 has no volume (volname key missing)"
-  pvesm path "$vol" 2>/dev/null
+  path=$(pvesm path "$vol" 2>/dev/null) || path=
+  if [[ -z $path ]]; then
+    # dir-like storages namespace their volumes under <vmid>/: retry that form
+    # when the conf carries the bare volume name.
+    path=$(pvesm path "${vol%%:*}:$vmid/${vol#*:}" 2>/dev/null) || path=
+  fi
+  [[ -n $path ]] || die "cannot resolve the volume of guest $vmid ($vol)"
+  echo "$path"
 }
 
 lxc_running() {
