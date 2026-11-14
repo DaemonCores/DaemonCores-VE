@@ -557,10 +557,26 @@ stop_common() {
     fi
     lxc-wait -n "$(lxc_name "$vmid")" -s STOPPED -t 30 2>/dev/null || true
   fi
+  # A container that did not actually stop still holds the mounts: tearing the
+  # rootfs down under it left a read-only composefs view behind and the volume
+  # free then failed on every path. Keep the mounts while it lives.
+  if lxc_running "$vmid"; then
+    warn "guest $vmid is still running; rootfs mounts kept"
+    return 1
+  fi
   root=$(guest_rootfs "$vmid" 2>/dev/null) || root=""
+  local view
+  view="$(guest_dir "$vmid")/rootfs"
+  if mountpoint -q "$view"; then
+    umount -R "$view" 2>/dev/null || umount -l -R "$view" 2>/dev/null \
+      || warn "could not release the guest view mounts of $vmid"
+  fi
   if [[ -n $root && -d $root ]]; then
     if mountpoint -q "$root"; then
       "$VOSTREE" guest-umount "$vmid" "$root" || warn "rootfs unmount failed for $vmid"
+    fi
+    if mountpoint -q "$root"; then
+      umount -l "$root" 2>/dev/null || warn "composefs view of $vmid still mounted"
     fi
   fi
   conf_set "$vmid" status stopped
@@ -588,6 +604,7 @@ destroy_guest() {
   local vmid=$1 root volname
   require_guest "$vmid"
   stop_common "$vmid" 1 || true
+  lxc_running "$vmid" && die "guest $vmid is still running; destroy aborted (volume kept)"
   root=$(guest_rootfs "$vmid" 2>/dev/null) || root=""
   if [[ -n $root && -d $root ]]; then
     "$VOSTREE" guest-destroy "$vmid" "$root" 2>/dev/null || true
